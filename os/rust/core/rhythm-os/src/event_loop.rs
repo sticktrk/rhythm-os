@@ -621,6 +621,12 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LightButtonIngressSource {
+    PhysicalButton,
+    Contact,
+}
+
 fn run_button_ingress_action(
     state: &SharedState,
     node_id: &str,
@@ -628,6 +634,7 @@ fn run_button_ingress_action(
     device_id: Option<&str>,
     command_id: &str,
     persist_after: bool,
+    source: LightButtonIngressSource,
 ) {
     if !commands::rhythm_automation_allowed_for_node(state, node_id) {
         tracing::info!(
@@ -642,7 +649,39 @@ fn run_button_ingress_action(
     }
     // Physical button ingress is fast lane: execute inline on the ingress
     // dispatch thread and never enqueue behind paced HTTP/system batches.
-    if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
+    let applied = if source == LightButtonIngressSource::Contact {
+        // Contacts are automatic input, even though they use On/Off planners.
+        // Recheck after waiting for scene commit, then hold the read lease
+        // through I/O so an in-flight contact cannot overwrite a newer scene.
+        let arbitration = {
+            let Ok(s) = state.lock() else { return };
+            s.motion_scene_transaction_lock.clone()
+        };
+        let Ok(_guard) = arbitration.read() else {
+            return;
+        };
+        let scene_held = {
+            let Ok(s) = state.lock() else { return };
+            if !s.light_breaker_enabled {
+                return;
+            }
+            let Some(runtime) = s.hub_runtime() else {
+                return;
+            };
+            commands::active_whole_home_scene_owner(&s, runtime.as_ref(), node_id).is_some()
+        };
+        if scene_held {
+            tracing::info!(target: "evt", event = "contact_node_control_suppressed",
+                command_id = %command_id, node_id = %node_id,
+                reason = "whole_home_scene", "Contact automation paused by whole-home scene");
+            false
+        } else {
+            process_button_inline(state, node_id, action, device_id, command_id)
+        }
+    } else {
+        process_button_inline(state, node_id, action, device_id, command_id)
+    };
+    if applied && persist_after {
         {
             let runtime = {
                 let Ok(s) = state.lock() else { return };
@@ -686,6 +725,7 @@ fn spawn_button_ingress_action(
     device_id: Option<String>,
     command_id: String,
     persist_after: bool,
+    source: LightButtonIngressSource,
 ) {
     let builder = std::thread::Builder::new().name("evt-button".to_string());
 
@@ -702,6 +742,7 @@ fn spawn_button_ingress_action(
             device_id_clone.as_deref(),
             &command_id_clone,
             persist_after,
+            source,
         );
     }) {
         warn!(
@@ -716,6 +757,7 @@ fn spawn_button_ingress_action(
             device_id.as_deref(),
             &command_id,
             persist_after,
+            source,
         );
     }
 }
@@ -1787,6 +1829,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     device_id.clone(),
                     command_id.clone(),
                     true,
+                    LightButtonIngressSource::PhysicalButton,
                 );
             }
         }
@@ -2216,6 +2259,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 Some(sensor_id.clone()),
                 command_id,
                 true,
+                LightButtonIngressSource::Contact,
             );
         }
 
@@ -7528,6 +7572,7 @@ mod tests {
             Some("button-a"),
             "button-ingress",
             true,
+            LightButtonIngressSource::PhysicalButton,
         );
 
         match rx.try_recv().expect("deferred persist should enqueue") {
@@ -7543,6 +7588,7 @@ mod tests {
             None,
             "button-ingress-no-persist",
             false,
+            LightButtonIngressSource::PhysicalButton,
         );
         assert!(
             rx.try_recv().is_err(),
@@ -8116,7 +8162,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_motion_callbacks_wait_for_home_scene_and_retire_without_dispatch() {
+    fn queued_sensor_callbacks_wait_for_home_scene_and_retire_without_dispatch() {
         let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
             room_snapshot_with_flags("room_a", false, false),
         ]));
@@ -8149,13 +8195,26 @@ mod tests {
         // These callbacks were admitted before the scene became visible, but
         // cannot pass the execution-time guard until its binding is committed.
         let mut callbacks = Vec::new();
-        for action in 0..4 {
+        for action in 0..6 {
             let callback_state = state.clone();
             callbacks.push(std::thread::spawn(move || match action {
                 0 => run_motion_turn_on_action(&callback_state, "room_a"),
                 1 => run_motion_dim_action(&callback_state, "room_a", 0.5),
                 2 => run_motion_dim_action(&callback_state, "room_a", 1.0),
-                _ => run_motion_timeout_restore(&callback_state, "room_a", None, "stale-timeout"),
+                3 => run_motion_timeout_restore(&callback_state, "room_a", None, "stale-timeout"),
+                _ => run_button_ingress_action(
+                    &callback_state,
+                    "room_a",
+                    if action == 4 {
+                        ButtonAction::OnPress
+                    } else {
+                        ButtonAction::OffPress
+                    },
+                    Some("door"),
+                    "stale-contact",
+                    false,
+                    LightButtonIngressSource::Contact,
+                ),
             }));
         }
         drop(scene_guard);
