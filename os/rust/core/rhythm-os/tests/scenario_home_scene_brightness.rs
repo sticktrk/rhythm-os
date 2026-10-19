@@ -1,12 +1,390 @@
 //! Party dimming preserves the scene through the HTTP queue, restart and restore.
 mod harness;
 
-use harness::{light, room, TestHarness};
+use harness::{light, motion_sensor, room, TestHarness};
 use rhythm_core::RoomModeState;
 use rhythm_os::{commands, event_loop, handlers, scenes, storage};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+fn assert_home_scene_ignores_motion(
+    source: &TestHarness,
+    spy: &rhythm_core::spy_controller::SpyLightController,
+) {
+    let kitchen = source.resolve("kitchen");
+    let before_on = spy.turn_on_count();
+    let before_off = spy.turn_off_count();
+    let mut motion = event_loop::MotionTimerState::new();
+    event_loop::handle_hub_event(
+        &source.state,
+        rhythm_os::hub::HubEvent::Motion {
+            hub_key: Some(source.hub_key.clone()),
+            room_id: "kitchen".into(),
+            sensor_id: "sensor-1".into(),
+            detected: true,
+        },
+        &mut motion,
+    );
+    assert!(
+        motion.sensors.is_empty(),
+        "home scenes must not admit motion"
+    );
+    assert!(motion.motion_owned.is_empty());
+    // A timer armed before scene selection must not dim or turn off the scene.
+    motion.sensors.insert(
+        "stale-sensor".into(),
+        event_loop::MotionSourceState {
+            source_node_id: "stale-sensor".into(),
+            target_node_id: kitchen.clone(),
+            stopped_at: Some(Instant::now() - Duration::from_secs(3600)),
+            stopped_at_epoch_ms: None,
+        },
+    );
+    motion.motion_owned.insert(kitchen.clone());
+    motion.warning_active.insert(kitchen.clone());
+    event_loop::check_motion_timers(&source.state, &mut motion);
+    assert!(motion.sensors.is_empty());
+    assert!(motion.motion_owned.is_empty());
+    assert!(motion.warning_active.is_empty());
+    source
+        .state
+        .lock()
+        .unwrap()
+        .pending_motion_seed
+        .push(rhythm_os::state::MotionSeedEntry {
+            source_node_id: "sensor-1".into(),
+            target_node_id: kitchen,
+            is_active: true,
+            stopped_at_epoch_ms: None,
+            motion_owned: Some(true),
+            warning_active: false,
+        });
+    event_loop::apply_pending_motion_seeds(&source.state, &mut motion, Instant::now());
+    assert!(
+        motion.sensors.is_empty(),
+        "restart seeds must not admit motion"
+    );
+    assert_eq!(spy.turn_on_count(), before_on);
+    assert_eq!(spy.turn_off_count(), before_off);
+}
+
+#[test]
+fn scene_brightness_preserves_explicitly_dark_lights() {
+    let (source, spy) = TestHarness::with_spy_controller();
+    let source = source.with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![light("lamp-1", "kitchen"), light("lamp-2", "kitchen")],
+    );
+    source.sync();
+    let dark_light = source
+        .state
+        .lock()
+        .unwrap()
+        .topology
+        .device_nodes()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    let mut scene = source.state.lock().unwrap().scenes["halloween"].clone();
+    scene.id = "party-with-dark-light".into();
+    let layer = scene.light.as_mut().unwrap();
+    let mut output = layer.palette[0].clone();
+    output.power = scenes::LightScenePower::Off;
+    layer.entries.push(scenes::LightSceneEntry {
+        target: scenes::LightSceneTargetRef::Node {
+            node_id: dark_light,
+        },
+        output,
+    });
+    commands::do_scene_upsert(&source.state, scene).unwrap();
+    commands::do_home_scene_apply(
+        &source.state,
+        "party-with-dark-light",
+        Default::default(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let initial = spy.turn_on_calls();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(spy.turn_off_count(), 1);
+    commands::do_set_node_curve_modifier(
+        &source.state,
+        &source.resolve("kitchen"),
+        commands::NodeCurveModifier::Brightness(20),
+        false,
+    )
+    .unwrap();
+    let changed = spy.turn_on_calls();
+    assert_eq!(changed.len(), 2, "dimming must not turn the dark light on");
+    assert_eq!(changed[1].0, initial[0].0);
+    assert_eq!(changed[1].1.rgb, initial[0].1.rgb);
+    assert_eq!(changed[1].1.brightness, 20);
+    assert_eq!(spy.turn_off_count(), 2);
+}
+
+#[test]
+fn mood_brightness_uses_the_current_profile_after_selecting_a_different_color() {
+    let (source, spy) = TestHarness::with_spy_controller();
+    let source = source.with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![light("lamp-1", "kitchen")],
+    );
+    source.sync();
+    let kitchen = source.resolve("kitchen");
+    for (profile_id, kelvin) in [
+        (rhythm_core::DAY_IDLE_PROFILE_ID, 2700),
+        (rhythm_core::SLEEP_IDLE_PROFILE_ID, 5000),
+    ] {
+        let mut profile = source.config_for(profile_id);
+        profile.min_color_temp = kelvin;
+        profile.max_color_temp = kelvin;
+        profile.curve = rhythm_core::LightCurveShape::Constant {
+            brightness: 1.0,
+            color_temp: 1.0,
+            direct_color: None,
+        };
+        source.set_config_for(profile_id, profile);
+        commands::do_node_preferences_set(
+            &source.state,
+            &kitchen,
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            Some(&commands::RoomProfileSettingsPatch {
+                mood_profile_id: Some(Some(profile_id.to_string())),
+                ..Default::default()
+            }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(spy.turn_on_calls().last().unwrap().1.kelvin, kelvin);
+        commands::do_set_node_curve_modifier(
+            &source.state,
+            &kitchen,
+            commands::NodeCurveModifier::Brightness(25),
+            false,
+        )
+        .unwrap();
+        let output = spy.turn_on_calls().last().unwrap().1.clone();
+        assert_eq!(output.brightness, 25);
+        assert_eq!(
+            output.kelvin, kelvin,
+            "brightness must retain the selected Mood color"
+        );
+    }
+}
+
+#[test]
+fn queued_scene_brightness_survives_disk_restart_without_a_backup() {
+    let directory = tempfile::tempdir().unwrap();
+    let disk = Arc::new(storage::FileStorage::new(directory.path().to_str().unwrap()).unwrap());
+    let (source, spy) = TestHarness::with_spy_controller();
+    source.state.lock().unwrap().storage = Some(disk.clone());
+    let source = source.with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![
+            light("lamp-1", "kitchen"),
+            light("lamp-2", "kitchen"),
+            motion_sensor("sensor-1", "kitchen"),
+        ],
+    );
+    source.sync();
+    let kitchen = source.resolve("kitchen");
+    commands::do_home_scene_apply(
+        &source.state,
+        "halloween",
+        scenes::HomeSceneApplyRequest::default(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let initial = spy.turn_on_calls();
+    let (tx, rx) = std::sync::mpsc::sync_channel(32);
+    source.state.lock().unwrap().work_tx = Some(tx);
+    for (brightness, persist) in [(35, true), (20, true), (60, false)] {
+        let response = handlers::handle_set_node_curve(
+            &source.state,
+            &json!({
+                "nodes": [{"node_id": kitchen, "brightness": brightness}],
+                "dispatch_spacing_ms": 0
+            }),
+            persist,
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        while let Ok(item) = rx.try_recv() {
+            event_loop::process_work_item(&source.state, item);
+        }
+    }
+    assert_eq!(spy.turn_on_calls().last().unwrap().1.brightness, 60);
+    let binding = source.snapshot(&kitchen).unwrap().profile_settings;
+    assert_home_scene_ignores_motion(&source, &spy);
+
+    // Read the same files an ordinary process restart reads. Exporting a
+    // backup here would hide definitions which were only updated in memory.
+    let (restored, restored_spy) = TestHarness::with_spy_controller();
+    restored.state.lock().unwrap().storage = Some(disk);
+    storage::load_persisted_state(&mut restored.state.lock().unwrap());
+    let scene_id = binding.mood_scene_id.as_ref().unwrap();
+    assert!(
+        restored.state.lock().unwrap().scenes.contains_key(scene_id),
+        "persisted room binding must have a persisted scene definition"
+    );
+    let restored = restored.with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![
+            light("lamp-1", "kitchen"),
+            light("lamp-2", "kitchen"),
+            motion_sensor("sensor-1", "kitchen"),
+        ],
+    );
+    restored.sync();
+    assert_eq!(
+        restored.snapshot(&kitchen).unwrap().profile_settings,
+        binding
+    );
+    restored_spy.reset();
+    commands::do_node_preferences_set(
+        &restored.state,
+        &kitchen,
+        None,
+        None,
+        None,
+        Some(RoomModeState::Mood),
+        None,
+        false,
+    )
+    .unwrap();
+    let resumed = restored_spy.turn_on_calls();
+    assert_eq!(resumed.len(), 2);
+    for (node, command) in resumed {
+        assert_eq!(command.brightness, 20);
+        assert_eq!(
+            command.rgb,
+            initial.iter().find(|(id, _)| id == &node).unwrap().1.rgb
+        );
+    }
+    assert_home_scene_ignores_motion(&restored, &restored_spy);
+    assert!(restored
+        .snapshot(&kitchen)
+        .unwrap()
+        .profile_settings
+        .motion_activation_enabled());
+    commands::do_node_action(&restored.state, &kitchen, "reset", false).unwrap();
+    let mut motion = event_loop::MotionTimerState::new();
+    event_loop::handle_hub_event(
+        &restored.state,
+        rhythm_os::hub::HubEvent::Motion {
+            hub_key: Some(restored.hub_key.clone()),
+            room_id: "kitchen".into(),
+            sensor_id: "sensor-1".into(),
+            detected: true,
+        },
+        &mut motion,
+    );
+    assert!(
+        !motion.sensors.is_empty(),
+        "normal configured motion resumes after Reset"
+    );
+}
+
+#[test]
+fn queued_mood_profile_brightness_persists_through_both_batch_routes() {
+    for curve_route in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let disk = Arc::new(storage::FileStorage::new(directory.path().to_str().unwrap()).unwrap());
+        let (source, _) = TestHarness::with_spy_controller();
+        source.state.lock().unwrap().storage = Some(disk.clone());
+        let source = source.with_discovery(
+            vec![room("kitchen", "Kitchen")],
+            vec![light("lamp-1", "kitchen")],
+        );
+        source.sync();
+        let kitchen = source.resolve("kitchen");
+        commands::do_node_preferences_set(
+            &source.state,
+            &kitchen,
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(source.snapshot(&kitchen).unwrap().mood_active);
+        let (tx, rx) = std::sync::mpsc::sync_channel(32);
+        source.state.lock().unwrap().work_tx = Some(tx);
+        for brightness in [35, 20] {
+            let body = json!({
+                "nodes": [{"node_id": kitchen, "brightness": brightness}],
+                "dispatch_spacing_ms": 0
+            });
+            let response = if curve_route {
+                handlers::handle_set_node_curve(&source.state, &body, true)
+            } else {
+                handlers::handle_set_node_brightness(&source.state, &body, true)
+            };
+            assert_eq!(response.status, 200, "{}", response.body);
+            while let Ok(item) = rx.try_recv() {
+                event_loop::process_work_item(&source.state, item);
+            }
+        }
+        let binding = source.snapshot(&kitchen).unwrap().profile_settings;
+        let (restored, restored_spy) = TestHarness::with_spy_controller();
+        restored.state.lock().unwrap().storage = Some(disk);
+        storage::load_persisted_state(&mut restored.state.lock().unwrap());
+        let profile_id = binding.mood_profile_id.as_ref().unwrap();
+        assert_eq!(
+            restored
+                .state
+                .lock()
+                .unwrap()
+                .light_profile_config(profile_id)
+                .unwrap()
+                .max_brightness,
+            20
+        );
+        let restored = restored.with_discovery(
+            vec![room("kitchen", "Kitchen")],
+            vec![light("lamp-1", "kitchen")],
+        );
+        restored.sync();
+        // The scenario harness creates a bare runtime; production lifecycle
+        // installs all loaded profile definitions when creating its runtime.
+        let (runtime, profiles) = {
+            let state = restored.state.lock().unwrap();
+            (
+                state.hub_runtime().unwrap(),
+                state.light_profile_configs.clone(),
+            )
+        };
+        for profile in profiles.into_values() {
+            runtime.set_light_profile_config(profile).unwrap();
+        }
+        assert_eq!(
+            restored.snapshot(&kitchen).unwrap().profile_settings,
+            binding
+        );
+        restored_spy.reset();
+        commands::do_node_preferences_set(
+            &restored.state,
+            &kitchen,
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            restored_spy.turn_on_calls().last().unwrap().1.brightness,
+            20
+        );
+    }
+}
 
 #[test]
 fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync() {

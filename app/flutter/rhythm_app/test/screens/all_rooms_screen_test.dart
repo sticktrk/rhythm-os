@@ -1171,6 +1171,14 @@ void main() {
     expect(
         harness.roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
     expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
+    final screenshotPath =
+        Platform.environment['RHYTHM_SCENE_BRIGHTNESS_SCREENSHOT'];
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(AllRoomsScreen),
+        matchesGoldenFile(Uri.file(screenshotPath)),
+      );
+    }
   });
 
   testWidgets('previous appliance excludes Mood and failed slider reverts',
@@ -1196,6 +1204,45 @@ void main() {
                 find.byKey(const ValueKey('global-room-brightness-slider')))
             .value,
         original);
+  });
+
+  testWidgets('native scene rooms are excluded with an actionable hint',
+      (tester) async {
+    final harness =
+        await _pumpAllRooms(tester, rooms: const [_room1, _bedroom]);
+    harness.connection.emitHello(RhythmHello.fromJson({
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': [RhythmFeature.sceneBrightness],
+        'hubs': []
+      },
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Living Room',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'state': 'mood',
+          'mood_active': true,
+          'rhythm_enabled': true,
+          'lights_on': true,
+          'brightness': 70,
+          'profile_settings': {'mood_scene_id': 'native-hue-evening'}
+        }
+      ]
+    }));
+    await tester.pump();
+    await openScenePanel(tester);
+    expect(find.text('To adjust brightness here, choose a Rhythm scene.'),
+        findsOneWidget);
+    expect(find.text('Reapply the scene to enable brightness adjustment.'),
+        findsNothing);
+    final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('global-room-brightness-slider')));
+    slider.onChangeEnd!(25);
+    await tester.pump();
+    expect(harness.api.brightnessBatches.single,
+        [(nodeId: 'bedroom', brightness: 25)]);
   });
 
   testWidgets('legacy whole-home bindings ask for a fresh scene apply',

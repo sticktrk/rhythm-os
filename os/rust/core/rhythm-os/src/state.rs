@@ -3,7 +3,7 @@
 //! Platform-agnostic `AppState` with `dyn Storage` instead of NVS.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use rhythm_core::{
@@ -191,6 +191,9 @@ pub enum WorkItem {
     RefreshObservedPowerAfterDispatchFailure,
     /// Deferred persist after inline button processing.
     DeferredPersist { node_id: String },
+    /// Save scene/profile definitions and then their room bindings after a
+    /// brightness batch, which can create or edit local Mood definitions.
+    DeferredPersistLightingSettings,
     /// Full state persist (registry + rooms) after batch HTTP operations.
     ///
     /// Unlike `DeferredPersist` (rooms-only), batch room updates modify the
@@ -218,6 +221,7 @@ impl WorkItem {
             WorkItem::PeriodicNodeTick { .. }
             | WorkItem::RefreshObservedPowerAfterDispatchFailure
             | WorkItem::DeferredPersist { .. }
+            | WorkItem::DeferredPersistLightingSettings
             | WorkItem::DeferredPersistState => None,
         }
     }
@@ -424,6 +428,9 @@ pub struct AppState {
     /// and committed runtime state. This lock remains held while the external
     /// topology lock is temporarily released for ordinary light dispatch.
     pub scene_lifecycle_transaction_lock: Arc<Mutex<()>>,
+    /// Outermost arbitration between whole-home scene commits/brightness and
+    /// motion dispatch. Acquire before node-command and scene-lifecycle gates.
+    pub motion_scene_transaction_lock: Arc<RwLock<()>>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
     /// Cause of the most recent active mode change.
@@ -1049,6 +1056,7 @@ impl Default for AppState {
             seeded_factory_scene_ids: factory_default_scene_ids(),
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
+            motion_scene_transaction_lock: Arc::new(RwLock::new(())),
             active_mode: factory_default_active_mode(),
             last_active_mode_cause: ModeChangeCause::Manual,
             last_active_mode_transition_id: None,

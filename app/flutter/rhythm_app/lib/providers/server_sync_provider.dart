@@ -1252,6 +1252,11 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.sceneBrightness) == true;
 
+  /// Provider scenes have no editable Rhythm definition. Recalling them again
+  /// cannot enable the stored-scene brightness contract.
+  bool sceneBrightnessUnsupported(String nodeId) =>
+      moodSceneIdForRoom(nodeId)?.startsWith('native-') == true;
+
   /// Old whole-home bindings cannot say whether colors were grouped or per
   /// light. A fresh apply on the supporting server establishes that authority.
   bool sceneBrightnessNeedsReapply(String nodeId) {
@@ -1638,7 +1643,12 @@ class ServerSyncProvider extends ChangeNotifier {
         _capabilities?.supportsFeature(RhythmFeature.sceneMotionSuppression) ==
             true;
     if (!supported) return false;
-    if (moodSceneIdForRoom(nodeId) == null) return false;
+    final settings = nodeById(nodeId)?.profileSettings;
+    final hasWholeHomeBinding = supportsSceneBrightness &&
+        !_optimisticMoodSceneIds.containsKey(nodeId) &&
+        settings?.moodSceneId != null &&
+        settings!.raw['mood_scene_palette_span'] != null;
+    if (moodSceneIdForRoom(nodeId) == null && !hasWholeHomeBinding) return false;
     return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
         nodeById(nodeId)?.moodActive == true;
   }

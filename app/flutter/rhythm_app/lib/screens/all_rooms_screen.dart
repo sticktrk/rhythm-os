@@ -974,6 +974,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               state == RoomModeState.mood &&
               !context
                   .read<ServerSyncProvider>()
+                  .sceneBrightnessUnsupported(room.id) &&
+              !context
+                  .read<ServerSyncProvider>()
                   .sceneBrightnessNeedsReapply(room.id)) ||
           state == RoomModeState.wake ||
           state == RoomModeState.warning ||
@@ -1501,6 +1504,17 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           sliderRow,
+          if (serverSync.supportsSceneBrightness &&
+              widget.rooms.any((room) =>
+                  context.read<RoomProvider>().getDisplayRoomState(room.id) ==
+                      RoomModeState.mood &&
+                  serverSync.sceneBrightnessUnsupported(room.id)))
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('To adjust brightness here, choose a Rhythm scene.',
+                  style: TextStyle(
+                      color: CelestialColors.textSecondary, fontSize: 12)),
+            ),
           if (serverSync.supportsSceneBrightness &&
               widget.rooms.any((room) =>
                   context.read<RoomProvider>().getDisplayRoomState(room.id) ==

@@ -824,28 +824,49 @@ fn spawn_input_binding_action(
     }
 }
 
-fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
-    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl FnOnce()) {
+    let Some(transaction) = state
+        .lock()
+        .ok()
+        .map(|s| s.motion_scene_transaction_lock.clone())
+    else {
+        return;
+    };
+    let Ok(_guard) = transaction.read() else { return };
+    let reason = if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        Some("external_room_authority")
+    } else {
+        motion_suppression_reason_for_target(state, node_id)
+    };
+    if let Some(reason) = reason {
         tracing::info!(
             target: "evt",
             event = "queued_motion_automation_suppressed",
             node_id = %node_id,
-            reason = "external_room_authority",
-            "Queued motion action retired after an authority handoff"
+            reason,
+            "Queued motion action retired after its target changed"
         );
         return;
     }
-    // Motion ingress is fast lane for occupancy responsiveness.
-    if !turn_on_node_inline(state, node_id) {
-        return;
-    }
-    let runtime = {
-        let Ok(s) = state.lock() else { return };
-        s.hub_runtime()
-    };
-    if let Some(runtime) = runtime {
-        crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
-    }
+    // Hold arbitration through I/O: a home scene must not commit between the
+    // eligibility check and a previously admitted motion command dispatch.
+    action();
+}
+
+fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    run_motion_action_if_allowed(state, node_id, || {
+        // Motion ingress is fast lane for occupancy responsiveness.
+        if !turn_on_node_inline(state, node_id) {
+            return;
+        }
+        let runtime = {
+            let Ok(s) = state.lock() else { return };
+            s.hub_runtime()
+        };
+        if let Some(runtime) = runtime {
+            crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+        }
+    });
 }
 
 fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
@@ -866,15 +887,19 @@ fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
     }
 }
 
+fn run_motion_dim_action(state: &SharedState, node_id: &str, factor: f32) {
+    run_motion_action_if_allowed(state, node_id, || {
+        dim_node_inline(state, node_id, factor);
+    });
+}
+
 fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     let builder = std::thread::Builder::new().name("evt-motion-dim".to_string());
     let state_clone = state.clone();
     let node_id_clone = node_id.clone();
 
     if let Err(error) = builder.spawn(move || {
-        if commands::rhythm_automation_allowed_for_node(&state_clone, &node_id_clone) {
-            dim_node_inline(&state_clone, &node_id_clone, factor);
-        }
+        run_motion_dim_action(&state_clone, &node_id_clone, factor);
     }) {
         warn!(
             target: "evt",
@@ -2603,6 +2628,17 @@ fn run_motion_timeout_restore(
     mode_default: Option<rhythm_core::RoomModeState>,
     command_id: &str,
 ) {
+    run_motion_action_if_allowed(state, target_node_id, || {
+        run_motion_timeout_restore_inner(state, target_node_id, mode_default, command_id);
+    });
+}
+
+fn run_motion_timeout_restore_inner(
+    state: &SharedState,
+    target_node_id: &str,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: &str,
+) {
     let restored = if let Some(mode_default) = mode_default {
         match commands::do_node_preferences_set(
             state,
@@ -3411,7 +3447,7 @@ fn motion_suppression_reason_for_target(
         .lock()
         .ok()
         .and_then(|s| s.hub_runtime())
-        .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
+        .and_then(|runtime| runtime.engine_effective_node_snapshot(target_node_id))
         .and_then(|snapshot| {
             if !snapshot.profile_settings.motion_activation_enabled() {
                 return Some("motion_activation_disabled");
@@ -3421,7 +3457,10 @@ fn motion_suppression_reason_for_target(
                     .profile_settings
                     .mood_scene_id
                     .as_deref()
-                    .is_some_and(|scene_id| !is_generated_mood_scene_id(scene_id))
+                    .is_some_and(|scene_id| {
+                        !is_generated_mood_scene_id(scene_id)
+                            || snapshot.profile_settings.mood_scene_palette_span.is_some()
+                    })
             {
                 return Some("active_scene");
             }
@@ -4148,6 +4187,9 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
 
         WorkItem::DeferredPersist { node_id: _ } => {
             commands::persist_rooms(state);
+        }
+        WorkItem::DeferredPersistLightingSettings => {
+            commands::persist_lighting_settings(state);
         }
         WorkItem::DeferredPersistState => {
             commands::persist_state(state);
@@ -7909,6 +7951,159 @@ mod tests {
             assert!(motion.motion_owned.contains("room_a"));
             assert_eq!(turn_on_calls.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn queued_motion_callbacks_wait_for_home_scene_and_retire_without_dispatch() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (scene_gate, arbitration) = {
+            let s = state.lock().unwrap();
+            (
+                s.scene_lifecycle_transaction_lock.clone(),
+                s.motion_scene_transaction_lock.clone(),
+            )
+        };
+        let scene_guard = scene_gate.lock().unwrap();
+        let apply_state = state.clone();
+        let home_apply = std::thread::spawn(move || {
+            commands::do_home_scene_apply(
+                &apply_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while arbitration.try_write().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "home apply did not acquire motion arbitration"
+            );
+            std::thread::yield_now();
+        }
+        // These callbacks were admitted before the scene became visible, but
+        // cannot pass the execution-time guard until its binding is committed.
+        let mut callbacks = Vec::new();
+        for action in 0..4 {
+            let callback_state = state.clone();
+            callbacks.push(std::thread::spawn(move || match action {
+                0 => run_motion_turn_on_action(&callback_state, "room_a"),
+                1 => run_motion_dim_action(&callback_state, "room_a", 0.5),
+                2 => run_motion_dim_action(&callback_state, "room_a", 1.0),
+                _ => run_motion_timeout_restore(&callback_state, "room_a", None, "stale-timeout"),
+            }));
+        }
+        drop(scene_guard);
+        home_apply.join().unwrap().unwrap();
+        for callback in callbacks {
+            callback.join().unwrap();
+        }
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
+        assert!(runtime.turn_on_calls.lock().unwrap().is_empty());
+        assert!(runtime.dim_calls.lock().unwrap().is_empty());
+        assert!(runtime.events.lock().unwrap().is_empty());
+        assert!(runtime.lights_off_calls.lock().unwrap().is_empty());
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn home_scene_waits_for_an_in_flight_motion_dispatch_to_finish() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let motion_state = state.clone();
+        let motion = std::thread::spawn(move || {
+            run_motion_action_if_allowed(&motion_state, "room_a", || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(turn_on_node_inline(&motion_state, "room_a"));
+            });
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let apply_state = state.clone();
+        let home_apply = std::thread::spawn(move || {
+            let result = commands::do_home_scene_apply(
+                &apply_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            );
+            completed_tx.send(()).unwrap();
+            result
+        });
+        assert!(completed_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        release_tx.send(()).unwrap();
+        motion.join().unwrap();
+        home_apply.join().unwrap().unwrap();
+        assert_eq!(runtime.turn_on_calls.lock().unwrap().len(), 1);
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn slow_motion_dispatch_does_not_block_an_unrelated_room() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+            room_snapshot_with_flags("room_b", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow_state = state.clone();
+        let slow = std::thread::spawn(move || {
+            run_motion_action_if_allowed(&slow_state, "room_a", || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(turn_on_node_inline(&slow_state, "room_a"));
+            });
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let sibling_state = state.clone();
+        let sibling = std::thread::spawn(move || {
+            run_motion_turn_on_action(&sibling_state, "room_b");
+            completed_tx.send(()).unwrap();
+        });
+        let sibling_completed = completed_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release_tx.send(()).unwrap();
+        slow.join().unwrap();
+        sibling.join().unwrap();
+        assert!(
+            sibling_completed,
+            "an unrelated slow hub must not delay motion"
+        );
+        assert_eq!(runtime.turn_on_calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn motion_timeout_can_reenter_a_mood_scene_without_relocking_arbitration() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.mood_scene_id = Some("halloween".into());
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let callback = std::thread::spawn(move || {
+            run_motion_timeout_restore(
+                &state,
+                "room_a",
+                Some(rhythm_core::RoomModeState::Mood),
+                "timeout",
+            );
+            completed_tx.send(()).unwrap();
+        });
+        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        callback.join().unwrap();
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
     }
 
     #[test]

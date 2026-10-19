@@ -1038,6 +1038,7 @@ void main() {
     Map<String, dynamic> helloNode({
       required bool sceneActive,
       String sceneId = 'evening-glow',
+      bool wholeHomeBinding = false,
     }) =>
         {
           'id': 'room-1',
@@ -1058,6 +1059,7 @@ void main() {
           'profile_settings': {
             'motion_activation_enabled': true,
             'mood_scene_id': sceneId,
+            if (wholeHomeBinding) 'mood_scene_palette_span': 3,
           },
         };
 
@@ -1184,6 +1186,39 @@ void main() {
             .hasAction(SemanticsAction.tap),
         isTrue,
       );
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [
+              RhythmFeature.sceneMotionSuppression,
+              RhythmFeature.sceneBrightness,
+            ],
+            'hubs': <dynamic>[],
+          },
+          'nodes': [
+            helloNode(
+              sceneActive: true,
+              sceneId: generatedSceneId,
+              wholeHomeBinding: true,
+            ),
+          ],
+        }),
+      );
+      await tester.pump();
+      expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+      expect(serverSync.motionSuppressedByActiveSceneForNode('room-1'), isTrue);
+      expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
+      expect(tester.getSemantics(motion).label,
+          'Motion paused while a Scene is active in Kitchen');
+      final screenshotPath =
+          Platform.environment['RHYTHM_HOME_SCENE_MOTION_SCREENSHOT'];
+      if (screenshotPath != null && screenshotPath.isNotEmpty) {
+        await expectLater(
+          find.byType(RoomCard),
+          matchesGoldenFile(Uri.file(screenshotPath)),
+        );
+      }
     }
 
     connection.emitHello(
