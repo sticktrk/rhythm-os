@@ -581,3 +581,73 @@ fn child_display_follows_parent_scene_assignment_until_explicit_exit() {
         assert_eq!(spy.turn_on_calls().last().unwrap().1.rgb, blue);
     }
 }
+
+#[test]
+fn child_off_display_stays_dark_under_an_active_parent_scene() {
+    for mode in [
+        rhythm_os::scenes::HomeSceneTargetMode::Devices,
+        rhythm_os::scenes::HomeSceneTargetMode::Rooms,
+    ] {
+        for scene_off in [false, true] {
+            let (h, spy, child, sibling) = fixture();
+            let parent = h.resolve("kitchen");
+            let scene_id = if scene_off {
+                let mut scene = h.state.lock().unwrap().scenes["halloween"].clone();
+                scene.id = "dark-child-party".into();
+                let layer = scene.light.as_mut().unwrap();
+                let mut output = layer.palette[0].clone();
+                output.power = rhythm_os::scenes::LightScenePower::Off;
+                layer.entries.push(rhythm_os::scenes::LightSceneEntry {
+                    target: rhythm_os::scenes::LightSceneTargetRef::Node {
+                        node_id: child.clone(),
+                    },
+                    output,
+                });
+                commands::do_scene_upsert(&h.state, scene).unwrap();
+                "dark-child-party"
+            } else {
+                "halloween"
+            };
+            spy.reset();
+            commands::do_home_scene_apply(
+                &h.state,
+                scene_id,
+                rhythm_os::scenes::HomeSceneApplyRequest {
+                    target_mode: mode,
+                    ..Default::default()
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+            if !scene_off {
+                commands::do_node_action(&h.state, &child, "lights_off", false).unwrap();
+            }
+            assert!(h.snapshot(&parent).unwrap().mood_active);
+            assert_eq!(spy.turn_off_count(), 1);
+            let displayed = commands::build_node_state(&h.state, &child).unwrap();
+            if !scene_off {
+                assert_eq!(displayed.state, rhythm_core::RoomModeState::HardOff);
+            }
+            assert_eq!(
+                displayed.brightness, 0,
+                "dark child must not inherit the parent scene brightness"
+            );
+            assert_eq!(
+                displayed.color, None,
+                "dark child must not claim an emitted color"
+            );
+            let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+            let snapshot = runtime.engine_effective_node_snapshot(&child).unwrap();
+            let event = commands::build_node_state_event(&h.state, &snapshot);
+            assert_eq!(event.brightness, 0);
+            assert_eq!(event.color, None);
+            let sibling_display = commands::build_node_state(&h.state, &sibling).unwrap();
+            let calls = spy.turn_on_calls();
+            let sent = output_for(&calls, &sibling)
+                .or_else(|| (calls.len() == 1).then(|| &calls[0].1))
+                .unwrap();
+            assert_eq!(sibling_display.brightness, sent.brightness);
+            assert_eq!(sibling_display.color, Some(sent.rgb));
+        }
+    }
+}

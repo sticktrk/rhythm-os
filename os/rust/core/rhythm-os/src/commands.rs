@@ -2392,12 +2392,14 @@ fn mood_scene_display_output(
     snap: &rhythm_core::NodeSnapshot,
     room_state: RoomModeState,
 ) -> Option<LightSceneOutput> {
+    if room_state == RoomModeState::HardOff {
+        return None;
+    }
     if let Some(runtime) = s.hub_runtime() {
         if let Some(owner) = active_whole_home_scene_owner(s, runtime.as_ref(), &snap.id)
             .filter(|owner| owner.id != snap.id)
         {
-            let output = whole_home_child_display_output(s, &runtime, &owner, &snap.id)?;
-            return (output.power == LightScenePower::On).then_some(output);
+            return whole_home_child_display_output(s, &runtime, &owner, &snap.id);
         }
     }
     if room_state != RoomModeState::Mood {
@@ -2485,6 +2487,10 @@ fn apply_mood_scene_display_values(
     kelvin: &mut u16,
 ) -> Option<Rgb> {
     let output = mood_scene_display_output(s, snap, room_state)?;
+    if output.power == LightScenePower::Off {
+        *brightness = 0;
+        return None;
+    }
     *brightness = output.brightness;
     match output.color {
         Some(LightSceneColor::Kelvin {
