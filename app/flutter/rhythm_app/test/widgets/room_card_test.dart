@@ -1221,6 +1221,86 @@ void main() {
       }
     }
 
+    for (final fixture in [
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'mood',
+        expected: true
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'off',
+        expected: true
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'active',
+        expected: true
+      ),
+      (
+        parentActive: false,
+        wholeHome: true,
+        supported: true,
+        childState: 'mood',
+        expected: false
+      ),
+      (
+        parentActive: true,
+        wholeHome: false,
+        supported: true,
+        childState: 'mood',
+        expected: false
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: false,
+        childState: 'mood',
+        expected: false
+      ),
+    ]) {
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [
+            RhythmFeature.sceneMotionSuppression,
+            if (fixture.supported) RhythmFeature.sceneBrightness,
+          ],
+          'hubs': <dynamic>[],
+        },
+        'nodes': [
+          helloNode(
+            sceneActive: fixture.parentActive,
+            sceneId: 'node-mood-scene-room-1',
+            wholeHomeBinding: fixture.wholeHome,
+          ),
+          {
+            ...helloNode(
+                sceneActive: fixture.childState == 'mood',
+                sceneId: 'node-mood-scene-light-1'),
+            'id': 'light-1',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': fixture.childState,
+            'device_ids': ['light-1'],
+            'devices': <dynamic>[],
+          },
+        ],
+      }));
+      await tester.pump();
+      expect(serverSync.motionActivationEnabledForNode('light-1'), isTrue);
+      expect(serverSync.motionSuppressedByActiveSceneForNode('light-1'),
+          fixture.expected,
+          reason:
+              'parent whole-home ownership must survive child state: $fixture');
+    }
+
     connection.emitHello(
       RhythmHello.fromJson({
         'capabilities': {

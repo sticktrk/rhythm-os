@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 fn assert_home_scene_ignores_motion(
     source: &TestHarness,
     spy: &rhythm_core::spy_controller::SpyLightController,
+    target_node_id: &str,
 ) {
-    let kitchen = source.resolve("kitchen");
+    let target_node_id = target_node_id.to_string();
     let before_on = spy.turn_on_count();
     let before_off = spy.turn_off_count();
     let mut motion = event_loop::MotionTimerState::new();
@@ -36,13 +37,13 @@ fn assert_home_scene_ignores_motion(
         "stale-sensor".into(),
         event_loop::MotionSourceState {
             source_node_id: "stale-sensor".into(),
-            target_node_id: kitchen.clone(),
+            target_node_id: target_node_id.clone(),
             stopped_at: Some(Instant::now() - Duration::from_secs(3600)),
             stopped_at_epoch_ms: None,
         },
     );
-    motion.motion_owned.insert(kitchen.clone());
-    motion.warning_active.insert(kitchen.clone());
+    motion.motion_owned.insert(target_node_id.clone());
+    motion.warning_active.insert(target_node_id.clone());
     event_loop::check_motion_timers(&source.state, &mut motion);
     assert!(motion.sensors.is_empty());
     assert!(motion.motion_owned.is_empty());
@@ -54,7 +55,7 @@ fn assert_home_scene_ignores_motion(
         .pending_motion_seed
         .push(rhythm_os::state::MotionSeedEntry {
             source_node_id: "sensor-1".into(),
-            target_node_id: kitchen,
+            target_node_id,
             is_active: true,
             stopped_at_epoch_ms: None,
             motion_owned: Some(true),
@@ -67,6 +68,150 @@ fn assert_home_scene_ignores_motion(
     );
     assert_eq!(spy.turn_on_count(), before_on);
     assert_eq!(spy.turn_off_count(), before_off);
+}
+
+#[test]
+fn home_scene_suppresses_direct_child_motion_even_with_a_custom_child_binding() {
+    let (source, spy) = TestHarness::with_spy_controller();
+    let source = source.with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![
+            light("lamp-1", "kitchen"),
+            motion_sensor("sensor-1", "kitchen"),
+        ],
+    );
+    source.sync();
+    let kitchen = source.resolve("kitchen");
+    let (child, sensor, runtime) = {
+        let s = source.state.lock().unwrap();
+        (
+            s.canonical_registry
+                .find_by_native_id(&source.hub_key, "lamp-1")
+                .unwrap()
+                .id
+                .clone(),
+            s.canonical_registry
+                .find_by_native_id(&source.hub_key, "sensor-1")
+                .unwrap()
+                .id
+                .clone(),
+            s.hub_runtime().unwrap(),
+        )
+    };
+    commands::do_topology_set_control_target(
+        &source.state,
+        &sensor,
+        rhythm_os::topology::NodeControlKind::Motion,
+        Some(&child),
+    )
+    .unwrap();
+    commands::do_set_node_color(
+        &source.state,
+        &child,
+        commands::NodeColorUpdate {
+            rgb: rhythm_core::Rgb::new(0, 64, 255),
+            xy: None,
+            brightness: Some(60),
+            transition_ms: None,
+            scope: commands::NodeColorScope::Mood,
+        },
+        false,
+    )
+    .unwrap();
+    let custom_binding = runtime
+        .engine_node_snapshot(&child)
+        .unwrap()
+        .profile_settings;
+    assert!(custom_binding
+        .mood_scene_id
+        .as_deref()
+        .unwrap()
+        .starts_with("node-mood-scene-"));
+    assert_eq!(custom_binding.mood_scene_palette_span, None);
+    commands::do_home_scene_apply(
+        &source.state,
+        "halloween",
+        Default::default(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert!(runtime
+        .engine_node_snapshot(&kitchen)
+        .unwrap()
+        .profile_settings
+        .mood_scene_palette_span
+        .is_some());
+    assert_eq!(
+        runtime
+            .engine_effective_node_snapshot(&child)
+            .unwrap()
+            .profile_settings
+            .mood_scene_id,
+        custom_binding.mood_scene_id
+    );
+    assert_home_scene_ignores_motion(&source, &spy, &child);
+    commands::do_set_node_curve_modifier(
+        &source.state,
+        &kitchen,
+        commands::NodeCurveModifier::Brightness(20),
+        false,
+    )
+    .unwrap();
+    assert_home_scene_ignores_motion(&source, &spy, &child);
+    // A local Off flag also masks inherited Mood in the effective snapshot.
+    commands::do_node_action(&source.state, &child, "off", false).unwrap();
+    assert_home_scene_ignores_motion(&source, &spy, &child);
+    // Resetting only the child must not unpause motion while its parent still
+    // owns the whole-home scene. Resetting the parent releases that ownership.
+    commands::do_node_action(&source.state, &child, "reset", false).unwrap();
+    assert_home_scene_ignores_motion(&source, &spy, &child);
+    commands::do_node_action(&source.state, &kitchen, "reset", false).unwrap();
+    // Reenter the child's existing custom Mood after the parent releases home
+    // ownership: that standalone custom binding must still permit motion.
+    commands::do_node_preferences_set(
+        &source.state,
+        &child,
+        None,
+        None,
+        None,
+        Some(RoomModeState::Mood),
+        None,
+        false,
+    )
+    .unwrap();
+    let child_snapshot = runtime.engine_node_snapshot(&child).unwrap();
+    assert!(child_snapshot.mood_active);
+    assert_eq!(
+        child_snapshot.profile_settings.mood_scene_id,
+        custom_binding.mood_scene_id
+    );
+    assert_eq!(
+        child_snapshot.profile_settings.mood_scene_palette_span,
+        None
+    );
+    assert!(runtime
+        .engine_node_snapshot(&child)
+        .unwrap()
+        .profile_settings
+        .motion_activation_enabled());
+    let mut motion = event_loop::MotionTimerState::new();
+    event_loop::handle_hub_event(
+        &source.state,
+        rhythm_os::hub::HubEvent::Motion {
+            hub_key: Some(source.hub_key.clone()),
+            room_id: "kitchen".into(),
+            sensor_id: "sensor-1".into(),
+            detected: true,
+        },
+        &mut motion,
+    );
+    assert!(
+        motion
+            .sensors
+            .values()
+            .any(|source| source.target_node_id == child),
+        "direct-child motion must resume after the parent exits its scene"
+    );
 }
 
 #[test]
@@ -219,7 +364,7 @@ fn queued_scene_brightness_survives_disk_restart_without_a_backup() {
     }
     assert_eq!(spy.turn_on_calls().last().unwrap().1.brightness, 60);
     let binding = source.snapshot(&kitchen).unwrap().profile_settings;
-    assert_home_scene_ignores_motion(&source, &spy);
+    assert_home_scene_ignores_motion(&source, &spy, &kitchen);
 
     // Read the same files an ordinary process restart reads. Exporting a
     // backup here would hide definitions which were only updated in memory.
@@ -265,7 +410,7 @@ fn queued_scene_brightness_survives_disk_restart_without_a_backup() {
             initial.iter().find(|(id, _)| id == &node).unwrap().1.rgb
         );
     }
-    assert_home_scene_ignores_motion(&restored, &restored_spy);
+    assert_home_scene_ignores_motion(&restored, &restored_spy, &kitchen);
     assert!(restored
         .snapshot(&kitchen)
         .unwrap()

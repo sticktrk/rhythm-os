@@ -3443,29 +3443,44 @@ fn motion_suppression_reason_for_target(
     state: &SharedState,
     target_node_id: &str,
 ) -> Option<&'static str> {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| s.hub_runtime())
-        .and_then(|runtime| runtime.engine_effective_node_snapshot(target_node_id))
-        .and_then(|snapshot| {
-            if !snapshot.profile_settings.motion_activation_enabled() {
-                return Some("motion_activation_disabled");
-            }
-            if snapshot.mood_active
-                && snapshot
-                    .profile_settings
-                    .mood_scene_id
-                    .as_deref()
-                    .is_some_and(|scene_id| {
-                        !is_generated_mood_scene_id(scene_id)
-                            || snapshot.profile_settings.mood_scene_palette_span.is_some()
-                    })
-            {
-                return Some("active_scene");
-            }
-            None
-        })
+    let (runtime, parent_id) = {
+        let s = state.lock().ok()?;
+        (
+            s.hub_runtime()?,
+            s.topology
+                .device_parent_room_id(target_node_id)
+                .map(str::to_string),
+        )
+    };
+    let snapshot = runtime.engine_effective_node_snapshot(target_node_id)?;
+    if !snapshot.profile_settings.motion_activation_enabled() {
+        return Some("motion_activation_disabled");
+    }
+    // A child's saved custom Mood binding can mask its parent's scene metadata
+    // in the effective snapshot. Whole-home ownership still covers that child,
+    // even after a child-only Reset or while its own mode is Off.
+    let parent_has_home_scene = parent_id
+        .as_deref()
+        .and_then(|parent_id| runtime.engine_node_snapshot(parent_id))
+        .is_some_and(|parent| {
+            parent.mood_active
+                && parent.profile_settings.mood_scene_id.is_some()
+                && parent.profile_settings.mood_scene_palette_span.is_some()
+        });
+    if parent_has_home_scene
+        || (snapshot.mood_active
+            && snapshot
+                .profile_settings
+                .mood_scene_id
+                .as_deref()
+                .is_some_and(|scene_id| {
+                    !is_generated_mood_scene_id(scene_id)
+                        || snapshot.profile_settings.mood_scene_palette_span.is_some()
+                }))
+    {
+        return Some("active_scene");
+    }
+    None
 }
 
 fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {

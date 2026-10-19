@@ -1643,12 +1643,24 @@ class ServerSyncProvider extends ChangeNotifier {
         _capabilities?.supportsFeature(RhythmFeature.sceneMotionSuppression) ==
             true;
     if (!supported) return false;
-    final settings = nodeById(nodeId)?.profileSettings;
-    final hasWholeHomeBinding = supportsSceneBrightness &&
-        !_optimisticMoodSceneIds.containsKey(nodeId) &&
-        settings?.moodSceneId != null &&
-        settings!.raw['mood_scene_palette_span'] != null;
-    if (moodSceneIdForRoom(nodeId) == null && !hasWholeHomeBinding) return false;
+    bool hasActiveWholeHomeBinding(String id) {
+      final node = nodeById(id);
+      final settings = node?.profileSettings;
+      return supportsSceneBrightness &&
+          !_optimisticMoodSceneIds.containsKey(id) &&
+          settings?.moodSceneId != null &&
+          settings!.raw['mood_scene_palette_span'] != null &&
+          (_roomProvider.getDisplayRoomState(id) == RoomModeState.mood ||
+              node?.moodActive == true);
+    }
+
+    // A child's custom Mood binding can mask the parent's whole-home metadata.
+    // The parent still owns scene output until it leaves that scene.
+    final parentId =
+        nodeById(nodeId)?.parentId ?? topologyNodeById(nodeId)?.parentId;
+    if (parentId != null && hasActiveWholeHomeBinding(parentId)) return true;
+    if (hasActiveWholeHomeBinding(nodeId)) return true;
+    if (moodSceneIdForRoom(nodeId) == null) return false;
     return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
         nodeById(nodeId)?.moodActive == true;
   }
