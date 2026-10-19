@@ -1233,7 +1233,12 @@ void main() {
     }));
     await tester.pump();
     await openScenePanel(tester);
-    expect(find.text('To adjust brightness here, choose a Rhythm scene.'),
+    expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('global-room-slider-panel')),
+          matching:
+              find.text('To adjust brightness here, choose a Rhythm scene.'),
+        ),
         findsOneWidget);
     expect(find.text('Reapply the scene to enable brightness adjustment.'),
         findsNothing);
@@ -1275,7 +1280,12 @@ void main() {
     }));
     await tester.pump();
     await openScenePanel(tester);
-    expect(find.text('Reapply the scene to enable brightness adjustment.'),
+    expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('global-room-slider-panel')),
+          matching:
+              find.text('Reapply the scene to enable brightness adjustment.'),
+        ),
         findsOneWidget);
     final slider = tester.widget<Slider>(
         find.byKey(const ValueKey('global-room-brightness-slider')));

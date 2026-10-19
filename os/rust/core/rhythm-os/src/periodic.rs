@@ -1043,12 +1043,37 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         };
         if let Some(runtime) = runtime {
             for (idx, node) in periodic_nodes.iter().enumerate() {
+                let arbitration = match state.lock() {
+                    Ok(s) => s.motion_scene_transaction_lock.clone(),
+                    Err(_) => return update_interval,
+                };
+                let Ok(guard) = arbitration.read() else {
+                    return update_interval;
+                };
+                let scene_held = state.lock().ok().is_some_and(|s| {
+                    crate::commands::active_whole_home_scene_owner(
+                        &s,
+                        runtime.as_ref(),
+                        &node.settings_node_id,
+                    )
+                    .is_some()
+                        || crate::commands::active_whole_home_scene_owner(
+                            &s,
+                            runtime.as_ref(),
+                            &node.emit_node_id,
+                        )
+                        .is_some()
+                });
+                if scene_held || !light_dispatch_generation_current(&state, dispatch_generation) {
+                    continue;
+                }
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let started = Instant::now();
-                if crate::commands::reconcile_room_schedule_before_tick(
+                if crate::commands::reconcile_room_schedule_before_tick_inner(
                     &state,
                     &node.emit_node_id,
                     room_hour,
+                    true,
                 )
                 .is_err()
                 {
@@ -1096,6 +1121,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                     post_tick_node(&state, &runtime, &node.emit_node_id);
                 }
                 if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
+                    drop(guard);
                     thread::sleep(phase_gap);
                 }
             }
@@ -1126,6 +1152,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             light_breaker_enabled,
         );
         if light_breaker_enabled {
+            crate::commands::apply_pending_mode_outputs_if_ready(&state);
             match time_check {
                 PeriodicTimeCheckResult::Continuous { last_hour } => {
                     check_mode_transitions(&state, last_hour, current_hour);

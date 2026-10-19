@@ -381,6 +381,8 @@ class _RoomCardState extends State<RoomCard> {
       initialColor: initialColor,
       initialSceneId: activeSceneId,
       initialBrightness: initialBrightness,
+      brightnessUnavailableReason: () =>
+          _sceneBrightnessUnavailableReason(sync),
       initialScenes: sync.scenesForRoom(widget.roomId),
       scenesLoader: () => sync.fetchScenes(roomId: widget.roomId),
       showHueTab: showHueTab,
@@ -433,8 +435,14 @@ class _RoomCardState extends State<RoomCard> {
           success: applied,
         );
         if (applied && mounted) {
-          _activateMoodPresentation(brightness);
-          _onSceneBrightnessSliderEnd();
+          _activateMoodPresentation(
+              roomProvider.getMoodBrightness(widget.roomId) ?? brightness);
+          final brightnessAvailable =
+              _sceneBrightnessUnavailableReason(sync) == null;
+          if (brightnessAvailable) {
+            setState(() => _sliderBrightness = brightness);
+            _onSceneBrightnessSliderEnd();
+          }
         }
         return applied;
       },
@@ -457,9 +465,9 @@ class _RoomCardState extends State<RoomCard> {
 
   void _onBrightnessSliderEnd() {
     if (_sliderBrightness == null) return;
-    context
-        .read<ServerSyncProvider>()
-        .dispatchNodeCurveBrightness(widget.roomId, _sliderBrightness!);
+    final sync = context.read<ServerSyncProvider>();
+    if (_rejectUnavailableSceneBrightness(sync)) return;
+    sync.dispatchNodeCurveBrightness(widget.roomId, _sliderBrightness!);
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
       brightness: _sliderBrightness!,
@@ -489,14 +497,54 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
+  String? _sceneBrightnessUnavailableReason(
+    ServerSyncProvider sync, {
+    RoomModeState? roomState,
+  }) {
+    if (!sync.supportsSceneBrightness) return null;
+    final inheritedOwner =
+        sync.sceneBrightnessOwnerForNode(widget.roomId) != widget.roomId;
+    if (!inheritedOwner &&
+        (roomState ??
+                context
+                    .read<RoomProvider>()
+                    .getDisplayRoomState(widget.roomId)) !=
+            RoomModeState.mood &&
+        sync.nodeById(widget.roomId)?.moodActive != true) {
+      return null;
+    }
+    if (sync.sceneBrightnessUnsupported(widget.roomId)) {
+      return 'To adjust brightness here, choose a Rhythm scene.';
+    }
+    if (sync.sceneBrightnessNeedsReapply(widget.roomId)) {
+      if (inheritedOwner) {
+        return 'Reapply the whole-home scene from All Rooms to adjust this light.';
+      }
+      return 'Reapply the scene to enable brightness adjustment.';
+    }
+    return null;
+  }
+
+  bool _rejectUnavailableSceneBrightness(ServerSyncProvider sync) {
+    final unavailableReason = _sceneBrightnessUnavailableReason(sync);
+    if (unavailableReason != null) {
+      setState(() => _sliderBrightness = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(unavailableReason)),
+      );
+      return true;
+    }
+    return false;
+  }
+
   void _onSceneBrightnessSliderEnd() {
     if (_sliderBrightness == null) return;
+    final sync = context.read<ServerSyncProvider>();
+    if (_rejectUnavailableSceneBrightness(sync)) return;
     context
         .read<RoomProvider>()
         .setMoodBrightnessLocal(widget.roomId, _sliderBrightness!);
-    context
-        .read<ServerSyncProvider>()
-        .dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
+    sync.dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
       brightness: _sliderBrightness!,
@@ -846,6 +894,11 @@ class _RoomCardState extends State<RoomCard> {
         // Scene currently bound as this room's mood (null = custom color mood).
         final moodSceneId = context.select<ServerSyncProvider, String?>(
             (p) => p.moodSceneIdForRoom(widget.roomId));
+        final sceneBrightnessUnavailableReason =
+            context.select<ServerSyncProvider, String?>(
+          (sync) =>
+              _sceneBrightnessUnavailableReason(sync, roomState: roomState),
+        );
         final hardwareCctRange = context
             .select<ServerSyncProvider, ({int minKelvin, int maxKelvin})?>(
                 (provider) {
@@ -1053,8 +1106,9 @@ class _RoomCardState extends State<RoomCard> {
                 !colorControlAvailable)) {
           _expandedControl = null;
         }
-        final brightnessSliderActive =
-            controlInteractionEnabled && brightnessControlAvailable;
+        final brightnessSliderActive = controlInteractionEnabled &&
+            brightnessControlAvailable &&
+            sceneBrightnessUnavailableReason == null;
         final cctSliderActive =
             controlInteractionEnabled && colorControlAvailable;
         final cctRange = _CctSideRange.fromCurveData(
@@ -1511,18 +1565,40 @@ class _RoomCardState extends State<RoomCard> {
                                         padding: const EdgeInsets.only(top: 8),
                                         child: switch (_expandedControl!) {
                                           _RoomDetailControl.brightness =>
-                                            _buildBrightnessSlider(
-                                              mode: mode,
-                                              displayBrightness:
-                                                  displayBrightness,
-                                              cctColor: cctColor,
-                                              activeTrackColor:
-                                                  sliderActiveTrackColor,
-                                              inactiveTrackColor:
-                                                  sliderInactiveTrackColor,
-                                              thumbColor: sliderThumbColor,
-                                              overlayColor: sliderOverlayColor,
-                                              enabled: brightnessSliderActive,
+                                            Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                _buildBrightnessSlider(
+                                                  mode: mode,
+                                                  displayBrightness:
+                                                      displayBrightness,
+                                                  cctColor: cctColor,
+                                                  activeTrackColor:
+                                                      sliderActiveTrackColor,
+                                                  inactiveTrackColor:
+                                                      sliderInactiveTrackColor,
+                                                  thumbColor: sliderThumbColor,
+                                                  overlayColor:
+                                                      sliderOverlayColor,
+                                                  enabled:
+                                                      brightnessSliderActive,
+                                                ),
+                                                if (sceneBrightnessUnavailableReason !=
+                                                    null)
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                            bottom: 8),
+                                                    child: Text(
+                                                      sceneBrightnessUnavailableReason,
+                                                      style: const TextStyle(
+                                                        color: CelestialColors
+                                                            .textSecondary,
+                                                        fontSize: 12,
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
                                             ),
                                           _RoomDetailControl.color =>
                                             _buildColorTemperatureSlider(

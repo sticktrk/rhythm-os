@@ -1255,13 +1255,37 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Provider scenes have no editable Rhythm definition. Recalling them again
   /// cannot enable the stored-scene brightness contract.
   bool sceneBrightnessUnsupported(String nodeId) =>
-      moodSceneIdForRoom(nodeId)?.startsWith('native-') == true;
+      moodSceneIdForRoom(sceneBrightnessOwnerForNode(nodeId))
+          ?.startsWith('native-') ==
+      true;
+
+  /// An active whole-home parent owns brightness even when a child has its
+  /// own saved scene or mode override. Older appliances keep their old routes.
+  String sceneBrightnessOwnerForNode(String nodeId) {
+    final parentId =
+        nodeById(nodeId)?.parentId ?? topologyNodeById(nodeId)?.parentId;
+    return parentId != null && _hasActiveWholeHomeBinding(parentId)
+        ? parentId
+        : nodeId;
+  }
+
+  bool _hasActiveWholeHomeBinding(String id) {
+    final node = nodeById(id);
+    final settings = node?.profileSettings;
+    return supportsSceneBrightness &&
+        !_optimisticMoodSceneIds.containsKey(id) &&
+        settings?.moodSceneId != null &&
+        settings!.raw['mood_scene_palette_span'] != null &&
+        (_roomProvider.getDisplayRoomState(id) == RoomModeState.mood ||
+            node?.moodActive == true);
+  }
 
   /// Old whole-home bindings cannot say whether colors were grouped or per
   /// light. A fresh apply on the supporting server establishes that authority.
   bool sceneBrightnessNeedsReapply(String nodeId) {
-    if (_optimisticMoodSceneIds.containsKey(nodeId)) return false;
-    final settings = nodeById(nodeId)?.profileSettings;
+    final ownerId = sceneBrightnessOwnerForNode(nodeId);
+    if (_optimisticMoodSceneIds.containsKey(ownerId)) return false;
+    final settings = nodeById(ownerId)?.profileSettings;
     return settings?.moodSceneId != null &&
         settings!.raw['mood_scene_palette_span'] != null &&
         settings.raw['mood_scene_device_mode'] == null;
@@ -1643,23 +1667,12 @@ class ServerSyncProvider extends ChangeNotifier {
         _capabilities?.supportsFeature(RhythmFeature.sceneMotionSuppression) ==
             true;
     if (!supported) return false;
-    bool hasActiveWholeHomeBinding(String id) {
-      final node = nodeById(id);
-      final settings = node?.profileSettings;
-      return supportsSceneBrightness &&
-          !_optimisticMoodSceneIds.containsKey(id) &&
-          settings?.moodSceneId != null &&
-          settings!.raw['mood_scene_palette_span'] != null &&
-          (_roomProvider.getDisplayRoomState(id) == RoomModeState.mood ||
-              node?.moodActive == true);
-    }
-
     // A child's custom Mood binding can mask the parent's whole-home metadata.
     // The parent still owns scene output until it leaves that scene.
     final parentId =
         nodeById(nodeId)?.parentId ?? topologyNodeById(nodeId)?.parentId;
-    if (parentId != null && hasActiveWholeHomeBinding(parentId)) return true;
-    if (hasActiveWholeHomeBinding(nodeId)) return true;
+    if (parentId != null && _hasActiveWholeHomeBinding(parentId)) return true;
+    if (_hasActiveWholeHomeBinding(nodeId)) return true;
     if (moodSceneIdForRoom(nodeId) == null) return false;
     return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
         nodeById(nodeId)?.moodActive == true;

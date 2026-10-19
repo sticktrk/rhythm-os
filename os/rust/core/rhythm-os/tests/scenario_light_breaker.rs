@@ -140,6 +140,9 @@ fn light_breaker_toggle_invalidates_queued_generated_light_dispatches() {
             command: LightingCommand::with_transition(80, 4000, 250),
             dispatch_spacing: Duration::ZERO,
             dispatch_generation: stale_generation,
+            provenance: rhythm_os::state::NodeOutputProvenance::Mode {
+                preserve_home_scene: false,
+            },
         },
     );
 
