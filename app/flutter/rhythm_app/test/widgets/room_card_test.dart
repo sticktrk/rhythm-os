@@ -3285,140 +3285,193 @@ void main() {
     expect(call.preserveBrightness, isTrue);
   });
 
-  testWidgets('named Sleep schedule disables an unreachable color slider',
-      (tester) async {
-    final screenshotPath =
-        Platform.environment['RHYTHM_ROOM_CARD_FIXED_COLOR_SCREENSHOT'];
-    if (screenshotPath != null && screenshotPath.isNotEmpty) {
-      await tester.runAsync(loadUiEvidenceFonts);
-    }
-    final roomProvider = RoomProvider();
-    final connection = _TestRhythmConnection();
-    final serverSync = ServerSyncProvider(
-      connection: connection,
-      roomProvider: roomProvider,
-      homeProvider: _FakeHomeProvider(),
-    );
-    addTearDown(roomProvider.dispose);
-    addTearDown(serverSync.dispose);
-    addTearDown(connection.dispose);
+  for (final legacy in [false, true]) {
+    testWidgets(
+        legacy
+            ? 'legacy schedule readback disables fixed color and preserves brightness'
+            : 'named Sleep schedule disables an unreachable color slider',
+        (tester) async {
+      final screenshotPath = Platform.environment[legacy
+          ? 'RHYTHM_ROOM_CARD_LEGACY_COLOR_SCREENSHOT'
+          : 'RHYTHM_ROOM_CARD_FIXED_COLOR_SCREENSHOT'];
+      if (screenshotPath != null && screenshotPath.isNotEmpty) {
+        await tester.runAsync(loadUiEvidenceFonts);
+      }
+      final roomProvider = RoomProvider();
+      final connection = _TestRhythmConnection();
+      final serverSync = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _FakeHomeProvider(),
+      );
+      addTearDown(roomProvider.dispose);
+      addTearDown(serverSync.dispose);
+      addTearDown(connection.dispose);
 
-    void emitSchedule(String mode) {
-      connection.emitHello(RhythmHello.fromJson({
-        'mode': {
-          'active': 'day',
-          'configs': [
-            {'mode': 'day', 'active_profile_id': 'rhythm'},
-            {'mode': 'sleep', 'active_profile_id': 'sleep'},
+      void emitSchedule(String mode) {
+        connection.emitHello(RhythmHello.fromJson({
+          'mode': {
+            'active': 'day',
+            'configs': [
+              {'mode': 'day', 'active_profile_id': 'rhythm'},
+              {'mode': 'sleep', 'active_profile_id': 'sleep'},
+            ],
+          },
+          'profiles': [
+            const RhythmCurveConfig(id: 'rhythm', name: 'Day').toJson(),
+            const RhythmCurveConfig(
+              id: 'sleep',
+              name: 'Sleep',
+              minColorTemp: 1800,
+              maxColorTemp: 1800,
+              curve: RhythmConstantCurve(brightness: 0, colorTemp: 0),
+            ).toJson(),
           ],
-        },
-        'profiles': [
-          const RhythmCurveConfig(id: 'rhythm', name: 'Day').toJson(),
-          const RhythmCurveConfig(
-            id: 'sleep',
-            name: 'Sleep',
-            minColorTemp: 1800,
-            maxColorTemp: 1800,
-            curve: RhythmConstantCurve(brightness: 0, colorTemp: 0),
-          ).toJson(),
-        ],
-        'nodes': [
-          {
-            'id': 'room-1',
-            'name': 'Entry',
-            'kind': 'room',
-            'hub_types': ['hue'],
-            'state': 'active',
-            'rhythm_enabled': true,
-            'lights_on': true,
-            'brightness': 75,
-            'kelvin': mode == 'sleep' ? 1800 : 3200,
-            'profile_settings': {
-              'light_schedule': {
-                'kind': 'named',
-                'schedule_id': 'evening',
-                'active_mode': mode,
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Entry',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'lights_on': true,
+              'brightness': 75,
+              'kelvin': mode == 'sleep' ? 1800 : 3200,
+              'profile_settings': {
+                if (legacy) 'resolved_mode': mode,
+                if (legacy)
+                  'room_schedule': {
+                    'source': 'follow_time',
+                    'wake_time': '09:00',
+                    'sleep_time': '23:00'
+                  },
+                if (!legacy)
+                  'light_schedule': {
+                    'kind': 'named',
+                    'schedule_id': 'evening',
+                    'active_mode': mode,
+                  },
               },
             },
-          },
-        ],
-      }));
-    }
+          ],
+        }));
+      }
 
-    emitSchedule('sleep');
-    await tester.pump();
-    await tester.pumpWidget(MultiProvider(
-      providers: [
-        ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
-        ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
-      ],
-      child: MaterialApp(
-        home: Scaffold(
-          body: RoomCard(
-            roomId: 'room-1',
-            globalConfig: defaultCurveConfig,
-            curveData: _curveDataWithKelvins([2000, 5500, 2000]),
+      emitSchedule('sleep');
+      await tester.pump();
+      await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+              curveData: _curveDataWithKelvins([2000, 5500, 2000]),
+            ),
           ),
         ),
-      ),
-    ));
+      ));
 
-    final color = tester.getSemantics(_colorControl()).getSemanticsData();
-    expect(color.hasAction(SemanticsAction.tap), isFalse);
-    expect(color.value, '1800 kelvin');
-    expect(color.hint, contains('Light settings'));
-    await tester.tap(_roomSegment('Color'));
-    expect(_cctSlider(), findsNothing);
-    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
-    if (screenshotPath != null && screenshotPath.isNotEmpty) {
-      await tester.longPress(_roomSegment('Color'));
-      await tester.pumpAndSettle();
-      await expectLater(
-          find.byType(MaterialApp), matchesGoldenFile(screenshotPath));
-      Tooltip.dismissAllToolTips();
-      await tester.pumpAndSettle();
-    }
+      final color = tester.getSemantics(_colorControl()).getSemanticsData();
+      expect(color.hasAction(SemanticsAction.tap), isFalse);
+      expect(color.value, '1800 kelvin');
+      expect(color.hint, contains('Light settings'));
+      await tester.tap(_roomSegment('Color'));
+      expect(_cctSlider(), findsNothing);
+      expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
+      if (screenshotPath != null && screenshotPath.isNotEmpty) {
+        await tester.longPress(_roomSegment('Color'));
+        await tester.pumpAndSettle();
+        await expectLater(
+            find.byType(MaterialApp), matchesGoldenFile(screenshotPath));
+        Tooltip.dismissAllToolTips();
+        await tester.pumpAndSettle();
+      }
 
-    // Brightness remains independent of the fixed-temperature curve.
-    await _tapRoomSegment(tester, 'Brightness');
-    tester.widget<Slider>(_brightnessSlider()).onChanged!(85);
-    await tester.pump();
-    tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(85);
-    await tester.pump();
-    expect(connection.api.nodeCurveBrightnessCalls.single.brightness, 85);
+      // Brightness remains independent of the fixed-temperature curve.
+      await _tapRoomSegment(tester, 'Brightness');
+      tester.widget<Slider>(_brightnessSlider()).onChanged!(85);
+      await tester.pump();
+      tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(85);
+      await tester.pump();
+      expect(connection.api.nodeCurveBrightnessCalls.single.brightness, 85);
 
-    // A server schedule transition restores control without remounting.
-    emitSchedule('day');
-    await tester.pump();
-    await _tapRoomSegment(tester, 'Color');
-    expect(_cctSlider(), findsOneWidget);
-    tester.widget<Slider>(_cctSlider()).onChanged!(4500);
-    await tester.pump();
-    tester.widget<Slider>(_cctSlider()).onChangeEnd!(4500);
-    await tester.pump();
-    expect(connection.api.nodeCurveColorTemperatureCalls.single.kelvin, 4500);
+      // A server schedule transition restores control without remounting.
+      emitSchedule('day');
+      await tester.pump();
+      await _tapRoomSegment(tester, 'Color');
+      expect(_cctSlider(), findsOneWidget);
+      tester.widget<Slider>(_cctSlider()).onChanged!(4500);
+      await tester.pump();
+      tester.widget<Slider>(_cctSlider()).onChangeEnd!(4500);
+      await tester.pump();
+      expect(connection.api.nodeCurveColorTemperatureCalls.single.kelvin, 4500);
 
-    // Ordinary state events also close the slider and drop its local value;
-    // this must not depend on a new hello or reconnect.
-    connection.emitRhythmState(RhythmRoomState.fromJson({
-      'node_id': 'room-1',
-      'state': 'active',
-      'rhythm_enabled': true,
-      'lights_on': true,
-      'brightness': 85,
-      'kelvin': 1800,
-      'profile_settings': {
-        'light_schedule': {
-          'kind': 'named',
-          'schedule_id': 'evening',
-          'active_mode': 'sleep',
+      // Ordinary state events also close the slider and drop its local value;
+      // this must not depend on a new hello or reconnect.
+      connection.emitRhythmState(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'rhythm_enabled': true,
+        'lights_on': true,
+        'brightness': 85,
+        'kelvin': 1800,
+        'profile_settings': {
+          if (legacy) 'resolved_mode': 'sleep',
+          if (legacy)
+            'room_schedule': {
+              'source': 'follow_time',
+              'wake_time': '09:00',
+              'sleep_time': '23:00'
+            },
+          if (!legacy)
+            'light_schedule': {
+              'kind': 'named',
+              'schedule_id': 'evening',
+              'active_mode': 'sleep',
+            },
         },
-      },
-    }));
-    await tester.pumpAndSettle();
-    expect(_cctSlider(), findsNothing);
-    expect(tester.getSemantics(_colorControl()).value, '1800 kelvin');
-  });
+      }));
+      await tester.pumpAndSettle();
+      expect(_cctSlider(), findsNothing);
+      expect(tester.getSemantics(_colorControl()).value, '1800 kelvin');
+
+      // Mode-only updates still matter when both curves currently render the
+      // same warm white point. Writable-settings equality must not hide them.
+      connection.emitRhythmState(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'rhythm_enabled': true,
+        'lights_on': true,
+        'brightness': 85,
+        'kelvin': 1800,
+        'profile_settings': {
+          if (legacy) 'resolved_mode': 'day',
+          if (legacy)
+            'room_schedule': {
+              'source': 'follow_time',
+              'wake_time': '09:00',
+              'sleep_time': '23:00'
+            },
+          if (!legacy)
+            'light_schedule': {
+              'kind': 'named',
+              'schedule_id': 'evening',
+              'active_mode': 'day'
+            },
+        },
+      }));
+      await tester.pumpAndSettle();
+      expect(
+          serverSync.curveColorTemperatureAdjustableForNode('room-1'), isTrue);
+      await _tapRoomSegment(tester, 'Color');
+      expect(_cctSlider(), findsOneWidget);
+    });
+  }
 
   testWidgets('color availability uses effective profiles with legacy fallback',
       (tester) async {
@@ -3953,8 +4006,7 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
   });
 
-  testWidgets(
-      'active Scenes reset restores the configured mode default',
+  testWidgets('active Scenes reset restores the configured mode default',
       (tester) async {
     final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();

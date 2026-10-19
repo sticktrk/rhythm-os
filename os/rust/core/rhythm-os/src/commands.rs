@@ -810,8 +810,11 @@ fn restored_node_state_from_room(room: &rhythm_core::Room) -> RestoredNodeState 
 fn profile_settings_dto(
     power_save: bool,
     settings: &RoomProfileSettings,
+    global_mode: RhythmMode,
+    local_hour: f32,
 ) -> RoomProfileSettingsDto {
     RoomProfileSettingsDto::from_settings(settings, room_mood_enabled(power_save, settings))
+        .with_resolved_mode(settings, global_mode, local_hour)
 }
 
 fn room_mode_transition_active(
@@ -2566,7 +2569,14 @@ fn build_node_state_dto_from_snapshot_parts(
         mood_active,
         standby_enabled: snap.standby_enabled,
         standby_active: snap.soft_off && !snap.hard_off,
-        profile_settings: profile_settings_dto(ctx.state.power_save, &snap.profile_settings),
+        profile_settings: profile_settings_dto(
+            ctx.state.power_save,
+            &snap.profile_settings,
+            ctx.active_mode,
+            ctx.display_context
+                .map(|display| display.curve.current_hour)
+                .unwrap_or_else(|| current_local_hour(ctx.utc_offset)),
+        ),
         room_profile: room_profile.clone(),
         motion_active,
         motion_owned,
@@ -2587,6 +2597,7 @@ pub fn build_node_state_event(
     let now = std::time::Instant::now();
     let (
         mode,
+        local_hour,
         room_state,
         observed_power,
         transitioning,
@@ -2676,6 +2687,7 @@ pub fn build_node_state_event(
         );
         (
             mode,
+            current_local_hour(s.utc_offset_hours),
             room_state,
             observed_power,
             transitioning,
@@ -2698,6 +2710,7 @@ pub fn build_node_state_event(
             hub_types,
             light_capabilities,
             mode,
+            local_hour,
             state: room_state,
             lights_on: observed_power.lights_on,
             observed_light: state
@@ -4528,7 +4541,12 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 mood_active,
                 standby_enabled: snap.standby_enabled,
                 standby_active: snap.soft_off && !snap.hard_off,
-                profile_settings: profile_settings_dto(s.power_save, &snap.profile_settings),
+                profile_settings: profile_settings_dto(
+                    s.power_save,
+                    &snap.profile_settings,
+                    active_mode,
+                    current_local_hour(utc_offset),
+                ),
                 room_profile: snap.profile_settings.clone(),
             };
             let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
@@ -4623,7 +4641,12 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     mood_active,
                     standby_enabled: room.standby_enabled,
                     standby_active: room.soft_off && !room.hard_off,
-                    profile_settings: profile_settings_dto(power_save, &room.profile_settings),
+                    profile_settings: profile_settings_dto(
+                        power_save,
+                        &room.profile_settings,
+                        active_mode,
+                        current_local_hour(utc_offset),
+                    ),
                     room_profile: room.profile_settings.clone(),
                 },
                 motion_active: None,
@@ -4733,7 +4756,15 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         mood_active,
         standby_enabled: snap.standby_enabled,
         standby_active: snap.soft_off && !snap.hard_off,
-        profile_settings: profile_settings_dto(power_save, &snap.profile_settings),
+        profile_settings: {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            profile_settings_dto(
+                power_save,
+                &snap.profile_settings,
+                s.active_mode,
+                current_local_hour(s.utc_offset_hours),
+            )
+        },
         room_profile: snap.profile_settings.clone(),
     })
 }
