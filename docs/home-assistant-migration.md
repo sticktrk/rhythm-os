@@ -18,7 +18,8 @@ HA deployment does not support whole-appliance backup or restore.
 | Phone enrollment | Exchange single-use code | Generate code after fresh HA admin authorization | Rhythm durable installation and bearer credentials |
 | LAN and remote access | Direct API and existing Rhythm tunnel | Credential revocation | Rhythm account/home and tunnel contracts |
 | Managed lights | Deployment capability | Reviewed selection while paused | HA registry identity plus explicit Rhythm opt-in |
-| Physical device setup | Hand off to HA | Manage in HA | HA integration |
+| Matter setup and original-code recovery | Capability-gated HA-backed app flow | Manage in HA | HA fabric; private original-code retention in Rhythm |
+| Other physical device setup | Hand off to HA | Manage in HA | HA integration |
 | Portable behavior | Account lighting-settings backup and reviewed restore | Profile import/export | Rhythm; import pauses control |
 | Whole installation recovery | Unavailable through appliance backup APIs | HA cold backup | HA Supervisor |
 | Appliance OTA, network provisioning, direct protocol pairing | Unavailable on add-on | Unavailable | HA host/app lifecycle |
@@ -27,6 +28,9 @@ The internal admin credential and Supervisor token are never phone credentials.
 Ingress identity headers have no authority on the mobile listener. The mobile
 listener requires positive bearer authorization even when the phone is on LAN.
 Unknown operations remain denied. Old appliances retain their current routes.
+The native app retains known add-on ownership across reconnects and suppresses
+saved direct hub connections while that deployment is selected. An rpiz remains
+on its existing device path. See [Matter management and deferred parity](home-assistant-addon.md#matter-management-from-the-mobile-app).
 
 ## Transfer lighting settings with the app
 

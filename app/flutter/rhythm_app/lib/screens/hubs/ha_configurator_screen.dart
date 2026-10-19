@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/solar_orbit.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
@@ -75,12 +76,21 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   bool _isSavingConfig = false;
   bool _wasAlreadyConfigured = false;
 
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+
+  void _onDeviceAccessChanged() {
+    if (_access.isCurrent || !mounted) return;
+    _isVerified = false;
+    setState(() {});
+  }
+
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
 
   @override
   void initState() {
     super.initState();
+    DirectHubAccess.changes.addListener(_onDeviceAccessChanged);
     _loadSavedConfig();
 
     _glowController = AnimationController(
@@ -95,6 +105,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
 
   @override
   void dispose() {
+    DirectHubAccess.changes.removeListener(_onDeviceAccessChanged);
     _hostController.dispose();
     _portController.dispose();
     _tokenController.dispose();
@@ -122,6 +133,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   }
 
   Future<void> _disconnectHomeAssistant() async {
+    if (!_access.isCurrent) return;
     final syncProvider = context.read<ServerSyncProvider>();
     final roomProvider = context.read<RoomProvider>();
     final homeProvider = context.read<HomeProvider>();
@@ -172,25 +184,29 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
       ),
     );
 
-    if (confirmed != true) return;
+    if (confirmed != true || !_access.isCurrent) return;
 
     // Tell server to drop hub + rooms, then clear locally
     await syncProvider.disconnectHub();
+    if (!mounted || !_access.isCurrent) return;
     await roomProvider.clearRoomsBySource(RoomSourceDto.homeAssistant);
+    if (!mounted || !_access.isCurrent) return;
 
     // Delete HA hub from HomeProvider
     final haHub = homeProvider.getFirstHubOfType(HubType.homeAssistant);
     if (haHub != null) {
       await homeProvider.deleteHub(haHub.id);
+      if (!mounted || !_access.isCurrent) return;
     }
 
     HapticFeedback.mediumImpact();
 
-    if (!mounted) return;
+    if (!mounted || !_access.isCurrent) return;
     Navigator.of(context).pop(true);
   }
 
   Future<void> _verifyConnection() async {
+    if (!_access.isCurrent) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -210,6 +226,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
       final provider = HomeAssistantProvider(config);
       final success = await provider.testConnection();
       await provider.dispose();
+      if (!mounted || !_access.isCurrent) return;
 
       setState(() {
         if (success) {
@@ -230,6 +247,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   }
 
   Future<void> _saveConfig() async {
+    if (!_access.isCurrent) return;
     if (!_isVerified || _isSavingConfig) return;
 
     final homeProvider = context.read<HomeProvider>();
@@ -268,14 +286,16 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
           token: _tokenController.text.trim(),
         );
         if (hub == null) {
-          throw StateError(homeProvider.error ?? 'Failed to save Home Assistant');
+          throw StateError(
+              homeProvider.error ?? 'Failed to save Home Assistant');
         }
       }
 
+      if (!mounted || !_access.isCurrent) return;
       final hubConnected =
           await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
       if (!hubConnected) {
-        if (!mounted) return;
+        if (!mounted || !_access.isCurrent) return;
         setState(() {
           _status = HAConnectionStatus.error;
           _errorMessage =
@@ -290,7 +310,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
         Navigator.of(context).pop(true);
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || !_access.isCurrent) return;
       setState(() {
         _status = HAConnectionStatus.error;
         _errorMessage = 'Failed to save Home Assistant: $e';
@@ -325,6 +345,21 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
 
   @override
   Widget build(BuildContext context) {
+    final haOwned = context
+        .watch<ServerSyncProvider>()
+        .deviceManagementOwnedByHomeAssistant;
+    if (!_access.isCurrent) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Device setup')),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: haOwned
+              ? const HomeAssistantDeviceSetup()
+              : const Text(
+                  'The connection changed. Close this screen and reopen device setup.'),
+        ),
+      );
+    }
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -1039,6 +1074,7 @@ class _DiscoveryBottomSheet extends StatefulWidget {
 
 class _DiscoveryBottomSheetState extends State<_DiscoveryBottomSheet>
     with SingleTickerProviderStateMixin {
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
   List<DiscoveredHub>? _discoveredHubs;
   bool _isScanning = false;
   String? _error;
@@ -1147,12 +1183,13 @@ class _DiscoveryBottomSheetState extends State<_DiscoveryBottomSheet>
     _scanAnimationController.repeat();
 
     try {
+      if (!_access.isCurrent) return;
       final hubs = await HubDiscoveryService.discoverHomeAssistant(
         timeout: const Duration(seconds: 5),
       );
 
       setState(() {
-        _discoveredHubs = hubs;
+        _discoveredHubs = _access.isCurrent ? hubs : const [];
         _isScanning = false;
       });
       _scanAnimationController.stop();

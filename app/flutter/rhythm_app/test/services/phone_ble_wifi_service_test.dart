@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/phone_ble_wifi_service.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:rhythm_core/rhythm_core.dart' show DirectHubAccess;
 
 const candidate = BleWifiDiscoveredCandidate(
     dsn: 'ACFIXTURE123456', address: 'ios-opaque-uuid');
@@ -91,8 +92,8 @@ void main() {
     final service = AylaPhoneBleWifiService(transport: transport);
     await expectLater(
         service.discover(knownSerials: {candidate.dsn.toUpperCase()}),
-        throwsA(isA<PhoneBleWifiFailure>().having(
-            (e) => e.message, 'message', bleWifiAlreadyAddedMessage)));
+        throwsA(isA<PhoneBleWifiFailure>()
+            .having((e) => e.message, 'message', bleWifiAlreadyAddedMessage)));
     expect(transport.gatt.disconnects, 1);
   });
 
@@ -186,6 +187,29 @@ void main() {
     await assertion;
     expect(transport.gatt.writes.length, 1);
     expect(transport.disposed, 1);
+  });
+
+  test('switching to HA during token write cancels the later Wi-Fi write',
+      () async {
+    DirectHubAccess.select(scope: 'rpiz', allowed: true);
+    addTearDown(() => DirectHubAccess.select(scope: null, allowed: true));
+    final transport = FakeTransport();
+    final barrier = transport.gatt.writeBarrier = Completer<void>();
+    final service = AylaPhoneBleWifiService(transport: transport);
+    final assertion = expectLater(
+      service.provision(candidate, token, wifi),
+      throwsA(isA<PhoneBleWifiFailure>()
+          .having((error) => error.uncertain, 'uncertain', true)),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(transport.gatt.writes.length, 1);
+    DirectHubAccess.select(scope: 'addon', allowed: false);
+    DirectHubAccess.select(scope: 'rpiz', allowed: true);
+    barrier.complete();
+    await assertion;
+    expect(transport.gatt.writes.length, 1);
+    expect(transport.disposed, 1);
+    await service.dispose();
   });
 
   test(

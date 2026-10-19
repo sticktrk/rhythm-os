@@ -204,6 +204,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Last known server hub for auto-connect.
   Hub? _serverHub;
+  Hub? _deviceOwnershipConnectionHub;
 
   /// Endpoint currently selected for the SDK connection.
   HubEndpoint? _activeConnectionEndpoint;
@@ -1207,7 +1208,11 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmDeploymentCapabilities get deploymentCapabilities =>
       _capabilities?.deployment ?? const RhythmDeploymentCapabilities.legacy();
   bool get deviceManagementOwnedByHomeAssistant =>
-      deploymentCapabilities.haDeviceManagement;
+      deploymentCapabilities.haDeviceManagement ||
+      _homeProvider.deviceAccessPolicy.ownedByHomeAssistant;
+  bool get canManageHaMatter =>
+      deviceManagementOwnedByHomeAssistant &&
+      deploymentCapabilities.haMatterManagement;
   bool get supportsFullBackupExport => deploymentCapabilities.fullBackupExport;
   bool get supportsFullBackupImport => deploymentCapabilities.fullBackupImport;
   bool get supportsSavedWifiProfiles =>
@@ -2604,6 +2609,7 @@ class ServerSyncProvider extends ChangeNotifier {
         _activityCloudCanProvision = activityCloudCanProvision ??
             (() =>
                 ServerActivityCloudProvisioningService.instance.canProvision) {
+    _homeProvider.refreshDirectHubAccess();
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -2707,6 +2713,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// every dependency change (including frequent RoomProvider notifies),
   /// this method is guarded to only act when the hub config actually changes.
   void connectIfAvailable() {
+    _homeProvider.refreshDirectHubAccess();
     // Demo mode: set the server hub reference so UI sees a hub,
     // but don't actually connect to the fake 127.0.0.1 host.
     if (HueServiceLocator.isDemoMode) {
@@ -2746,6 +2753,7 @@ class ServerSyncProvider extends ChangeNotifier {
         'ServerSync: connectIfAvailable — connecting to ${serverHub.endpoint.host}:${serverHub.endpoint.port}',
       );
       final hubChanged = !_sameServerHubIdentity(_serverHub, serverHub);
+      _deviceOwnershipConnectionHub = null;
       _serverHub = serverHub;
       if (hubChanged) {
         _hasBeenSynced = false;
@@ -2765,6 +2773,7 @@ class ServerSyncProvider extends ChangeNotifier {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
       final removedHub = _serverHub;
       _serverHub = null;
+      _deviceOwnershipConnectionHub = null;
       _activeConnectionEndpoint = null;
       _hasBeenSynced = false;
       _roomReadinessRefreshPending = false;
@@ -2842,6 +2851,7 @@ class ServerSyncProvider extends ChangeNotifier {
       AppStartupPhase.endpoint,
       endpointTimer.elapsedMilliseconds,
     );
+    _deviceOwnershipConnectionHub = auth.hub;
     await _connection.connect(
       endpoint.host,
       port: endpoint.port,
@@ -3582,6 +3592,28 @@ class ServerSyncProvider extends ChangeNotifier {
     _helloRooms = _buildRoomSummaries();
     _lastHubInfos = hello.hubs;
     _capabilities = hello.capabilities;
+    final ownershipHub = _deviceOwnershipConnectionHub;
+    // A hello can already be queued when the user changes homes. Only the
+    // connection actually established for the still-selected server owns it.
+    // Legacy endpoint identities can be promoted to the live durable ID.
+    if (ownershipHub != null &&
+        _sameServerHubIdentity(ownershipHub, _homeProvider.activeServerHub) &&
+        _sameServerHubIdentity(ownershipHub, _serverHub) &&
+        !serverIdentitiesConflict(
+          ownershipHub.serverInstanceId,
+          hello.serverInstanceId,
+        )) {
+      _homeProvider.deviceAccessPolicy.observeServer(
+        ownershipHub,
+        haDeviceManagement:
+            hello.capabilities?.deployment.haDeviceManagement ?? false,
+        explicitDeployment: hello.capabilities?.deployment.kind != null &&
+            hello.capabilities!.deployment.kind != 'legacy',
+        platformContext: hello.platformContext,
+        serverInstanceId: hello.serverInstanceId,
+      );
+      _homeProvider.refreshDirectHubAccess();
+    }
     _hasBeenSynced = true;
     _completeRoomReadinessRefresh(notify: false);
     _scheduleRoomReadinessGraceExpiryIfNeeded();
@@ -5594,6 +5626,12 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   Future<bool> pushHubCredentials(RoomSourceDto source) async {
+    final demoHue = HueServiceLocator.isDemoMode && source == RoomSourceDto.hue;
+    if (!demoHue &&
+        (deviceManagementOwnedByHomeAssistant ||
+            !_homeProvider.deviceAccessPolicy.allowsDirectAccess)) {
+      return false;
+    }
     if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
     if (source == RoomSourceDto.hue && !hueRoomAuthorityConsentSupported) {
       debugPrint(
@@ -5637,6 +5675,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
+    if (deviceManagementOwnedByHomeAssistant ||
+        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+      return false;
+    }
     if (!_connection.connected) return false;
     final hubConnected = await api.hubCredentials(
       hubType: 'homeassistant',
@@ -5652,6 +5694,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tell the server to disconnect ALL hubs — clears all credentials, runtimes,
   /// and rooms.
   Future<void> disconnectHub() async {
+    if (deviceManagementOwnedByHomeAssistant ||
+        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+      return;
+    }
     if (!_connection.connected) return;
     debugPrint('ServerSync: Sending hub disconnect to server');
     await api.hubDisconnect();
@@ -5659,6 +5705,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Disconnect a single hub by type + address.
   Future<void> disconnectOneHub(String hubType, String address) async {
+    if (deviceManagementOwnedByHomeAssistant ||
+        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+      return;
+    }
     if (!_connection.connected) return;
     debugPrint('ServerSync: Disconnecting hub $hubType @ $address');
     await api.hubDisconnectOne(hubType: hubType, address: address);
@@ -5670,6 +5720,10 @@ class ServerSyncProvider extends ChangeNotifier {
     String address, {
     bool refreshState = true,
   }) async {
+    if (deviceManagementOwnedByHomeAssistant ||
+        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+      return false;
+    }
     if (!_connection.connected) return false;
     if (hubType.isEmpty || address.isEmpty) return false;
     debugPrint('ServerSync: Retrying hub $hubType @ $address');
@@ -5683,6 +5737,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Re-arm startup retry for multiple hubs, then refresh state once.
   Future<int> retryHubs(Iterable<Map<String, dynamic>> hubInfos) async {
+    if (deviceManagementOwnedByHomeAssistant ||
+        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+      return 0;
+    }
     if (!_connection.connected) return 0;
     var accepted = 0;
     for (final hubInfo in hubInfos) {
@@ -5700,6 +5758,12 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   Future<bool> _pushHubCredentialsForSource(RoomSourceDto source) async {
+    final demoHue = HueServiceLocator.isDemoMode && source == RoomSourceDto.hue;
+    if (!demoHue &&
+        (deviceManagementOwnedByHomeAssistant ||
+            !_homeProvider.deviceAccessPolicy.allowsDirectAccess)) {
+      return false;
+    }
     final hubType = _hubTypeForSource(source);
     if (hubType == null) return false;
 
@@ -5721,7 +5785,7 @@ class ServerSyncProvider extends ChangeNotifier {
     );
     _lastHubReconnectTime = DateTime.now();
     _beginRoomReadinessRefresh();
-    await _connection.reconnect();
+    if (!demoHue) await _connection.reconnect();
     return hubConnected;
   }
 

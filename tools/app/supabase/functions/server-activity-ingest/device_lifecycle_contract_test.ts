@@ -4,6 +4,29 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
 }
 
+Deno.test('HA Matter lifecycle keeps correlation without commissioning or recovery secrets', () => {
+  const row = rowForDeviceLifecycle({
+    userId: 'user-1', homeId: 'home-1', hubId: 'addon-1',
+    serverInstanceId: 'installation-1',
+    event: {
+      id: 'device-lifecycle-ha-matter', epoch_ms: 1_786_277_600_000,
+      action: 'pair', hub_type: 'homeassistant', outcome: 'complete',
+      commissioner: 'phone', correlation_id: 'ha-matter-journey',
+      setup_code: 'MT:ORIGINAL-LABEL', handoff_setup_payload: 'MT:EPHEMERAL',
+      handoff_passcode: 20202021, identity: 'private-ha-registry-identity',
+      original_code_saved: true, token: 'private-supervisor-token',
+    },
+  })
+  assert(row?.hub_type === 'homeassistant', 'HA must retain device ownership')
+  assert(row?.correlation_id === 'ha-matter-journey', 'journey must remain joinable')
+  assert(row?.commissioner === 'phone', 'native handoff outcome must remain attributable')
+  const serialized = JSON.stringify(row)
+  for (const secret of ['MT:ORIGINAL-LABEL', 'MT:EPHEMERAL', '20202021',
+    'private-ha-registry-identity', 'private-supervisor-token', 'original_code_saved']) {
+    assert(!serialized.includes(secret), 'recovery or handoff material reached cloud activity')
+  }
+})
+
 Deno.test('device lifecycle row forwards only the privacy-safe contract', () => {
   const row = rowForDeviceLifecycle({
     userId: 'user-1',

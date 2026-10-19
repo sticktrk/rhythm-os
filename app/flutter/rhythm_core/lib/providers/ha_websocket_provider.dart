@@ -6,6 +6,7 @@
 /// - Service calls for light control
 library;
 
+import 'direct_hub_access.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -123,16 +124,10 @@ class HaArea {
   final String id;
   final String name;
 
-  const HaArea({
-    required this.id,
-    required this.name,
-  });
+  const HaArea({required this.id, required this.name});
 
   factory HaArea.fromJson(Map<String, dynamic> json) {
-    return HaArea(
-      id: json['area_id'] as String,
-      name: json['name'] as String,
-    );
+    return HaArea(id: json['area_id'] as String, name: json['name'] as String);
   }
 }
 
@@ -164,7 +159,14 @@ class HaWebSocketProvider {
   List<HaArea>? _areaRegistry;
   Map<String, dynamic>? _haConfig;
 
-  HaWebSocketProvider(this.config);
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+  late final VoidCallback _removeAccessListener;
+
+  HaWebSocketProvider(this.config) {
+    _removeAccessListener = _access.cancelOnChange(() {
+      unawaited(disconnect());
+    });
+  }
 
   /// Current connection state.
   WsConnectionState get connectionState => _connectionState;
@@ -180,6 +182,7 @@ class HaWebSocketProvider {
 
   /// Connect to Home Assistant WebSocket API.
   Future<bool> connect() async {
+    if (!_access.isCurrent) return false;
     if (_connectionState == WsConnectionState.connected) {
       return true;
     }
@@ -189,7 +192,9 @@ class HaWebSocketProvider {
 
     try {
       final protocol = config.useSsl ? 'wss' : 'ws';
-      final uri = Uri.parse('$protocol://${config.host}:${config.port}/api/websocket');
+      final uri = Uri.parse(
+        '$protocol://${config.host}:${config.port}/api/websocket',
+      );
 
       debugPrint('HaWebSocket: Connecting to $uri');
       _channel = WebSocketChannel.connect(uri);
@@ -224,6 +229,7 @@ class HaWebSocketProvider {
         },
       );
 
+      if (!_access.isCurrent) return false;
       if (result) {
         _connectionState = WsConnectionState.connected;
         debugPrint('HaWebSocket: Connected and authenticated');
@@ -248,10 +254,7 @@ class HaWebSocketProvider {
         case 'auth_required':
           // Send authentication
           _connectionState = WsConnectionState.authenticating;
-          _send({
-            'type': 'auth',
-            'access_token': config.token,
-          });
+          _send({'type': 'auth', 'access_token': config.token});
           break;
 
         case 'auth_ok':
@@ -299,12 +302,14 @@ class HaWebSocketProvider {
 
   /// Send a message to the WebSocket.
   void _send(Map<String, dynamic> message) {
+    _access.check();
     if (_channel == null) return;
     _channel!.sink.add(jsonEncode(message));
   }
 
   /// Send a request and wait for response.
   Future<dynamic> _request(String type, [Map<String, dynamic>? data]) async {
+    _access.check();
     if (!isConnected) {
       throw StateError('Not connected to Home Assistant');
     }
@@ -313,11 +318,7 @@ class HaWebSocketProvider {
     final completer = Completer<dynamic>();
     _pendingRequests[id] = completer;
 
-    final message = {
-      'id': id,
-      'type': type,
-      ...?data,
-    };
+    final message = {'id': id, 'type': type, ...?data};
     _send(message);
 
     return completer.future.timeout(
@@ -389,13 +390,15 @@ class HaWebSocketProvider {
       final ieee = device.zhaIeee;
       if (ieee == null) continue;
 
-      switches.add(DiscoveredSwitch(
-        ieee: ieee,
-        deviceId: device.id,
-        areaId: device.areaId!,
-        areaName: areaNames[device.areaId] ?? device.areaId!,
-        name: device.name ?? ieee,
-      ));
+      switches.add(
+        DiscoveredSwitch(
+          ieee: ieee,
+          deviceId: device.id,
+          areaId: device.areaId!,
+          areaName: areaNames[device.areaId] ?? device.areaId!,
+          name: device.name ?? ieee,
+        ),
+      );
     }
 
     debugPrint('HaWebSocket: Discovered ${switches.length} Hue switches');
@@ -436,12 +439,7 @@ class HaWebSocketProvider {
 
   /// Turn off lights in an area.
   Future<void> turnOffArea(String areaId) async {
-    await callService(
-      'light',
-      'turn_off',
-      {},
-      target: {'area_id': areaId},
-    );
+    await callService('light', 'turn_off', {}, target: {'area_id': areaId});
   }
 
   /// Clear cached registries to force refresh.
@@ -455,8 +453,9 @@ class HaWebSocketProvider {
   Future<void> disconnect() async {
     _subscription?.cancel();
     _subscription = null;
-    await _channel?.sink.close();
+    final channel = _channel;
     _channel = null;
+    await channel?.sink.close();
     _connectionState = WsConnectionState.disconnected;
     _pendingRequests.clear();
     clearCache();
@@ -465,6 +464,7 @@ class HaWebSocketProvider {
 
   /// Dispose of resources.
   Future<void> dispose() async {
+    _removeAccessListener();
     await disconnect();
     await _eventController.close();
   }

@@ -42,6 +42,7 @@ class RoomOrbitPage extends StatefulWidget {
 }
 
 class _RoomOrbitPageState extends State<RoomOrbitPage> {
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
   CurveData? _curveData;
   bool _isToggling = false;
   int? _manualBrightness;
@@ -83,6 +84,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
   }
 
   void _configureHueService() {
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     if (!HueServiceLocator.isDemoMode) {
       final homeProvider = context.read<HomeProvider>();
       final hueHub = homeProvider.getFirstHubOfType(HubType.hue);
@@ -97,11 +99,12 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
 
   Future<void> _loadInitialState() async {
     // Sync initial light state for Hue rooms
-    if (widget.room.source == RoomSourceDto.hue) {
+    if (widget.room.source == RoomSourceDto.hue &&
+        (_access.isCurrent || HueServiceLocator.isDemoMode)) {
       try {
         _configureHueService();
         final isOn = await HueServiceLocator.instance.isRoomOn(widget.room.id);
-        if (mounted) {
+        if (mounted && (_access.isCurrent || HueServiceLocator.isDemoMode)) {
           final roomProvider = context.read<RoomProvider>();
           final room = roomProvider.getRoom(widget.room.id);
           if (room != null && room.lightsOn != isOn) {
@@ -212,7 +215,8 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
     if (result == null) return;
 
     // Execute returned commands (same pattern as _toggleLight)
-    if (widget.room.source == RoomSourceDto.hue) {
+    if (widget.room.source == RoomSourceDto.hue &&
+        (_access.isCurrent || HueServiceLocator.isDemoMode)) {
       _configureHueService();
       for (final cmd in result.commands) {
         if (cmd.commandType == LightCommandType.turnOn) {
@@ -230,6 +234,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
   }
 
   Future<void> _toggleLight() async {
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     if (_isToggling) return;
 
     setState(() {
@@ -331,6 +336,7 @@ class _RoomOrbitPageState extends State<RoomOrbitPage> {
   }
 
   Future<void> _applyValuesAtHour(double hour) async {
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     if (widget.room.source != RoomSourceDto.hue) return;
 
     try {

@@ -1,3 +1,4 @@
+import 'rhythm_ha_matter_api.dart';
 import 'pairing_receipt_reader.dart';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
@@ -162,6 +163,8 @@ class RhythmServerApi {
   static final _log = Logger('rhythm_sdk.api');
 
   final Dio _dio;
+
+  RhythmHaMatterApi get haMatter => RhythmHaMatterApi(_dio);
   final RhythmCacheUpdater? _onStatesReceived;
 
   RhythmServerApi(this._dio, {RhythmCacheUpdater? onStatesReceived})
@@ -1814,8 +1817,7 @@ class RhythmServerApi {
           options: Options(
               headers: {'Cache-Control': 'no-store'},
               validateStatus: (_) => true));
-      if (response.statusCode == 200 &&
-          response.data is Map<String, dynamic>) {
+      if (response.statusCode == 200 && response.data is Map<String, dynamic>) {
         return RhythmWifiCheck.fromJson(response.data as Map<String, dynamic>);
       }
     } catch (_) {}
@@ -1828,8 +1830,7 @@ class RhythmServerApi {
       final response = await _dio.get(
           'api/wifi/verify/${Uri.encodeComponent(operationId)}',
           options: Options(validateStatus: (_) => true));
-      if (response.statusCode == 200 &&
-          response.data is Map<String, dynamic>) {
+      if (response.statusCode == 200 && response.data is Map<String, dynamic>) {
         return RhythmWifiCheck.fromJson(response.data as Map<String, dynamic>);
       }
       // The Box restarted and forgot the check.

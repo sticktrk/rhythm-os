@@ -22,13 +22,13 @@ RULES = {
     SDK + "rhythm_server_api.dart": (["readPairingReceipt(_dio, sessionId)"], []),
     SDK + "rhythm_matter_api.dart": (["readPairingReceipt(_dio, sessionId,"], []),
     "app/flutter/rhythm_app/ios/PhoneMatterRequestContext.swift": (
-        ["enum PhoneMatterBridge", "static func responseEnvelope"], [],
+        ["enum PhoneMatterBridge", "static func responseEnvelope", "func awaitHaCompletion", "PhoneMatterBridge.responseEnvelope"], [],
     ),
     "app/flutter/rhythm_app/ios/Runner/AppDelegate.swift": (
         ["PhoneMatterBridge.appGroup"], ["static let appGroup", "static let responseKey", "baseURLKey", "authTokenKey", "createdAtKey"],
     ),
     "app/flutter/rhythm_app/ios/MatterCommissioningExtension/RequestHandler.swift": (
-        ["PhoneMatterBridge.responseEnvelope"], ["static let appGroup", "static let responseKey"],
+        ["context.awaitHaCompletion"], ["static let appGroup", "static let responseKey"],
     ),
     RUST + "integrations/rhythm-matter/src/commissioning.rs": (
         ["provisioning::load_accessory_wifi_credentials(state)"],

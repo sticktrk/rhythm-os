@@ -51,6 +51,45 @@ struct PhoneMatterRequestContextTests {
     precondition(params["session_id"] as? String == context.sessionID)
     print("PASS: native HTTP handoff keeps original and temporary payloads distinct")
 
+    let haContext = PhoneMatterRequestContext(
+      baseURL: "http://127.0.0.1:\(CommandLine.arguments[1])/", authToken: "owner-token",
+      originalSetupPayload: "MT:ORIGINAL-OWNER-CODE", sessionID: "ha-attempt", createdAt: now,
+      backend: "ha_addon", codeSource: "original_label")
+    let haRequest = try haContext.handoffRequest(onboardingPayload: "MT:TEMPORARY-HANDOFF")
+    precondition(haRequest.url?.path == "/api/addon/matter/pair")
+    let haBody = try JSONSerialization.jsonObject(with: haRequest.httpBody!) as! [String: Any]
+    precondition(haBody["setup_code"] as? String == "MT:ORIGINAL-OWNER-CODE")
+    precondition(haBody["handoff_setup_payload"] as? String == "MT:TEMPORARY-HANDOFF")
+    precondition(haBody["code_source"] as? String == "original_label")
+    precondition(haBody["params"] == nil)
+    for (backend, source) in [("https://external.invalid", "original_label"), ("ha_addon", "secret-source")] {
+      let invalid = PhoneMatterRequestContext(baseURL: "http://127.0.0.1", authToken: nil,
+        originalSetupPayload: "MT:CODE", sessionID: "invalid", createdAt: now,
+        backend: backend, codeSource: source)
+      do { _ = try invalid.handoffRequest(onboardingPayload: "MT:TEMPORARY"); preconditionFailure("invalid route accepted") }
+      catch {}
+    }
+    let pendingData = try JSONSerialization.data(withJSONObject: ["session_id": "ha-attempt", "status": "pending"])
+    let completion = try await haContext.awaitHaCompletion(data: pendingData, statusCode: 200,
+      session: URLSession(configuration: .ephemeral), pollNanoseconds: 1)
+    let completedEnvelope = try JSONSerialization.jsonObject(with: completion) as! [String: Any]
+    precondition((completedEnvelope["body"] as! [String: Any])["status"] as? String == "completed")
+    for (id, status) in [("ha-attempt", "unknown"), ("ha-attempt", "failed"), ("wrong-attempt", "completed")] {
+      do {
+        _ = try await haContext.awaitHaCompletion(data: JSONSerialization.data(withJSONObject:
+          ["session_id": id, "status": status]), statusCode: 200,
+          session: URLSession(configuration: .ephemeral), pollNanoseconds: 1)
+        preconditionFailure("unconfirmed receipt completed native commissioning")
+      } catch {}
+    }
+    do {
+      _ = try await haContext.awaitHaCompletion(data: pendingData, statusCode: 200,
+        session: URLSession(configuration: .ephemeral), pollNanoseconds: 1, isCurrent: { false })
+      preconditionFailure("cancelled native session was allowed to poll")
+    } catch is CancellationError {}
+    print("PASS: HA native completion waits for matching confirmed receipt without replaying POST")
+    print("PASS: HA native handoff preserves code provenance and rejects unknown backends")
+
     let failedReceipt = fixture["failed_receipt"] as! [String: Any]
     let failedData = try JSONSerialization.data(withJSONObject: failedReceipt)
     for status in ["failed", "complete", "pending", "future_status"] {

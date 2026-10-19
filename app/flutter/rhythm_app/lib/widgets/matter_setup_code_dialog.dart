@@ -12,10 +12,15 @@ class MatterSetupCodeDialog extends StatefulWidget {
     super.key,
     required this.secret,
     this.onCopied,
+    this.title = 'Matter setup code',
+    this.description =
+        'Keep this private. Anyone with this code may be able to pair the device after it is reset.',
   });
 
   final RhythmPairingRecoverySecret secret;
   final VoidCallback? onCopied;
+  final String title;
+  final String description;
 
   @override
   State<MatterSetupCodeDialog> createState() => _MatterSetupCodeDialogState();
@@ -27,14 +32,12 @@ class _MatterSetupCodeDialogState extends State<MatterSetupCodeDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Matter setup code'),
+      title: Text(widget.title),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Keep this private. Anyone with this code may be able to pair the device after it is reset.',
-          ),
+          Text(widget.description),
           const SizedBox(height: 16),
           Container(
             width: double.infinity,

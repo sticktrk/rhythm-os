@@ -4,7 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
+import 'package:rhythm_core/rhythm_core.dart'
+    show HubEndpoint, DirectHubAccess, DirectHubAccessLease;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
@@ -140,6 +141,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   late final AnimationController _pulseController;
   late final AnimationController _sweepController;
   late final RhythmMatterApi _pairingApi;
+  final DirectHubAccessLease _directHubLease = DirectHubAccess.capture();
   late final PhoneMatterCommissioner _phoneCommissioner;
   late MatterAddMethod _activeAddMethod;
   late final String _journeyId;
@@ -203,6 +205,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _pulseController.dispose();
     _sweepController.dispose();
     _progressSub?.cancel();
+    if (_flow.isRunning) {
+      unawaited(_phoneCommissioner.cancel(_pairingSessionId));
+    }
     _flow.dispose();
     super.dispose();
   }
@@ -298,7 +303,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   Future<void> _startPairing({MatterAddMethod? retryMethod}) async {
     final setupPayload = _setupPayload;
-    if (!isLikelyMatterSetupPayload(setupPayload) || _pairingRequestInFlight) {
+    if (!_directHubLease.isCurrent ||
+        !isLikelyMatterSetupPayload(setupPayload) ||
+        _pairingRequestInFlight) {
       return;
     }
 
@@ -369,6 +376,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       if (_activeAddMethod.usesPhoneCommissioner) {
         _flow.expectReceipt();
       }
+      _directHubLease.check();
       final result = _activeAddMethod.usesPhoneCommissioner
           ? await _phoneCommissioner.commission(
               baseUrl: widget.endpoint.baseUrl,
@@ -457,10 +465,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           _ => 'Pairing failed.',
         },
         detail: switch (stage) {
-          'matter_wifi_setup' =>
-            _userFacingMatterPairingDetail(result.error,
-                    technicalFallback: wifiSetupGuidance) ??
-                wifiSetupGuidance,
+          'matter_wifi_setup' => _userFacingMatterPairingDetail(result.error,
+                  technicalFallback: wifiSetupGuidance) ??
+              wifiSetupGuidance,
           'matter_bluetooth' =>
             'Move the Rhythm Box closer to the device, put the device back '
                 'in pairing mode, and try again.',

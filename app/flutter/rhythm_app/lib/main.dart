@@ -154,6 +154,9 @@ class _StartupLoadingApp extends StatelessWidget {
 Future<RhythmStartupResult> initializeRhythmApp(
   PlatformCapabilities caps,
 ) async {
+  // No cached direct device transport may start before the selected home loads.
+  DirectHubAccess.select(scope: 'startup', allowed: false);
+
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
   final performance = AppStartupPerformance.instance;

@@ -78,23 +78,35 @@ class PhoneMatterCommissioningService : Service(), CommissioningService.Callback
         port: Int,
         passcode: Long,
     ): Map<String, Any?> {
-        val endpoint = session.baseUrl.trimEnd('/') + "/api/devices/pair"
+        val response = requestHandoff(session, session.handoffPath, "POST",
+            phoneMatterHandoffBody(session, address, port, passcode))
+        if (session.backend != "ha_addon") return response
+        return awaitHaMatterCompletion(session.sessionId, response,
+            poll = { requestHandoff(session, "/api/addon/matter/pairing/${session.sessionId}", "GET", null) },
+            isActive = { PhoneMatterCommissioningCoordinator.shared.isActive(session) })
+    }
+
+    private fun requestHandoff(
+        session: PhoneMatterCommissioningSession, path: String, method: String, body: JSONObject?,
+    ): Map<String, Any?> {
+        val endpoint = session.baseUrl.trimEnd('/') + path
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         try {
             if (!PhoneMatterCommissioningCoordinator.shared.attachHandoff(session, connection)) {
                 throw InterruptedException("Commissioning attempt ended")
             }
-            connection.requestMethod = "POST"
+            connection.requestMethod = method
             connection.connectTimeout = 15_000
-            connection.readTimeout = 240_000
-            connection.doOutput = true
+            connection.readTimeout = if (method == "GET") 10_000 else 240_000
+            connection.doOutput = body != null
             connection.setRequestProperty("Content-Type", "application/json")
             session.authToken?.takeIf { it.isNotEmpty() }?.let {
                 connection.setRequestProperty("Authorization", "Bearer $it")
             }
-            val body = phoneMatterHandoffBody(session, address, port, passcode)
-            connection.outputStream.use { output ->
-                output.write(body.toString().toByteArray(Charsets.UTF_8))
+            if (body != null) {
+                connection.outputStream.use { output ->
+                    output.write(body.toString().toByteArray(Charsets.UTF_8))
+                }
             }
             val status = connection.responseCode
             val stream = if (status in 200..299) {
@@ -111,11 +123,42 @@ class PhoneMatterCommissioningService : Service(), CommissioningService.Callback
     }
 }
 
+/** Only GET receipts repeat while Android keeps the commissioning window open. */
+internal fun awaitHaMatterCompletion(
+    sessionId: String,
+    initial: Map<String, Any?>,
+    poll: () -> Map<String, Any?>,
+    isActive: () -> Boolean = { true },
+    wait: () -> Unit = { Thread.sleep(1_500) },
+): Map<String, Any?> {
+    val deadline = System.nanoTime() + 230_000_000_000L
+    var response = initial
+    while (true) {
+        if (!isActive()) throw InterruptedException("Commissioning attempt ended")
+        val body = response["body"] as? Map<*, *>
+        require(body?.get("session_id") == sessionId) { "Mismatched commissioning receipt" }
+        if (body?.get("status") == "completed") return response
+        if (body?.get("status") != "pending" || System.nanoTime() >= deadline) {
+            throw ServerPairingException("Home Assistant did not confirm pairing. Check this attempt in Rhythm before trying again.")
+        }
+        wait()
+        response = poll()
+    }
+}
+
 internal class ServerPairingException(val safeMessage: String) : Exception()
 
 internal fun phoneMatterHandoffBody(
     session: PhoneMatterCommissioningSession, address: String, port: Int, passcode: Long,
-): JSONObject = JSONObject()
+): JSONObject = if (session.backend == "ha_addon") JSONObject()
+    .put("session_id", session.sessionId)
+    .put("setup_code", session.originalSetupPayload)
+    .put("code_source", session.codeSource)
+    .put("rendezvous", "phone")
+    .put("handoff_ip_address", address)
+    .put("handoff_port", port)
+    .put("handoff_passcode", passcode)
+else JSONObject()
     .put("hub_type", "matter")
     .put("session_id", session.sessionId)
     .put("params", JSONObject()

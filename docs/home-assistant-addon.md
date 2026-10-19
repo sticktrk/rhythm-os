@@ -45,8 +45,8 @@ Supervisor and cloudflared credentials stay server-side.
 The runtime registers only `rhythm-ha`, constructing one Supervisor connection.
 The persisted credential contains a `credential_source: supervisor` marker,
 never the Supervisor token. HA owns physical integration setup, areas, location
-and timezone. Direct device pairing, Wi-Fi provisioning, appliance OTA and full
-appliance backup import/export remain denied by an explicit route policy.
+and timezone. Direct device pairing, appliance Wi-Fi provisioning, appliance OTA
+and full appliance backup import/export remain denied by an explicit route policy.
 
 New installs start paused with empty selection. Reviewed registry identity is
 separate from mutable routing entity IDs. Selection requires a current snapshot
@@ -54,6 +54,56 @@ revision and previous-selection precondition. New, replaced, disabled or
 unresolved devices do not inherit control. Commands resolve to exact selected
 entities, including area commands. Complete inventory refreshes replace the
 catalog; partial failures retain previous state without authorizing stale writes.
+
+### Matter management from the mobile app
+
+An add-on advertising `ha_matter_management` lets the mobile app pair and manage
+Matter devices through HA Core's authenticated Matter API. The route is mobile
+app → Rhythm add-on → HA Core → HA Matter Server. The add-on does not run a second
+Matter controller, expose Matter Server's WebSocket port, or give the phone its
+Supervisor credential. Ordinary lighting still uses HA entities and services;
+Rhythm curves and schedules continue running in the add-on.
+
+Already-networked devices use the sharing code from their existing controller.
+New devices use supported native phone provisioning and hand off commissioning
+to HA. Thread devices require a working Thread border router. Availability and
+operations are capability-gated; old add-ons retain the existing setup-in-HA flow.
+HA commissioning success is separate from selecting the resulting light for
+Rhythm control. Review the HA identity and managed-light selection before enabling
+adaptation.
+
+Original label-code recovery is retained. Original codes are stored privately in
+the add-on and revealed only to an authorized owner. Sharing codes and native
+handoff passcodes never overwrite the original label code. HA commissioning does
+not return the newly added device identity, so the app asks the user to confirm
+the device before binding a retained original code. For a light already in HA,
+save its original label code explicitly; HA cannot reconstruct a code Rhythm
+never received. Revealed codes are masked by default and copied with expiry.
+Confirmed originals awaiting device confirmation remain available for seven days.
+The private store is `/data/rhythm/matter/ha-setup-payloads.json`; full cold backups
+include it, portable exports exclude it, and Rhythm reset clears it. Recovery
+checks the current HA registry and fabric identity before revealing a code.
+
+After the app consumes a terminal pairing result, it acknowledges the receipt to
+release space for later attempts. Pending attempts and original codes still
+awaiting device confirmation cannot be acknowledged. Acknowledgement preserves
+the device's saved original code and fences replay of the consumed attempt. The
+app retains its recovery pointer until acknowledgement succeeds; older add-ons
+without this capability keep the existing receipt workflow.
+
+Selecting the HA add-on disables direct hub connections in the mobile app,
+including saved bridge probes, discovery and background reads. This ownership
+policy remains active while HA is disconnected. Selecting an rpiz keeps the
+existing rpiz commissioning and recovery path; connection failure never silently
+moves a device to another controller.
+
+The following HA parity work is deferred: migration of an already-paired device's
+Wi-Fi network with rollback, raw Matter captures, bulb auditions and custom quirk
+profiles, native Matter multicast groups, same-node recovery and forced-removal
+archives, and migration of controller fabric backups. HA light groups and
+commissioning Wi-Fi credentials are not substitutes for those operations.
+Unsupported actions remain unavailable in HA mode. These deferrals do not remove
+the existing rpiz functionality.
 
 ## Persistence and recovery
 
@@ -129,3 +179,8 @@ migration gates pass. Synthetic Supervisor tests do not establish real HAOS
 Ingress/port mapping, real phone LAN/cellular behavior, native amd64/aarch64
 execution, supported physical models, cold restore, rollback or sustained resource
 behavior. Legacy protocol/runtime removal follows those gates.
+
+The mobile Matter path has synthetic HA protocol and native handoff coverage.
+Unsigned iOS extension builds verify its host dependency, embedding and shared
+container entitlement. Signed iOS and Android commissioning of physical Wi-Fi
+and Thread devices remains a release gate.

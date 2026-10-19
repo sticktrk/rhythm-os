@@ -23,7 +23,23 @@ import 'hue_bridge_service.dart';
 class RealHueBridgeService implements HueBridgeService {
   static final RealHueBridgeService instance = RealHueBridgeService._();
 
-  RealHueBridgeService._();
+  RealHueBridgeService._() {
+    DirectHubAccess.changes.addListener(() {
+      if (_access?.isCurrent == true) return;
+      _closeRestClient();
+      unawaited(disposeSse());
+      unawaited(stopLightMonitoring());
+    });
+  }
+
+  DirectHubAccessLease? _access;
+
+  DirectHubAccessLease _checkAccess() {
+    final access = _access;
+    if (access == null) throw StateError('Hue is not configured.');
+    access.check();
+    return access;
+  }
 
   HueConfig? _config;
 
@@ -59,6 +75,7 @@ class RealHueBridgeService implements HueBridgeService {
 
   /// Get or create the shared REST API HttpClient.
   HttpClient get _httpClient {
+    _checkAccess();
     if (_restClient == null) {
       _restClient = HttpClient()
         ..connectionTimeout = _connectionTimeout
@@ -80,13 +97,15 @@ class RealHueBridgeService implements HueBridgeService {
   @override
   void configure(HueConfig config) {
     _config = config;
+    _access = DirectHubAccess.capture();
 
     // Restore persisted grouped_light mappings
     if (_roomToGroupedLight.isEmpty) {
       final saved = SettingsService.instance.getHueGroupedLightMap();
       if (saved != null && saved.isNotEmpty) {
         _roomToGroupedLight.addAll(saved);
-        debugPrint('RealHueBridgeService: Restored ${saved.length} grouped_light mappings');
+        debugPrint(
+            'RealHueBridgeService: Restored ${saved.length} grouped_light mappings');
       }
     }
 
@@ -100,7 +119,8 @@ class RealHueBridgeService implements HueBridgeService {
           applicationKey: config.username,
         );
         _deviceRegistry!.loadFromJson(cachedRegistry);
-        debugPrint('RealHueBridgeService: Restored cached device registry with ${_deviceRegistry!.devices.length} devices');
+        debugPrint(
+            'RealHueBridgeService: Restored cached device registry with ${_deviceRegistry!.devices.length} devices');
       }
     }
   }
@@ -121,6 +141,7 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<List<String>> discoverBridges({Duration? timeout}) {
+    if (!DirectHubAccess.allowed) return Future.value(const []);
     return HueProvider.discoverBridges(
       timeout: timeout ?? const Duration(seconds: 8),
     );
@@ -128,6 +149,7 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<String?> pair(String bridgeIp) {
+    if (!DirectHubAccess.allowed) return Future.value(null);
     return HueProvider.pair(bridgeIp);
   }
 
@@ -137,11 +159,13 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<List<RoomDto>> fetchRooms() async {
+    final access = _checkAccess();
     if (_config == null) {
       throw StateError('Service not configured. Call configure() first.');
     }
 
     final roomData = await _fetchV2Resource('room');
+    access.check();
     _roomToGroupedLight.clear();
 
     final rooms = <RoomDto>[];
@@ -203,6 +227,7 @@ class RealHueBridgeService implements HueBridgeService {
 
     // Fetch actual light states and update rooms
     final lightStates = await fetchAllRoomStates();
+    access.check();
     final updatedRooms = rooms.map((room) {
       final isOn = lightStates[room.id] ?? false;
       if (isOn != room.lightsOn) {
@@ -224,20 +249,23 @@ class RealHueBridgeService implements HueBridgeService {
 
     // Persist grouped_light mappings so they survive app restarts
     if (_roomToGroupedLight.isNotEmpty) {
-      SettingsService.instance
-          .saveHueGroupedLightMap(Map<String, String>.from(_roomToGroupedLight));
+      SettingsService.instance.saveHueGroupedLightMap(
+          Map<String, String>.from(_roomToGroupedLight));
     }
 
-    debugPrint('RealHueBridgeService: Fetched ${updatedRooms.length} rooms via v2 API');
+    debugPrint(
+        'RealHueBridgeService: Fetched ${updatedRooms.length} rooms via v2 API');
 
     // Discover devices alongside rooms so they flow to the Rhythm bridge
     await _discoverDevices(updatedRooms);
+    access.check();
 
     return updatedRooms;
   }
 
   @override
   Future<bool> isRoomOn(String roomId) async {
+    final access = _checkAccess();
     if (_config == null) return false;
 
     final groupedLightId = getGroupedLightId(roomId);
@@ -248,12 +276,15 @@ class RealHueBridgeService implements HueBridgeService {
     );
 
     final request = await _httpClient.getUrl(uri);
+    access.check();
     request.headers.set('hue-application-key', _config!.username);
 
     final response = await request.close();
+    access.check();
 
     if (response.statusCode == 200) {
       final body = await response.transform(utf8.decoder).join();
+      access.check();
       final json = jsonDecode(body) as Map<String, dynamic>;
       final data = json['data'] as List<dynamic>?;
       if (data != null && data.isNotEmpty) {
@@ -267,12 +298,14 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<bool> toggleRoom(String roomId, {int? brightness, int? mireds}) async {
+    final access = _checkAccess();
     if (_config == null) return false;
 
     final groupedLightId = getGroupedLightId(roomId);
     if (groupedLightId == null) return false;
 
     final anyOn = await isRoomOn(roomId);
+    access.check();
     final newState = !anyOn;
 
     final uri = Uri.parse(
@@ -285,7 +318,9 @@ class RealHueBridgeService implements HueBridgeService {
 
     if (newState) {
       if (brightness != null) {
-        body['dimming'] = {'brightness': brightness.toDouble().clamp(1.0, 100.0)};
+        body['dimming'] = {
+          'brightness': brightness.toDouble().clamp(1.0, 100.0)
+        };
       }
       if (mireds != null) {
         body['color_temperature'] = {'mirek': mireds.clamp(153, 500)};
@@ -293,10 +328,12 @@ class RealHueBridgeService implements HueBridgeService {
     }
 
     final request = await _httpClient.putUrl(uri);
+    access.check();
     request.headers.set('hue-application-key', _config!.username);
     request.headers.set('Content-Type', 'application/json');
     request.add(utf8.encode(jsonEncode(body)));
     await request.close();
+    access.check();
 
     return newState;
   }
@@ -308,6 +345,7 @@ class RealHueBridgeService implements HueBridgeService {
     int? brightness,
     int? mireds,
   }) async {
+    final access = _checkAccess();
     if (_config == null) return;
 
     final groupedLightId = getGroupedLightId(roomId);
@@ -323,7 +361,9 @@ class RealHueBridgeService implements HueBridgeService {
 
     if (on) {
       if (brightness != null) {
-        body['dimming'] = {'brightness': brightness.toDouble().clamp(1.0, 100.0)};
+        body['dimming'] = {
+          'brightness': brightness.toDouble().clamp(1.0, 100.0)
+        };
       }
       if (mireds != null) {
         body['color_temperature'] = {'mirek': mireds.clamp(153, 500)};
@@ -331,14 +371,17 @@ class RealHueBridgeService implements HueBridgeService {
     }
 
     final request = await _httpClient.putUrl(uri);
+    access.check();
     request.headers.set('hue-application-key', _config!.username);
     request.headers.set('Content-Type', 'application/json');
     request.add(utf8.encode(jsonEncode(body)));
     await request.close();
+    access.check();
   }
 
   @override
   Future<Map<String, bool>> fetchAllRoomStates() async {
+    final access = _checkAccess();
     if (_config == null) return {};
 
     // Build reverse mapping: grouped_light ID -> room UUID
@@ -348,6 +391,7 @@ class RealHueBridgeService implements HueBridgeService {
     }
 
     final groupedLightData = await _fetchV2Resource('grouped_light');
+    access.check();
     final states = <String, bool>{};
 
     for (final groupedLight in groupedLightData) {
@@ -373,7 +417,8 @@ class RealHueBridgeService implements HueBridgeService {
   bool get supportsSse => true;
 
   @override
-  EventSourceState get sseState => _sseSource?.state ?? EventSourceState.disconnected;
+  EventSourceState get sseState =>
+      _sseSource?.state ?? EventSourceState.disconnected;
 
   @override
   Stream<EventSourceState> get sseStateChanges => _sseStateController.stream;
@@ -383,11 +428,12 @@ class RealHueBridgeService implements HueBridgeService {
     required List<RoomDto> rooms,
     required void Function(String roomId, RhythmActionDto action) onButtonEvent,
   }) async {
+    final access = _checkAccess();
     if (_config == null) return;
 
     // Dispose any existing SSE connection first
     await disposeSse();
-
+    access.check();
     // Store callback and rooms after dispose (dispose clears these)
     _rooms = rooms;
     _onButtonEvent = onButtonEvent;
@@ -396,6 +442,7 @@ class RealHueBridgeService implements HueBridgeService {
       debugPrint('RealHueBridgeService: Initializing SSE...');
 
       // Create device registry
+      access.check();
       _deviceRegistry = HueDeviceRegistry(
         bridgeIp: _config!.bridgeIp,
         applicationKey: _config!.username,
@@ -405,32 +452,42 @@ class RealHueBridgeService implements HueBridgeService {
       final cachedRegistry = SettingsService.instance.getHueDeviceRegistry();
       if (cachedRegistry != null) {
         _deviceRegistry!.loadFromJson(cachedRegistry);
-        debugPrint('RealHueBridgeService: Loaded cached registry with ${_deviceRegistry!.devices.length} devices');
+        debugPrint(
+            'RealHueBridgeService: Loaded cached registry with ${_deviceRegistry!.devices.length} devices');
       }
 
       // Discover devices
       await _deviceRegistry!.discover();
-      debugPrint('RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches, ${_deviceRegistry!.buttons.length} buttons');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches, ${_deviceRegistry!.buttons.length} buttons');
 
       // Fetch behavior_instances
       await _deviceRegistry!.fetchBehaviorInstances();
-      debugPrint('RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured in Hue app');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured in Hue app');
 
       // Auto-map Hue rooms to Rhythm rooms
       await _autoMapRooms();
+      access.check();
 
       // Save updated registry
-      await SettingsService.instance.saveHueDeviceRegistry(_deviceRegistry!.toJson());
-
+      await SettingsService.instance
+          .saveHueDeviceRegistry(_deviceRegistry!.toJson());
+      access.check();
       // Create SSE source
       _sseSource = HueSseSource(
         config: HueSseConfig(
           bridgeIp: _config!.bridgeIp,
           applicationKey: _config!.username,
         ),
-        resourceToRoomMapper: (deviceId) => _deviceRegistry!.getRoomForDevice(deviceId),
-        buttonControlIdLookup: (buttonId) => _deviceRegistry!.getButton(buttonId)?.controlId,
-        isDeviceConfigured: (deviceId) => _deviceRegistry!.isDeviceConfigured(deviceId),
+        resourceToRoomMapper: (deviceId) =>
+            _deviceRegistry!.getRoomForDevice(deviceId),
+        buttonControlIdLookup: (buttonId) =>
+            _deviceRegistry!.getButton(buttonId)?.controlId,
+        isDeviceConfigured: (deviceId) =>
+            _deviceRegistry!.isDeviceConfigured(deviceId),
         onBehaviorInstanceEvent: _handleBehaviorInstanceEvent,
         onButtonEvent: _handleButtonEvent,
       );
@@ -448,6 +505,7 @@ class RealHueBridgeService implements HueBridgeService {
 
       // Connect
       await _sseSource!.connect();
+      access.check();
       debugPrint('RealHueBridgeService: SSE connected');
     } catch (e) {
       debugPrint('RealHueBridgeService: Failed to initialize SSE: $e');
@@ -456,26 +514,24 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<void> disposeSse() async {
-    await _sseSubscription?.cancel();
+    final subscription = _sseSubscription;
+    final stateSubscription = _sseStateSubscription;
+    final source = _sseSource;
     _sseSubscription = null;
-
-    await _sseStateSubscription?.cancel();
     _sseStateSubscription = null;
-
-    await _sseSource?.dispose();
     _sseSource = null;
-
-    _closeRestClient();
-
-    // Emit disconnected state
-    _sseStateController.add(EventSourceState.disconnected);
-
     _deviceRegistry = null;
     _onButtonEvent = null;
+    _closeRestClient();
+    _sseStateController.add(EventSourceState.disconnected);
+    await subscription?.cancel();
+    await stateSubscription?.cancel();
+    await source?.dispose();
   }
 
   @override
   Future<void> resyncDevices() async {
+    final access = _checkAccess();
     if (_deviceRegistry == null || _config == null) {
       debugPrint('RealHueBridgeService: Cannot resync - not configured');
       return;
@@ -485,13 +541,20 @@ class RealHueBridgeService implements HueBridgeService {
 
     try {
       await _deviceRegistry!.discover();
-      debugPrint('RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches');
 
       await _deviceRegistry!.fetchBehaviorInstances();
-      debugPrint('RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured');
 
       await _autoMapRooms();
-      await SettingsService.instance.saveHueDeviceRegistry(_deviceRegistry!.toJson());
+      access.check();
+      await SettingsService.instance
+          .saveHueDeviceRegistry(_deviceRegistry!.toJson());
+      access.check();
 
       debugPrint('RealHueBridgeService: Resync complete');
     } catch (e) {
@@ -508,17 +571,19 @@ class RealHueBridgeService implements HueBridgeService {
   Future<void> startLightMonitoring({
     required void Function(String roomId, bool isOn) onLightStateChanged,
   }) async {
+    final access = _checkAccess();
     if (_config == null) return;
 
     // Need grouped_light mappings to reverse-lookup room IDs
     if (_roomToGroupedLight.isEmpty) {
-      debugPrint('RealHueBridgeService: Cannot start light monitor — no grouped_light mappings');
+      debugPrint(
+          'RealHueBridgeService: Cannot start light monitor — no grouped_light mappings');
       return;
     }
 
     // Dispose any existing light monitor SSE first
     await stopLightMonitoring();
-
+    access.check();
     _onLightStateChanged = onLightStateChanged;
 
     try {
@@ -532,11 +597,13 @@ class RealHueBridgeService implements HueBridgeService {
         onGroupedLightEvent: _handleGroupedLightEvent,
       );
 
-      _lightMonitorStateSubscription = _lightMonitorSseSource!.stateChanges.listen((state) {
+      _lightMonitorStateSubscription =
+          _lightMonitorSseSource!.stateChanges.listen((state) {
         debugPrint('RealHueBridgeService: Light monitor SSE state: $state');
       });
 
       await _lightMonitorSseSource!.connect();
+      access.check();
       debugPrint('RealHueBridgeService: Light monitor SSE connected');
     } catch (e) {
       debugPrint('RealHueBridgeService: Failed to start light monitor: $e');
@@ -545,13 +612,13 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<void> stopLightMonitoring() async {
-    await _lightMonitorStateSubscription?.cancel();
+    final subscription = _lightMonitorStateSubscription;
+    final source = _lightMonitorSseSource;
     _lightMonitorStateSubscription = null;
-
-    await _lightMonitorSseSource?.dispose();
     _lightMonitorSseSource = null;
-
     _onLightStateChanged = null;
+    await subscription?.cancel();
+    await source?.dispose();
   }
 
   void _handleGroupedLightEvent(String groupedLightId, bool isOn) {
@@ -575,10 +642,12 @@ class RealHueBridgeService implements HueBridgeService {
 
   @override
   Future<(double, double)?> fetchGeolocation() async {
+    final access = _checkAccess();
     if (_config == null) return null;
 
     try {
       final data = await _fetchV2Resource('geolocation');
+      access.check();
       if (data.isEmpty) return null;
 
       final geo = data[0] as Map<String, dynamic>;
@@ -621,6 +690,7 @@ class RealHueBridgeService implements HueBridgeService {
 
   /// Fetch a v2 API resource type.
   Future<List<dynamic>> _fetchV2Resource(String resourceType) async {
+    final access = _checkAccess();
     if (_config == null) return [];
 
     final uri = Uri.parse(
@@ -628,9 +698,11 @@ class RealHueBridgeService implements HueBridgeService {
     );
 
     final request = await _httpClient.getUrl(uri);
+    access.check();
     request.headers.set('hue-application-key', _config!.username);
 
     final response = await request.close();
+    access.check();
 
     if (response.statusCode != 200) {
       throw HttpException(
@@ -640,6 +712,7 @@ class RealHueBridgeService implements HueBridgeService {
     }
 
     final body = await response.transform(utf8.decoder).join();
+    access.check();
     final json = jsonDecode(body) as Map<String, dynamic>;
 
     return json['data'] as List<dynamic>? ?? [];
@@ -651,6 +724,7 @@ class RealHueBridgeService implements HueBridgeService {
   /// without depending on the SSE code path.
   /// Non-fatal — rooms still work without device data.
   Future<void> _discoverDevices(List<RoomDto> rooms) async {
+    final access = _checkAccess();
     if (_config == null) return;
 
     try {
@@ -660,17 +734,25 @@ class RealHueBridgeService implements HueBridgeService {
       );
 
       await _deviceRegistry!.discover();
-      debugPrint('RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches, ${_deviceRegistry!.buttons.length} buttons');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: Discovered ${_deviceRegistry!.devices.length} switches, ${_deviceRegistry!.buttons.length} buttons');
 
       await _deviceRegistry!.fetchBehaviorInstances();
-      debugPrint('RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured in Hue app');
+      access.check();
+      debugPrint(
+          'RealHueBridgeService: ${_deviceRegistry!.configuredDeviceIds.length} devices configured in Hue app');
 
       _rooms = rooms;
       await _autoMapRooms();
+      access.check();
 
-      await SettingsService.instance.saveHueDeviceRegistry(_deviceRegistry!.toJson());
+      await SettingsService.instance
+          .saveHueDeviceRegistry(_deviceRegistry!.toJson());
+      access.check();
     } catch (e) {
-      debugPrint('RealHueBridgeService: Device discovery failed (non-fatal): $e');
+      debugPrint(
+          'RealHueBridgeService: Device discovery failed (non-fatal): $e');
     }
   }
 
@@ -730,7 +812,8 @@ class RealHueBridgeService implements HueBridgeService {
 
       if (rhythmRoom.id.isNotEmpty) {
         _deviceRegistry!.setRoomMapping(hueRoom.id, rhythmRoom.id);
-        debugPrint('RealHueBridgeService: Auto-mapped "${hueRoom.name}" -> ${rhythmRoom.id}');
+        debugPrint(
+            'RealHueBridgeService: Auto-mapped "${hueRoom.name}" -> ${rhythmRoom.id}');
         mapped++;
       }
     }
@@ -740,7 +823,8 @@ class RealHueBridgeService implements HueBridgeService {
     }
   }
 
-  void _handleBehaviorInstanceEvent(String eventType, Map<String, dynamic> data) {
+  void _handleBehaviorInstanceEvent(
+      String eventType, Map<String, dynamic> data) {
     if (_deviceRegistry == null) return;
 
     final config = data['configuration'] as Map<String, dynamic>?;
@@ -756,30 +840,36 @@ class RealHueBridgeService implements HueBridgeService {
 
     switch (eventType) {
       case 'add':
-        debugPrint('RealHueBridgeService: Switch "${deviceName ?? deviceId}" configured in Hue app');
+        debugPrint(
+            'RealHueBridgeService: Switch "${deviceName ?? deviceId}" configured in Hue app');
         break;
       case 'delete':
-        debugPrint('RealHueBridgeService: Switch unconfigured - now handling with Rhythm');
+        debugPrint(
+            'RealHueBridgeService: Switch unconfigured - now handling with Rhythm');
         break;
     }
 
     SettingsService.instance.saveHueDeviceRegistry(_deviceRegistry!.toJson());
   }
 
-  void _handleButtonEvent(String deviceId, int buttonIndex, String eventType, bool ignored) {
+  void _handleButtonEvent(
+      String deviceId, int buttonIndex, String eventType, bool ignored) {
     final deviceName = _deviceRegistry?.getDevice(deviceId)?.name ?? deviceId;
     final roomId = _deviceRegistry?.getRoomForDevice(deviceId);
 
     String? roomName;
     if (roomId != null) {
-      roomName = _rooms.where((r) => r.id == roomId).map((r) => r.name).firstOrNull;
+      roomName =
+          _rooms.where((r) => r.id == roomId).map((r) => r.name).firstOrNull;
     }
     final roomDisplay = roomName ?? roomId ?? 'unknown';
 
     if (ignored) {
-      debugPrint('RealHueBridgeService: [IGNORED] $roomDisplay: button $buttonIndex $eventType from "$deviceName"');
+      debugPrint(
+          'RealHueBridgeService: [IGNORED] $roomDisplay: button $buttonIndex $eventType from "$deviceName"');
     } else {
-      debugPrint('RealHueBridgeService: [PROCESS] $roomDisplay: button $buttonIndex $eventType from "$deviceName"');
+      debugPrint(
+          'RealHueBridgeService: [PROCESS] $roomDisplay: button $buttonIndex $eventType from "$deviceName"');
     }
   }
 }

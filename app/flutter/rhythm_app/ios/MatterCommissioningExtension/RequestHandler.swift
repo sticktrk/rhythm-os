@@ -32,15 +32,21 @@ final class RequestHandler: MatterAddDeviceExtensionRequestHandler {
     do {
       let context = try PhoneMatterRequestContext.load(
         in: container, name: fileName, sessionID: sessionID)
+      let isCurrent = { defaults.string(forKey: PhoneMatterBridge.sessionIDKey) == sessionID }
+      guard isCurrent() else { throw CancellationError() }
       let request = try context.handoffRequest(onboardingPayload: onboardingPayload)
       let configuration = URLSessionConfiguration.ephemeral
       configuration.timeoutIntervalForRequest = 240
       configuration.timeoutIntervalForResource = 250
-      let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+      let session = URLSession(configuration: configuration)
+      defer { session.invalidateAndCancel() }
+      guard isCurrent() else { throw CancellationError() }
+      let (data, response) = try await session.data(for: request)
       guard let httpResponse = response as? HTTPURLResponse else {
         throw ExtensionBridgeError.missingResponse
       }
-      let result = try PhoneMatterBridge.responseEnvelope(data: data, statusCode: httpResponse.statusCode)
+      let result = try await context.awaitHaCompletion(
+        data: data, statusCode: httpResponse.statusCode, session: session, isCurrent: isCurrent)
       defaults.set(result, forKey: PhoneMatterBridge.responseKey)
     } catch let error as PhoneMatterBridge.ServerPairingError {
       PhoneMatterBridge.recordFailure(defaults, stage: "server_rejected", message: error.message)

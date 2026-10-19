@@ -4,12 +4,14 @@
 /// real-time button events from Hue switches and dimmers.
 library;
 
+import '../providers/direct_hub_access.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show min;
 
-import '../src/rust/api/hue.dart' show mapHueButtonEvent, parseHueButtonEventType;
+import '../src/rust/api/hue.dart'
+    show mapHueButtonEvent, parseHueButtonEventType;
 import 'event_source.dart';
 
 /// Configuration for Hue SSE connection.
@@ -67,19 +69,26 @@ typedef HueDeviceConfiguredCheck = bool Function(String deviceId);
 /// Callback for behavior_instance events.
 /// [eventType] is "add", "update", or "delete".
 /// [data] is the behavior_instance resource data.
-typedef HueBehaviorInstanceCallback = void Function(String eventType, Map<String, dynamic> data);
+typedef HueBehaviorInstanceCallback = void Function(
+    String eventType, Map<String, dynamic> data);
 
 /// Callback for button events (before processing).
 /// [deviceId] is the owner device resource ID.
 /// [buttonIndex] is the button control_id (1-4 for dimmer).
 /// [eventType] is the Hue button event type string (e.g., "short_release").
 /// [ignored] is true if the event was ignored (device is Hue-configured).
-typedef HueButtonEventCallback = void Function(String deviceId, int buttonIndex, String eventType, bool ignored);
+typedef HueButtonEventCallback = void Function(
+  String deviceId,
+  int buttonIndex,
+  String eventType,
+  bool ignored,
+);
 
 /// Callback for grouped_light state changes.
 /// [groupedLightId] is the Hue grouped_light resource ID.
 /// [isOn] is true if any light in the group is on.
-typedef HueGroupedLightCallback = void Function(String groupedLightId, bool isOn);
+typedef HueGroupedLightCallback = void Function(
+    String groupedLightId, bool isOn);
 
 /// Hue V2 API SSE event source.
 ///
@@ -102,6 +111,8 @@ typedef HueGroupedLightCallback = void Function(String groupedLightId, bool isOn
 /// });
 /// ```
 class HueSseSource extends EventSource {
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+  void Function()? _removeAccessListener;
   final HueSseConfig config;
   final HueResourceToRoomMapper resourceToRoomMapper;
   final HueButtonLookup buttonControlIdLookup;
@@ -152,6 +163,11 @@ class HueSseSource extends EventSource {
 
   @override
   Future<void> connect() async {
+    _access.check();
+    _removeAccessListener ??= _access.cancelOnChange(() {
+      _httpClient?.close(force: true);
+      unawaited(disconnect());
+    });
     if (_disposed) {
       throw StateError('Cannot connect: HueSseSource has been disposed');
     }
@@ -214,9 +230,11 @@ class HueSseSource extends EventSource {
     final timeSinceLastData = DateTime.now().difference(_lastDataReceived!);
     if (timeSinceLastData > config.heartbeatTimeout) {
       // Connection has gone stale - trigger reconnect
-      _handleError(Exception(
-        'SSE heartbeat timeout: no data received for ${timeSinceLastData.inSeconds}s',
-      ));
+      _handleError(
+        Exception(
+          'SSE heartbeat timeout: no data received for ${timeSinceLastData.inSeconds}s',
+        ),
+      );
     }
   }
 
@@ -228,12 +246,14 @@ class HueSseSource extends EventSource {
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _removeAccessListener?.call();
     await disconnect();
     await _eventController.close();
     await _stateController.close();
   }
 
   Future<void> _connect() async {
+    if (!_access.isCurrent) return;
     try {
       _httpClient = HttpClient();
 
@@ -241,15 +261,15 @@ class HueSseSource extends EventSource {
         _httpClient!.badCertificateCallback = (cert, host, port) => true;
       }
 
-      final uri = Uri.parse(
-        'https://${config.bridgeIp}/eventstream/clip/v2',
-      );
+      final uri = Uri.parse('https://${config.bridgeIp}/eventstream/clip/v2');
 
       final request = await _httpClient!.getUrl(uri);
+      _access.check();
       request.headers.set('hue-application-key', config.applicationKey);
       request.headers.set('Accept', 'text/event-stream');
 
       final response = await request.close();
+      _access.check();
 
       if (response.statusCode != 200) {
         throw HttpException(
@@ -270,11 +290,7 @@ class HueSseSource extends EventSource {
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .transform(_SseEventTransformer(onAnyData: _onDataReceived))
-          .listen(
-            _handleSseEvent,
-            onError: _handleError,
-            onDone: _handleDone,
-          );
+          .listen(_handleSseEvent, onError: _handleError, onDone: _handleDone);
     } catch (e) {
       _handleError(e);
     }
@@ -367,12 +383,14 @@ class HueSseSource extends EventSource {
     onButtonEvent?.call(ownerRid, controlId, lastEvent, false);
 
     // Emit event
-    _eventController.add(InputEvent(
-      roomId: roomId,
-      action: action,
-      sourceId: id,
-      deviceId: ownerRid,
-    ));
+    _eventController.add(
+      InputEvent(
+        roomId: roomId,
+        action: action,
+        sourceId: id,
+        deviceId: ownerRid,
+      ),
+    );
   }
 
   void _processGroupedLightEvent(Map<String, dynamic> data) {
@@ -416,6 +434,7 @@ class HueSseSource extends EventSource {
   }
 
   void _scheduleReconnect() {
+    if (!_access.isCurrent) return;
     _reconnectTimer?.cancel();
 
     // Use current delay for this attempt
@@ -424,7 +443,8 @@ class HueSseSource extends EventSource {
     // Calculate next delay with exponential backoff (capped at max)
     _currentReconnectDelay = Duration(
       milliseconds: min(
-        (_currentReconnectDelay.inMilliseconds * config.backoffMultiplier).round(),
+        (_currentReconnectDelay.inMilliseconds * config.backoffMultiplier)
+            .round(),
         config.maxReconnectDelay.inMilliseconds,
       ),
     );

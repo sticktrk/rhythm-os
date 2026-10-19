@@ -55,3 +55,5 @@ export 'runner/rhythm_runner.dart';
 export 'events/event_source.dart';
 export 'events/hue_sse_source.dart';
 export 'events/hue_device_registry.dart';
+
+export 'providers/direct_hub_access.dart';

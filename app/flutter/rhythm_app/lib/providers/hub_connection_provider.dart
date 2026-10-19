@@ -28,9 +28,28 @@ class HubConnectionProvider extends ChangeNotifier {
   HubConnectionProvider({
     HaWebSocketProvider Function(HomeAssistantConfig config)?
         haWebSocketFactory,
-  }) : _haWebSocketFactory =
-            haWebSocketFactory ?? ((config) => HaWebSocketProvider(config)) {
+    Future<bool> Function({required String bridgeIp, required String username})?
+        hueConnectionTest,
+  })  : _haWebSocketFactory =
+            haWebSocketFactory ?? ((config) => HaWebSocketProvider(config)),
+        _hueConnectionTest =
+            hueConnectionTest ?? HueProvider.testBridgeConnection {
+    DirectHubAccess.changes.addListener(_onAccessChanged);
     _startAutoRefresh();
+  }
+
+  final Future<bool> Function(
+      {required String bridgeIp, required String username}) _hueConnectionTest;
+
+  void _onAccessChanged() {
+    _retryTimer?.cancel();
+    _retryCount = 0;
+    unawaited(_disconnectHa());
+    _connectionStatus = ConnectionStatus.disconnected;
+    _hueConnectionStatus = ConnectionStatus.disconnected;
+    _lastError = null;
+    _hueLastError = null;
+    notifyListeners();
   }
 
   // Active hub configuration
@@ -138,6 +157,7 @@ class HubConnectionProvider extends ChangeNotifier {
 
   /// Verify the current connection is still healthy.
   Future<void> _verifyConnectionHealth() async {
+    if (!DirectHubAccess.allowed) return;
     // Only check WebSocket health for Home Assistant connections
     // Hue connections don't use WebSocket, so skip this check for them
     if (_activeHubType == HubConnectionType.homeAssistant) {
@@ -157,6 +177,8 @@ class HubConnectionProvider extends ChangeNotifier {
   /// Tries to connect to both HA and Hue if configured.
   /// Returns true if at least one connection is successful.
   Future<bool> verifyConnection() async {
+    if (!DirectHubAccess.allowed) return false;
+    final access = DirectHubAccess.capture();
     bool anyConnected = false;
 
     // Try HA if configured
@@ -165,6 +187,7 @@ class HubConnectionProvider extends ChangeNotifier {
       if (haSuccess) anyConnected = true;
     }
 
+    if (!access.isCurrent) return false;
     // Try Hue if configured
     if (_hueHub != null) {
       final hueSuccess = await _verifyHueConnection();
@@ -180,6 +203,8 @@ class HubConnectionProvider extends ChangeNotifier {
 
   /// Verify Home Assistant WebSocket connection.
   Future<bool> _verifyHaConnection() async {
+    if (!DirectHubAccess.allowed) return false;
+    final access = DirectHubAccess.capture();
     if (_haHub == null) {
       _connectionStatus = ConnectionStatus.error;
       _lastError = 'Home Assistant not configured';
@@ -195,6 +220,7 @@ class HubConnectionProvider extends ChangeNotifier {
     try {
       // Clean up existing connection
       await _disconnectHa();
+      if (!access.isCurrent) return false;
 
       // Create new WebSocket connection from Hub model
       final config = HomeAssistantConfig(
@@ -206,6 +232,7 @@ class HubConnectionProvider extends ChangeNotifier {
       _haWebSocket = _haWebSocketFactory(config);
 
       final connected = await _haWebSocket!.connect();
+      if (!access.isCurrent) return false;
       if (!connected) {
         _connectionStatus = ConnectionStatus.error;
         _lastError = _haWebSocket!.lastError ?? 'Connection failed';
@@ -223,6 +250,7 @@ class HubConnectionProvider extends ChangeNotifier {
       debugPrint('HubConnectionProvider: Connected to Home Assistant');
       return true;
     } catch (e) {
+      if (!access.isCurrent) return false;
       _connectionStatus = ConnectionStatus.error;
       _lastError = e.toString();
       notifyListeners();
@@ -232,6 +260,8 @@ class HubConnectionProvider extends ChangeNotifier {
 
   /// Verify Hue connection.
   Future<bool> _verifyHueConnection() async {
+    if (!DirectHubAccess.allowed) return false;
+    final access = DirectHubAccess.capture();
     if (_hueHub == null) {
       _hueConnectionStatus = ConnectionStatus.error;
       _hueLastError = 'Hue not configured';
@@ -244,11 +274,12 @@ class HubConnectionProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final connected = await HueProvider.testBridgeConnection(
+      final connected = await _hueConnectionTest(
         bridgeIp: _hueHub!.endpoint.host,
         username: _hueHub!.token!,
       );
 
+      if (!access.isCurrent) return false;
       if (connected) {
         _hueConnectionStatus = ConnectionStatus.connected;
         _hueLastError = null;
@@ -265,6 +296,7 @@ class HubConnectionProvider extends ChangeNotifier {
       notifyListeners();
       return connected;
     } catch (e) {
+      if (!access.isCurrent) return false;
       _hueConnectionStatus = ConnectionStatus.error;
       _hueLastError = e.toString();
       notifyListeners();
@@ -281,12 +313,14 @@ class HubConnectionProvider extends ChangeNotifier {
   Future<void> _disconnectHa() async {
     _eventSubscription?.cancel();
     _eventSubscription = null;
-    await _haWebSocket?.dispose();
+    final socket = _haWebSocket;
     _haWebSocket = null;
+    await socket?.dispose();
   }
 
   /// Start reconnection attempts with exponential backoff.
   void _startReconnect() {
+    if (!DirectHubAccess.allowed) return;
     if (_retryCount >= maxRetries) {
       debugPrint('HubConnectionProvider: Max retries reached');
       return;
@@ -346,6 +380,7 @@ class HubConnectionProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    DirectHubAccess.changes.removeListener(_onAccessChanged);
     _refreshTimer?.cancel();
     _retryTimer?.cancel();
     _eventSubscription?.cancel();

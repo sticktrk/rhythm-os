@@ -11,7 +11,16 @@ class PhoneMatterCommissioningSession(
     val originalSetupPayload: String,
     val sessionId: String,
     val flutterResult: MethodChannel.Result,
+    val backend: String = "rhythm",
+    val codeSource: String = "original_label",
 ) {
+    init {
+        require(backend in setOf("rhythm", "ha_addon"))
+        require(codeSource in setOf("original_label", "sharing"))
+        require(backend != "ha_addon" || sessionId.matches(Regex("^[A-Za-z0-9_-]{1,128}$")))
+    }
+    val handoffPath: String get() = if (backend == "ha_addon")
+        "/api/addon/matter/pair" else "/api/devices/pair"
     internal var activityRequestCode: Int = -1
     internal var serverResponse: Map<String, Any?>? = null
     internal var connection: HttpURLConnection? = null
