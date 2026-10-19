@@ -445,8 +445,29 @@ pub fn process_button_inline(
     };
 
     let event = runtime_event_for_button(node_id, action, device_id);
-    match crate::light_runtime::run_selected_light_runtime_event(state, event) {
-        Ok(report) => {
+    match commands::with_scene_brightness_button(state, node_id, action, false, || {
+        crate::light_runtime::run_selected_light_runtime_event(state, event)
+    }) {
+        Ok(None) => {
+            tracing::info!(
+                target: "evt",
+                event = "button_action_applied",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                device_id = ?device_id,
+                source = "inline",
+                lighting_target = "whole_home_scene",
+                latency_ms = started.elapsed().as_millis(),
+                "Inline button adjusted scene brightness"
+            );
+            let mut record =
+                crate::activity::LightActivityRecord::physical_button(node_id, action, device_id);
+            record.correlation_id = Some(command_id.to_string());
+            crate::activity::record_light_activity(state, record);
+            true
+        }
+        Ok(Some(report)) => {
             tracing::info!(
                 target: "evt",
                 event = "button_action_applied",
@@ -637,9 +658,21 @@ fn run_button_ingress_action(
             s.work_tx.clone()
         };
         if let Some(tx) = work_tx {
-            let _ = tx.try_send(WorkItem::DeferredPersist {
-                node_id: node_id.to_string(),
+            let edits_scene = commands::is_scene_brightness_button(action);
+            let queued = tx.try_send(if edits_scene {
+                WorkItem::DeferredPersistLightingSettings
+            } else {
+                WorkItem::DeferredPersist {
+                    node_id: node_id.to_string(),
+                }
             });
+            if edits_scene && queued.is_err() {
+                // A physical brightness edit already committed its definition.
+                // A full queue must not leave only an in-memory scene binding.
+                commands::persist_lighting_settings(state);
+            }
+        } else if commands::is_scene_brightness_button(action) {
+            commands::persist_lighting_settings(state);
         } else {
             commands::persist_rooms(state);
         }
@@ -3735,8 +3768,29 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 dispatch_spacing,
             );
             let event = runtime_event_for_button(&node_id, action, device_id.as_deref());
-            match crate::light_runtime::run_selected_light_runtime_event(state, event) {
-                Ok(report) => {
+            match commands::with_scene_brightness_button(
+                state,
+                &node_id,
+                action,
+                persist_after,
+                || crate::light_runtime::run_selected_light_runtime_event(state, event),
+            ) {
+                Ok(None) => {
+                    tracing::info!(
+                        target: "evt",
+                        event = "queued_node_action_applied",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        source = "worker",
+                        lighting_target = "whole_home_scene",
+                        latency_ms = started.elapsed().as_millis(),
+                        "Worker button adjusted scene brightness"
+                    );
+                    return;
+                }
+                Ok(Some(report)) => {
                     tracing::info!(
                         target: "evt",
                         event = "queued_node_action_applied",
