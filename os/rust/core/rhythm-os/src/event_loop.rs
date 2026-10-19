@@ -832,7 +832,9 @@ fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl
     else {
         return;
     };
-    let Ok(_guard) = transaction.read() else { return };
+    let Ok(_guard) = transaction.read() else {
+        return;
+    };
     let reason = if !commands::rhythm_automation_allowed_for_node(state, node_id) {
         Some("external_room_authority")
     } else {
@@ -3881,9 +3883,14 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             transition_ms,
             dispatch_spacing,
             dispatch_generation,
+            provenance,
         } => {
             let started = Instant::now();
-            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+            let is_mode_output =
+                matches!(provenance, crate::state::NodeOutputProvenance::Mode { .. });
+            if is_mode_output
+                && !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "lights_off_room_skipped",
@@ -3901,13 +3908,15 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
-            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
-                state,
-                &command_id,
-                &node_id,
-                dispatch_spacing,
-                dispatch_generation,
-            ) {
+            if is_mode_output
+                && !crate::periodic::wait_for_node_dispatch_slot_if_current(
+                    state,
+                    &command_id,
+                    &node_id,
+                    dispatch_spacing,
+                    dispatch_generation,
+                )
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "lights_off_room_skipped",
@@ -3917,6 +3926,22 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                     reason = "stale_dispatch_generation_after_pace",
                     "Skipping stale lights_off_room"
                 );
+                return;
+            }
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            if !commands::queued_node_output_current(
+                state,
+                &runtime,
+                &node_id,
+                dispatch_generation,
+                &provenance,
+            ) {
                 return;
             }
             match runtime.lights_off_room(&node_id, transition_ms) {
@@ -3957,8 +3982,18 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             command,
             dispatch_spacing: _,
             dispatch_generation,
+            provenance,
         } => {
-            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            if matches!(provenance, crate::state::NodeOutputProvenance::Mode { .. })
+                && !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "apply_node_command_skipped",
@@ -3975,6 +4010,15 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
+            if !commands::queued_node_output_current(
+                state,
+                &runtime,
+                &node_id,
+                dispatch_generation,
+                &provenance,
+            ) {
+                return;
+            }
 
             // Manual mode-apply commands are paced producer-side by
             // dispatch_room_commands. We intentionally do not wait on
@@ -4108,10 +4152,38 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             let schedule_node_id = emit_parent_node_id
                 .as_deref()
                 .unwrap_or(settings_node_id.as_str());
-            if crate::commands::reconcile_room_schedule_before_tick(
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            let scene_held = state.lock().ok().is_some_and(|s| {
+                commands::active_whole_home_scene_owner(&s, runtime.as_ref(), &settings_node_id)
+                    .is_some()
+                    || commands::active_whole_home_scene_owner(
+                        &s,
+                        runtime.as_ref(),
+                        schedule_node_id,
+                    )
+                    .is_some()
+            });
+            if scene_held
+                || !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
+                );
+                return;
+            }
+            if crate::commands::reconcile_room_schedule_before_tick_inner(
                 state,
                 schedule_node_id,
                 current_hour,
+                true,
             )
             .is_err()
             {
@@ -7025,6 +7097,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::with_transition(50, 4000, 500),
                 dispatch_spacing: Duration::from_secs(3),
                 dispatch_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         let elapsed = started.elapsed();
@@ -7229,6 +7304,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(40, 3000),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: 1,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7239,6 +7317,9 @@ mod tests {
                 transition_ms: Some(250),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: 1,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -7470,6 +7551,9 @@ mod tests {
                 transition_ms: Some(250),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7480,6 +7564,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(50, 3200),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -7552,6 +7639,9 @@ mod tests {
                 transition_ms: None,
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: fail_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7562,6 +7652,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(40, 2800),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: fail_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -8021,6 +8114,65 @@ mod tests {
         assert!(runtime.dim_calls.lock().unwrap().is_empty());
         assert!(runtime.events.lock().unwrap().is_empty());
         assert!(runtime.lights_off_calls.lock().unwrap().is_empty());
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn home_scene_waits_for_in_flight_automatic_output() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let arbitration = state.lock().unwrap().motion_scene_transaction_lock.clone();
+        let generation = state.lock().unwrap().light_dispatch_generation;
+        // Hold the controller's recording mutex so the real worker is paused
+        // inside physical dispatch, after its execution-time ownership check.
+        let dispatch_gate = runtime.apply_calls.lock().unwrap();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            process_work_item(
+                &worker_state,
+                WorkItem::ApplyNodeCommand {
+                    command_id: "automatic-before-party".into(),
+                    node_id: "room_a".into(),
+                    command: rhythm_core::LightingCommand::with_transition(40, 2700, 0),
+                    dispatch_spacing: Duration::ZERO,
+                    dispatch_generation: generation,
+                    provenance: crate::state::NodeOutputProvenance::Mode {
+                        preserve_home_scene: true,
+                    },
+                },
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while arbitration.try_write().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "worker did not acquire arbitration"
+            );
+            std::thread::yield_now();
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let home_state = state.clone();
+        let home = std::thread::spawn(move || {
+            let result = commands::do_home_scene_apply(
+                &home_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        let completed_early = done_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(dispatch_gate);
+        worker.join().unwrap();
+        home.join().unwrap().unwrap();
+        assert!(
+            !completed_early,
+            "scene must wait until old automatic I/O finishes"
+        );
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 2);
         assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
     }
 

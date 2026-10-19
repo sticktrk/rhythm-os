@@ -61,8 +61,8 @@ use crate::scenes::{
     SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
-    current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
-    SharedState, UpdateChannel, WorkItem,
+    current_epoch_ms, rooms_from_engine, AppState, NodeOutputProvenance, ObservedPowerSource,
+    ObservedPowerState, SharedState, UpdateChannel, WorkItem,
 };
 use crate::storage::StoredLocation;
 use crate::topology::{
@@ -254,6 +254,7 @@ struct ModeDefaultApplyContext<'a> {
     power_save: bool,
     reset_all_room_defaults: bool,
     reassert_hard_off_defaults: bool,
+    preserve_home_scenes: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -5489,9 +5490,6 @@ fn companion_scene_plan_locked(
     })
 }
 
-/// The palette window a node's bound mood scene was rendered with, as
-/// persisted by the apply that bound it. Nodes bound by a single-target apply
-/// start at slot 0 and span their own lights.
 /// Return the active whole-home scene owner of a target. A canonical parent's
 /// ownership wins over a child's saved custom Mood binding or local mode.
 /// Callers arbitrate automatic output against scene commits before consulting
@@ -5511,9 +5509,15 @@ pub(crate) fn active_whole_home_scene_owner(
         .device_parent_room_id(node_id)
         .and_then(|parent_id| runtime.engine_node_snapshot(parent_id))
         .filter(owns_home_scene)
-        .or_else(|| runtime.engine_node_snapshot(node_id).filter(owns_home_scene))
+        .or_else(|| {
+            runtime
+                .engine_node_snapshot(node_id)
+                .filter(owns_home_scene)
+        })
 }
 
+/// The palette window persisted by the apply that bound a node's Mood scene.
+/// Single-target applies start at slot zero and span their own lights.
 fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -> PaletteWindow {
     runtime
         .engine_effective_node_snapshot(node_id)
@@ -5534,6 +5538,43 @@ fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -
             device_mode: snap.profile_settings.mood_scene_device_mode == Some(true),
         })
         .unwrap_or_default()
+}
+
+/// Check queued output under the caller's scene arbitration read lease.
+pub(crate) fn queued_node_output_current(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    dispatch_generation: u64,
+    provenance: &NodeOutputProvenance,
+) -> bool {
+    let Ok(s) = state.lock() else { return false };
+    if !s.light_breaker_enabled {
+        return false;
+    }
+    match provenance {
+        NodeOutputProvenance::Mode {
+            preserve_home_scene,
+        } => {
+            s.light_dispatch_generation == dispatch_generation
+                && (!preserve_home_scene
+                    || active_whole_home_scene_owner(&s, runtime.as_ref(), node_id).is_none())
+        }
+        NodeOutputProvenance::HomeScene {
+            owner_node_id,
+            scene_id,
+            palette,
+        } => {
+            s.scene_dispatch_generation == dispatch_generation
+                && runtime
+                    .engine_node_snapshot(owner_node_id)
+                    .is_some_and(|owner| {
+                        owner.mood_active
+                            && owner.profile_settings.mood_scene_id.as_ref() == Some(scene_id)
+                            && stored_mood_palette_window(runtime, owner_node_id) == *palette
+                    })
+        }
+    }
 }
 
 fn set_scene_committed_state(
@@ -6297,7 +6338,15 @@ fn home_scene_work_item(
     command: &SceneLightCommand,
     dispatch_spacing: Duration,
     dispatch_generation: u64,
+    owner_node_id: &str,
+    scene_id: &str,
+    palette: PaletteWindow,
 ) -> WorkItem {
+    let provenance = NodeOutputProvenance::HomeScene {
+        owner_node_id: owner_node_id.to_string(),
+        scene_id: scene_id.to_string(),
+        palette,
+    };
     match &command.dispatch {
         SceneLightDispatch::On(lighting_command) => WorkItem::ApplyNodeCommand {
             command_id: crate::logging::next_command_id("home-scene-apply"),
@@ -6305,6 +6354,7 @@ fn home_scene_work_item(
             command: lighting_command.clone(),
             dispatch_spacing,
             dispatch_generation,
+            provenance,
         },
         SceneLightDispatch::Off(transition_ms) => WorkItem::LightsOffRoom {
             command_id: crate::logging::next_command_id("home-scene-apply"),
@@ -6312,6 +6362,7 @@ fn home_scene_work_item(
             transition_ms: *transition_ms,
             dispatch_spacing: Duration::ZERO,
             dispatch_generation,
+            provenance,
         },
     }
 }
@@ -6532,9 +6583,14 @@ pub fn do_home_scene_apply(
     drop(transaction);
 
     let (dispatch_generation, light_breaker_enabled, work_tx) = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        // A planned explicit scene supersedes older queued mode/scene output.
+        // Failed planning leaves any earlier scene queue intact.
+        if !applied.is_empty() {
+            s.invalidate_queued_light_dispatches();
+        }
         (
-            s.light_dispatch_generation,
+            s.scene_dispatch_generation,
             s.light_breaker_enabled,
             s.work_tx.clone(),
         )
@@ -6551,10 +6607,21 @@ pub fn do_home_scene_apply(
     let mut queued = false;
     if dispatch_count > 0 && light_breaker_enabled {
         if let Some(tx) = work_tx {
+            let scene_id = scene.id.as_str();
             let work_items: Vec<WorkItem> = applied
                 .iter()
-                .flat_map(|(_, _, plan)| plan.commands.iter())
-                .map(|command| home_scene_work_item(command, dispatch_spacing, dispatch_generation))
+                .flat_map(|(owner, palette, plan)| {
+                    plan.commands.iter().map(move |command| {
+                        home_scene_work_item(
+                            command,
+                            dispatch_spacing,
+                            dispatch_generation,
+                            owner,
+                            scene_id,
+                            *palette,
+                        )
+                    })
+                })
                 .collect();
             match spawn_paced_node_dispatcher(
                 state,
@@ -6972,9 +7039,12 @@ fn home_scene_apply_to_devices(
     let dispatch_count = applied.len();
 
     let (dispatch_generation, light_breaker_enabled, work_tx) = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !applied.is_empty() {
+            s.invalidate_queued_light_dispatches();
+        }
         (
-            s.light_dispatch_generation,
+            s.scene_dispatch_generation,
             s.light_breaker_enabled,
             s.work_tx.clone(),
         )
@@ -6997,7 +7067,25 @@ fn home_scene_apply_to_devices(
         let work_items: Vec<WorkItem> = members
             .iter()
             .map(|index| {
-                home_scene_work_item(&applied[*index].2, dispatch_spacing, dispatch_generation)
+                let (target, window, command) = &applied[*index];
+                let owner = target.room_id.as_deref().unwrap_or(&target.node_id);
+                let mut owner_window = *window;
+                if let Some(room_id) = target.room_id.as_deref() {
+                    owner_window.offset = applied
+                        .iter()
+                        .filter(|(other, _, _)| other.room_id.as_deref() == Some(room_id))
+                        .map(|(_, window, _)| window.offset)
+                        .min()
+                        .unwrap_or(window.offset);
+                }
+                home_scene_work_item(
+                    command,
+                    dispatch_spacing,
+                    dispatch_generation,
+                    owner,
+                    &scene.id,
+                    owner_window,
+                )
             })
             .collect();
         match spawn_paced_node_dispatcher(
@@ -9788,6 +9876,9 @@ fn apply_room_mode_defaults(
                 transition_ms: *transition_ms,
                 dispatch_spacing: default_http_batch_dispatch_spacing(),
                 dispatch_generation: ctx.dispatch_generation,
+                provenance: NodeOutputProvenance::Mode {
+                    preserve_home_scene: ctx.preserve_home_scenes,
+                },
             })
             .collect();
         let queued = match queue_node_dispatch_work_items(
@@ -10673,6 +10764,7 @@ fn dispatch_room_commands(
     mut room_commands: Vec<(String, LightingCommand)>,
     cycle_duration: Duration,
     dispatch_generation: u64,
+    preserve_home_scenes: bool,
 ) {
     if room_commands.is_empty() {
         return;
@@ -10707,6 +10799,9 @@ fn dispatch_room_commands(
                 command,
                 dispatch_spacing: phase_gap,
                 dispatch_generation,
+                provenance: NodeOutputProvenance::Mode {
+                    preserve_home_scene: preserve_home_scenes,
+                },
             },
         )
         .collect();
@@ -10755,10 +10850,28 @@ fn spawn_paced_node_dispatcher(
         .name("room-dispatch".to_string())
         .spawn(move || {
             for (idx, item) in work_items.into_iter().enumerate() {
-                if !crate::periodic::light_dispatch_generation_current(
-                    &dispatcher_state,
-                    dispatch_generation,
-                ) {
+                let home_scene_output = matches!(
+                    &item,
+                    WorkItem::ApplyNodeCommand {
+                        provenance: NodeOutputProvenance::HomeScene { .. },
+                        ..
+                    } | WorkItem::LightsOffRoom {
+                        provenance: NodeOutputProvenance::HomeScene { .. },
+                        ..
+                    }
+                );
+                let current = if home_scene_output {
+                    dispatcher_state.lock().ok().is_some_and(|s| {
+                        s.light_breaker_enabled
+                            && s.scene_dispatch_generation == dispatch_generation
+                    })
+                } else {
+                    crate::periodic::light_dispatch_generation_current(
+                        &dispatcher_state,
+                        dispatch_generation,
+                    )
+                };
+                if !current {
                     tracing::debug!(
                         target: "cmd",
                         event = "apply_node_command_skipped",
@@ -11085,10 +11198,29 @@ fn apply_room_schedule_target(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile_room_schedule_before_tick(
     state: &SharedState,
     room_id: &str,
     current_hour: f32,
+) -> Result<Option<RoomScheduleReconcile>> {
+    let arbitration = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let _guard = arbitration
+        .read()
+        .map_err(|_| anyhow::anyhow!("scene automation lock"))?;
+    reconcile_room_schedule_before_tick_inner(state, room_id, current_hour, true)
+}
+
+/// Caller holds the scene automation read lease for reconciliation and dispatch.
+pub(crate) fn reconcile_room_schedule_before_tick_inner(
+    state: &SharedState,
+    room_id: &str,
+    current_hour: f32,
+    preserve_home_scene: bool,
 ) -> Result<Option<RoomScheduleReconcile>> {
     let (schedule, utc_offset, should_persist) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -11162,15 +11294,24 @@ pub(crate) fn reconcile_room_schedule_before_tick(
             })
             .unwrap_or(RoomModeState::Active)
     };
-    let apply_result =
-        apply_room_schedule_target(state, room_id, mode, target_state, true, true, None);
+    let scene_held = preserve_home_scene
+        && state.lock().ok().is_some_and(|s| {
+            s.hub_runtime().is_some_and(|runtime| {
+                active_whole_home_scene_owner(&s, runtime.as_ref(), room_id).is_some()
+            })
+        });
+    let apply_result = if scene_held {
+        Ok(())
+    } else {
+        apply_room_schedule_target(state, room_id, mode, target_state, true, true, None)
+    };
     let mut activity = crate::activity::LightActivityRecord::app(room_id, "room_schedule_boundary");
     activity.correlation_id = Some(evaluation_id.clone());
     activity.payload = Some(serde_json::json!({
         "source": "follow_time",
         "target_mode": if mode == RhythmMode::Day { "day" } else { "sleep" },
         "target_state": target_state,
-        "status": if apply_result.is_ok() { "applied" } else { "failed" },
+        "status": if scene_held { "scene_held" } else if apply_result.is_ok() { "applied" } else { "failed" },
         "failure_stage": apply_result.as_ref().err().map(|_| "output_apply"),
         "reconciliation": reason,
     }));
@@ -11202,7 +11343,7 @@ pub(crate) fn apply_room_schedule_configuration(
             .and_then(|s| s.hub_runtime())
             .map(|runtime| runtime.current_hour())
             .unwrap_or(12.0);
-        return reconcile_room_schedule_before_tick(state, room_id, current_hour)
+        return reconcile_room_schedule_before_tick_inner(state, room_id, current_hour, false)
             .map(|result| result.is_some());
     }
 
@@ -11444,6 +11585,7 @@ struct ActiveModeOutputApply {
     force_observed_off_outputs: bool,
     reset_all_room_defaults: bool,
     reassert_hard_off_defaults: bool,
+    preserve_home_scenes: bool,
 }
 
 fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply) {
@@ -11456,6 +11598,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         force_observed_off_outputs,
         reset_all_room_defaults,
         reassert_hard_off_defaults,
+        preserve_home_scenes,
     } = request;
 
     let (
@@ -11526,7 +11669,25 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     // Keep internal mode/default state current for every addressable settings
     // node so a later reviewed handoff starts from the active mode. Only the
     // physical-output pass below is authority-gated.
-    let default_snapshots = addressable_node_snapshots(&runtime);
+    let mut default_snapshots = addressable_node_snapshots(&runtime);
+    let held_scene_nodes: HashSet<String> = if preserve_home_scenes {
+        state
+            .lock()
+            .ok()
+            .map(|s| {
+                default_snapshots
+                    .iter()
+                    .filter(|node| {
+                        active_whole_home_scene_owner(&s, runtime.as_ref(), &node.id).is_some()
+                    })
+                    .map(|node| node.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+    default_snapshots.retain(|node| !held_scene_nodes.contains(&node.id));
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
@@ -11539,6 +11700,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             power_save,
             reset_all_room_defaults,
             reassert_hard_off_defaults,
+            preserve_home_scenes,
         },
         &default_snapshots,
     );
@@ -11549,6 +11711,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     }
     let snapshots = addressable_root_snapshots(&runtime)
         .into_iter()
+        .filter(|snapshot| !held_scene_nodes.contains(&snapshot.id))
         .filter(|snapshot| {
             snapshot.profile_settings.light_schedule.is_none()
                 && !snapshot
@@ -11750,6 +11913,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             room_commands,
             cycle_duration,
             dispatch_generation,
+            preserve_home_scenes,
         );
     }
     if let Ok(mut s) = state.lock() {
@@ -11769,8 +11933,21 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
 /// persisted room state has been restored. This is the only catch-up path
 /// — routine restarts without a deferred apply leave restored room state
 /// untouched.
-fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
-    let (active_mode, transition, dispatch_generation) = {
+pub(crate) fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
+    let arbitration = {
+        let Ok(s) = state.lock() else { return };
+        if !s.pending_mode_output_apply || s.hub_runtime().is_none() {
+            return;
+        }
+        s.motion_scene_transaction_lock.clone()
+    };
+    // Discovery may already hold the external topology transaction. Never
+    // wait here in the reverse order of scene -> external topology; periodic
+    // retries the pending apply after discovery has released its transaction.
+    let Ok(_guard) = arbitration.try_read() else {
+        return;
+    };
+    let (active_mode, transition, dispatch_generation, preserve_home_scenes) = {
         let Ok(mut s) = state.lock() else {
             return;
         };
@@ -11783,8 +11960,18 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
                 .into_iter()
                 .find(|config| config.id.as_str() == id.as_str())
         });
-        let dispatch_generation = s.invalidate_queued_light_dispatches();
-        (active_mode, transition, dispatch_generation)
+        let preserve_home_scenes = s.last_active_mode_cause == ModeChangeCause::Schedule;
+        let dispatch_generation = if preserve_home_scenes {
+            s.invalidate_queued_automatic_light_dispatches()
+        } else {
+            s.invalidate_queued_light_dispatches()
+        };
+        (
+            active_mode,
+            transition,
+            dispatch_generation,
+            preserve_home_scenes,
+        )
     };
 
     info!(
@@ -11804,6 +11991,7 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
             force_observed_off_outputs: false,
             reset_all_room_defaults: false,
             reassert_hard_off_defaults: true,
+            preserve_home_scenes,
         },
     );
     persist_state(state);
@@ -11821,6 +12009,23 @@ fn do_settings_set_internal(
     auto_update: Option<bool>,
     update_channel: Option<UpdateChannel>,
 ) -> Result<String> {
+    let preserve_home_scenes = mode_change
+        .as_ref()
+        .is_some_and(|change| change.cause == ModeChangeCause::Schedule);
+    let arbitration = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let _scene_guard = if preserve_home_scenes {
+        Some(
+            arbitration
+                .read()
+                .map_err(|_| anyhow::anyhow!("scene automation lock"))?,
+        )
+    } else {
+        None
+    };
     if let Some(configs) = mode_configs.as_ref() {
         validate_mode_configs(configs)?;
     }
@@ -11919,7 +12124,11 @@ fn do_settings_set_internal(
                 .collect();
         }
         if mode_changed || force_reapply_outputs || !reapply_scope.is_empty() {
-            dispatch_generation = s.invalidate_queued_light_dispatches();
+            dispatch_generation = if preserve_home_scenes {
+                s.invalidate_queued_automatic_light_dispatches()
+            } else {
+                s.invalidate_queued_light_dispatches()
+            };
             tracing::debug!(
                 target: "cmd",
                 event = "queued_light_dispatches_invalidated",
@@ -12071,6 +12280,7 @@ fn do_settings_set_internal(
                     force_observed_off_outputs,
                     reset_all_room_defaults,
                     reassert_hard_off_defaults: mode_changed || force_reapply_outputs,
+                    preserve_home_scenes,
                 },
             );
         } else {
@@ -13329,6 +13539,14 @@ pub fn do_trigger_light_schedule_transition_for_node(
     schedule_id: &str,
     transition_id: &str,
 ) -> Result<AutomationActionOutcome> {
+    let arbitration = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let _scene_guard = arbitration
+        .read()
+        .map_err(|_| anyhow::anyhow!("scene automation lock"))?;
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -13404,14 +13622,20 @@ pub fn do_trigger_light_schedule_transition_for_node(
         )
     };
 
-    persist_light_schedule_mode_for_node(state, node_id, schedule_id, target_mode, true)?;
-    apply_light_schedule_target_mode(state, node_id, target_mode, Some(&transition), true)?;
+    // Advance the schedule's clock while a whole-home scene owns its output.
+    // The generic preference setter can replay Mood, so update only assignment
+    // metadata under the node gate instead of re-rendering an unchanged scene.
+    let scene_held = advance_held_scene_schedule_mode(state, node_id, schedule_id, target_mode)?;
+    if !scene_held {
+        persist_light_schedule_mode_for_node(state, node_id, schedule_id, target_mode, true)?;
+        apply_light_schedule_target_mode(state, node_id, target_mode, Some(&transition), true)?;
+    }
 
     let mut activity =
         crate::activity::LightActivityRecord::app(node_id, "light_schedule_boundary");
     activity.payload = Some(serde_json::json!({
         "target_mode": if target_mode == RhythmMode::Day { "day" } else { "sleep" },
-        "status": "applied",
+        "status": if scene_held { "scene_held" } else { "applied" },
         "override_scope": if was_overridden { "effective_override" } else { "base" },
         "trigger_kind": transition.trigger.kind(),
         "solar_event": transition.trigger.event(),
@@ -13426,6 +13650,44 @@ pub fn do_trigger_light_schedule_transition_for_node(
         target_mode,
         transition_id: Some(transition.id),
     })
+}
+
+fn advance_held_scene_schedule_mode(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    target_mode: RhythmMode,
+) -> Result<bool> {
+    let node_gate = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        node_command_gate(&mut s, node_id)
+    };
+    let _node_guard = node_gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node command lock"))?;
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        if active_whole_home_scene_owner(&s, runtime.as_ref(), node_id).is_none() {
+            return Ok(false);
+        }
+        runtime
+    };
+    if let Some(patch) =
+        light_schedule_mode_patch_for_node(state, node_id, schedule_id, target_mode)?
+    {
+        let snapshot = runtime
+            .engine_node_snapshot(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+        let mut restored = RestoredNodeState::from(&snapshot);
+        patch.apply_to(&mut restored.profile_settings);
+        runtime.restore_node_state(node_id, restored);
+        persist_rooms(state);
+        emit_node_state_event_after_apply(state, &runtime, node_id);
+    }
+    Ok(true)
 }
 
 fn validate_imported_backup_configuration(configuration: &BackupConfiguration) -> Result<()> {
@@ -16171,6 +16433,7 @@ pub fn do_config_set_with_options_if_matches(
                 force_observed_off_outputs: false,
                 reset_all_room_defaults: false,
                 reassert_hard_off_defaults: false,
+                preserve_home_scenes: false,
             },
         );
     }

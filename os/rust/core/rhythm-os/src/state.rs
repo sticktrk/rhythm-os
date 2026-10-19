@@ -101,6 +101,19 @@ impl UpdateChannel {
     }
 }
 
+/// Freshness and ownership of a rendered, queued light output.
+#[derive(Clone, Debug)]
+pub enum NodeOutputProvenance {
+    Mode {
+        preserve_home_scene: bool,
+    },
+    HomeScene {
+        owner_node_id: String,
+        scene_id: String,
+        palette: crate::scenes::PaletteWindow,
+    },
+}
+
 /// Work items for background processing.
 ///
 /// Heavy operations (TLS to hub, float math, JSON formatting) are
@@ -158,6 +171,7 @@ pub enum WorkItem {
         command: rhythm_core::LightingCommand,
         dispatch_spacing: Duration,
         dispatch_generation: u64,
+        provenance: NodeOutputProvenance,
     },
     /// Turn a single node fully off, optionally with a fade.
     ///
@@ -169,6 +183,7 @@ pub enum WorkItem {
         transition_ms: Option<u32>,
         dispatch_spacing: Duration,
         dispatch_generation: u64,
+        provenance: NodeOutputProvenance,
     },
     /// Periodic update for a single schedulable light node.
     PeriodicNodeTick {
@@ -429,7 +444,8 @@ pub struct AppState {
     /// topology lock is temporarily released for ordinary light dispatch.
     pub scene_lifecycle_transaction_lock: Arc<Mutex<()>>,
     /// Outermost arbitration between whole-home scene commits/brightness and
-    /// motion dispatch. Acquire before node-command and scene-lifecycle gates.
+    /// automatic dispatch (motion, schedules and ticks). Acquire before
+    /// node-command, scene-lifecycle and external-topology gates.
     pub motion_scene_transaction_lock: Arc<RwLock<()>>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
@@ -689,6 +705,9 @@ pub struct AppState {
     /// Incrementing this invalidates already queued periodic and mode-apply
     /// light work so an active-mode change cannot leak stale output commands.
     pub light_dispatch_generation: u64,
+    /// Explicit cancellation epoch for paced scene output. Automatic clock
+    /// advances invalidate adaptive plans without cancelling an active scene.
+    pub scene_dispatch_generation: u64,
     /// Next reserved dispatch start slot for generated periodic light-node work.
     pub next_node_dispatch_at: Option<Instant>,
     /// Next reserved dispatch start slot for app-originated queued node work.
@@ -1138,6 +1157,7 @@ impl Default for AppState {
             periodic_work_tx: None,
             pending_periodic_ticks: HashMap::new(),
             light_dispatch_generation: 0,
+            scene_dispatch_generation: 0,
             next_node_dispatch_at: None,
             next_interactive_node_dispatch_at: None,
             pending_hub_event_rxs: Vec::new(),
@@ -1407,6 +1427,11 @@ impl AppState {
 
     /// Invalidate queued generated light-output work and reset dispatch pacing.
     pub fn invalidate_queued_light_dispatches(&mut self) -> u64 {
+        self.scene_dispatch_generation = self.scene_dispatch_generation.wrapping_add(1);
+        self.invalidate_queued_automatic_light_dispatches()
+    }
+
+    pub fn invalidate_queued_automatic_light_dispatches(&mut self) -> u64 {
         self.light_dispatch_generation = self.light_dispatch_generation.wrapping_add(1);
         self.pending_periodic_ticks.clear();
         self.next_node_dispatch_at = None;
