@@ -186,7 +186,8 @@ void main() {
     );
     await analytics.logGlobalRoomActionCompleted(
       journeyId: 'global-room-123',
-      action: 'soften',
+      action: 'set_brightness',
+      sceneRoomCount: 2,
       eligibleCount: 3,
       attemptedCount: 2,
       completedCount: 2,
@@ -307,6 +308,7 @@ void main() {
       backend.events[4].properties,
       containsPair('completed_count', 2),
     );
+    expect(backend.events[4].properties, containsPair('scene_room_count', 2));
     expect(
       backend.events[5].properties,
       {

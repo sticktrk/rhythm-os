@@ -1143,6 +1143,148 @@ void main() {
     expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
   });
 
+  testWidgets('whole-home slider dims Mood and adaptive rooms in one batch',
+      (tester) async {
+    final harness =
+        await _pumpAllRooms(tester, rooms: const [_room1, _bedroom]);
+    harness.connection
+        .emitHello(_helloWithFeatures([RhythmFeature.sceneBrightness]));
+    await tester.pump();
+    harness.roomProvider.setRoomStateLocal('room-1', RoomModeState.mood);
+    harness.roomProvider.setMoodEnabledLocal('room-1', true);
+    harness.roomProvider.setMoodBrightnessLocal('room-1', 70);
+    await tester.pump();
+    await openScenePanel(tester);
+    final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('global-room-brightness-slider')));
+    expect(slider.onChangeEnd, isNotNull);
+    slider.onChanged!(25);
+    slider.onChangeEnd!(25);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(harness.api.brightnessBatches.single, [
+      (nodeId: 'room-1', brightness: 25),
+      (nodeId: 'bedroom', brightness: 25),
+    ]);
+    expect(harness.api.homeSceneApplies, isEmpty,
+        reason: 'dimming never reshuffles the scene');
+    expect(
+        harness.roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
+    expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
+    final screenshotPath =
+        Platform.environment['RHYTHM_SCENE_BRIGHTNESS_SCREENSHOT'];
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(AllRoomsScreen),
+        matchesGoldenFile(Uri.file(screenshotPath)),
+      );
+    }
+  });
+
+  testWidgets('previous appliance excludes Mood and failed slider reverts',
+      (tester) async {
+    final harness =
+        await _pumpAllRooms(tester, rooms: const [_room1, _bedroom]);
+    harness.roomProvider.setRoomStateLocal('room-1', RoomModeState.mood);
+    harness.roomProvider.setMoodEnabledLocal('room-1', true);
+    await openScenePanel(tester);
+    harness.api.nextDispatchCount = 0;
+    final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('global-room-brightness-slider')));
+    final original = slider.value;
+    slider.onChanged!(25);
+    slider.onChangeEnd!(25);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(harness.api.brightnessBatches.single,
+        [(nodeId: 'bedroom', brightness: 25)]);
+    expect(
+        tester
+            .widget<Slider>(
+                find.byKey(const ValueKey('global-room-brightness-slider')))
+            .value,
+        original);
+  });
+
+  testWidgets('native scene rooms are excluded with an actionable hint',
+      (tester) async {
+    final harness =
+        await _pumpAllRooms(tester, rooms: const [_room1, _bedroom]);
+    harness.connection.emitHello(RhythmHello.fromJson({
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': [RhythmFeature.sceneBrightness],
+        'hubs': []
+      },
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Living Room',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'state': 'mood',
+          'mood_active': true,
+          'rhythm_enabled': true,
+          'lights_on': true,
+          'brightness': 70,
+          'profile_settings': {'mood_scene_id': 'native-hue-evening'}
+        }
+      ]
+    }));
+    await tester.pump();
+    await openScenePanel(tester);
+    expect(find.text('To adjust brightness here, choose a Rhythm scene.'),
+        findsOneWidget);
+    expect(find.text('Reapply the scene to enable brightness adjustment.'),
+        findsNothing);
+    final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('global-room-brightness-slider')));
+    slider.onChangeEnd!(25);
+    await tester.pump();
+    expect(harness.api.brightnessBatches.single,
+        [(nodeId: 'bedroom', brightness: 25)]);
+  });
+
+  testWidgets('legacy whole-home bindings ask for a fresh scene apply',
+      (tester) async {
+    final harness =
+        await _pumpAllRooms(tester, rooms: const [_room1, _bedroom]);
+    harness.connection.emitHello(RhythmHello.fromJson({
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': [RhythmFeature.sceneBrightness],
+        'hubs': []
+      },
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Living Room',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'state': 'mood',
+          'mood_active': true,
+          'rhythm_enabled': true,
+          'lights_on': true,
+          'brightness': 70,
+          'profile_settings': {
+            'mood_scene_id': 'halloween',
+            'mood_scene_palette_span': 3
+          }
+        }
+      ]
+    }));
+    await tester.pump();
+    await openScenePanel(tester);
+    expect(find.text('Reapply the scene to enable brightness adjustment.'),
+        findsOneWidget);
+    final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('global-room-brightness-slider')));
+    slider.onChangeEnd!(25);
+    await tester.pump();
+    expect(harness.api.brightnessBatches.single,
+        [(nodeId: 'bedroom', brightness: 25)]);
+  });
+
   testWidgets('room cards show the shared title and settings affordance',
       (tester) async {
     final roomProvider = RoomProvider();

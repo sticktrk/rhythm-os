@@ -951,13 +951,14 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   /// Rooms and standalone lights a global action may address.
   ///
-  /// Soften, Boost and the brightness slider only touch rooms whose lights are
-  /// on in an adaptive state. Reset is different: it restores every enabled
+  /// Soften and Boost touch adaptive-on rooms. The brightness slider also
+  /// includes Mood when the server can preserve scenes. Reset restores every enabled
   /// light node to the current mode's default, so it deliberately includes
   /// rooms that are off, in Mood (a whole-home scene, for instance), in Low
   /// glow, mid-transition or still waiting on a queued dispatch.
   List<_GlobalRoomTarget> _eligibleGlobalRoomTargets({
     bool includeLowGlow = true,
+    bool includeMood = false,
     bool forReset = false,
   }) {
     final roomProvider = context.read<RoomProvider>();
@@ -969,6 +970,14 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           room.kind == RoomNodeKind.lightDevice;
       final state = roomProvider.getDisplayRoomState(room.id);
       final isAdaptiveOn = state == RoomModeState.active ||
+          (includeMood &&
+              state == RoomModeState.mood &&
+              !context
+                  .read<ServerSyncProvider>()
+                  .sceneBrightnessUnsupported(room.id) &&
+              !context
+                  .read<ServerSyncProvider>()
+                  .sceneBrightnessNeedsReapply(room.id)) ||
           state == RoomModeState.wake ||
           state == RoomModeState.warning ||
           (includeLowGlow &&
@@ -1158,7 +1167,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   Future<void> _setGlobalBrightness(double value) async {
     if (_globalActionPending) return;
     final journeyId = 'global-room-${_uuid.v4()}';
-    final eligible = _eligibleGlobalRoomTargets();
+    final serverSync = context.read<ServerSyncProvider>();
+    final eligible = _eligibleGlobalRoomTargets(
+      includeMood: serverSync.supportsSceneBrightness,
+    );
     if (eligible.isEmpty) {
       AnalyticsService().logGlobalRoomActionCompleted(
         journeyId: journeyId,
@@ -1172,11 +1184,15 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       return;
     }
 
-    final serverSync = context.read<ServerSyncProvider>();
     final dispatchable = eligible
         .where((target) => serverSync.isRoomHubConnected(target.room.source))
         .toList(growable: false);
     final brightness = value.round().clamp(1, 100).toInt();
+    final sceneRoomCount = eligible
+        .where((target) =>
+            context.read<RoomProvider>().getDisplayRoomState(target.room.id) ==
+            RoomModeState.mood)
+        .length;
 
     HapticFeedback.selectionClick();
     setState(() => _globalActionPending = true);
@@ -1194,7 +1210,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final completed = _completedDispatchCount(result, dispatchable);
     setState(() {
       _globalActionPending = false;
-      _globalSliderValue = brightness.toDouble();
+      // Queue acceptance is not an observation. Resume server-derived values
+      // so a later worker failure cannot leave a permanent slider preview.
+      _globalSliderValue = null;
     });
     _showGlobalResult(
       verb: 'Adjusted',
@@ -1205,6 +1223,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       journeyId: journeyId,
       action: 'set_brightness',
       eligibleCount: eligible.length,
+      sceneRoomCount: sceneRoomCount,
       attemptedCount: dispatchable.length,
       completedCount: completed,
       outcome: _globalRoomActionOutcome(
@@ -1273,6 +1292,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     setState(() {
       _globalActionPending = false;
+      _globalSliderValue = null;
       // The tile only reads as active when at least one room actually took it.
       _globalAppliedSceneId =
           result != null && result.appliedTargetCount > 0 ? scene.id : null;
@@ -1402,7 +1422,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildGlobalBrightnessPanel() {
     context.watch<RoomProvider>();
-    final targets = _eligibleGlobalRoomTargets();
+    final serverSync = context.watch<ServerSyncProvider>();
+    final targets = _eligibleGlobalRoomTargets(
+      includeMood: serverSync.supportsSceneBrightness,
+    );
     final average = targets.isEmpty
         ? 50.0
         : targets
@@ -1481,6 +1504,28 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           sliderRow,
+          if (serverSync.supportsSceneBrightness &&
+              widget.rooms.any((room) =>
+                  context.read<RoomProvider>().getDisplayRoomState(room.id) ==
+                      RoomModeState.mood &&
+                  serverSync.sceneBrightnessUnsupported(room.id)))
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('To adjust brightness here, choose a Rhythm scene.',
+                  style: TextStyle(
+                      color: CelestialColors.textSecondary, fontSize: 12)),
+            ),
+          if (serverSync.supportsSceneBrightness &&
+              widget.rooms.any((room) =>
+                  context.read<RoomProvider>().getDisplayRoomState(room.id) ==
+                      RoomModeState.mood &&
+                  serverSync.sceneBrightnessNeedsReapply(room.id)))
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('Reapply the scene to enable brightness adjustment.',
+                  style: TextStyle(
+                      color: CelestialColors.textSecondary, fontSize: 12)),
+            ),
           if (sceneSupported) ...[
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),

@@ -208,6 +208,8 @@ pub struct PaletteWindow {
     pub offset: usize,
     pub span: Option<usize>,
     pub seed: Option<u32>,
+    /// Preserve the direct-device rendering of a whole-home binding.
+    pub device_mode: bool,
 }
 
 impl PaletteWindow {

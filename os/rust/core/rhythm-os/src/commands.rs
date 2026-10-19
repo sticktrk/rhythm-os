@@ -1185,6 +1185,8 @@ impl RoomProfileSettingsPatch {
                 settings.mood_scene_palette_offset = None;
                 settings.mood_scene_palette_span = None;
                 settings.mood_scene_palette_seed = None;
+                settings.mood_scene_device_mode = None;
+                settings.mood_scene_device_slots = None;
             }
             settings.mood_scene_id = mood_scene_id.clone();
         }
@@ -5496,7 +5498,10 @@ fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -
         .map(|snap| PaletteWindow {
             offset: snap
                 .profile_settings
-                .mood_scene_palette_offset
+                .mood_scene_device_slots
+                .as_ref()
+                .and_then(|slots| slots.get(node_id).copied())
+                .or(snap.profile_settings.mood_scene_palette_offset)
                 .map(|offset| offset as usize)
                 .unwrap_or(0),
             span: snap
@@ -5504,6 +5509,7 @@ fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -
                 .mood_scene_palette_span
                 .map(|span| span as usize),
             seed: snap.profile_settings.mood_scene_palette_seed,
+            device_mode: snap.profile_settings.mood_scene_device_mode == Some(true),
         })
         .unwrap_or_default()
 }
@@ -5515,6 +5521,7 @@ fn set_scene_committed_state(
     target_id: &str,
     affected_node_ids: &[String],
     palette: PaletteWindow,
+    device_slots: Option<&BTreeMap<String, u32>>,
 ) {
     let mut state_node_ids: BTreeSet<String> = BTreeSet::new();
     if runtime
@@ -5538,6 +5545,14 @@ fn set_scene_committed_state(
         profile_settings.mood_scene_palette_span =
             palette.span.and_then(|span| u32::try_from(span).ok());
         profile_settings.mood_scene_palette_seed = palette.seed;
+        profile_settings.mood_scene_device_mode = Some(palette.device_mode);
+        profile_settings.mood_scene_device_slots = if palette.device_mode {
+            device_slots
+                .cloned()
+                .or(profile_settings.mood_scene_device_slots)
+        } else {
+            None
+        };
         runtime.restore_node_state(
             &node_id,
             RestoredNodeState {
@@ -5632,6 +5647,52 @@ fn plan_scene_target_locked(
     transition_ms: Option<u32>,
     palette: PaletteWindow,
 ) -> Result<PlannedSceneTarget> {
+    if palette.device_mode {
+        // A device-mode home scene must stay per light when dimmed or resumed.
+        // The ordinary room planner can collapse a grouped room to one colour.
+        let scope = light_scene_target_scope_node_ids(s, runtime, target_id);
+        let targets = home_scene_device_targets_locked(s, runtime);
+        let binding = runtime.engine_effective_node_snapshot(target_id);
+        let slots = binding
+            .as_ref()
+            .and_then(|snapshot| snapshot.profile_settings.mood_scene_device_slots.as_ref());
+        let slots = slots.ok_or_else(|| anyhow::anyhow!(
+            "Reapply the scene before adjusting or resuming it: the binding has no light assignments"
+        ))?;
+        let mut commands = Vec::new();
+        let mut consumed = 0usize;
+        for target in targets
+            .eligible
+            .iter()
+            .filter(|target| scope.contains(&target.node_id))
+        {
+            // A newly enabled/discovered light has no color in this binding.
+            // Leave it alone until an explicit scene apply assigns one.
+            let Some(slot) = slots.get(&target.node_id) else {
+                continue;
+            };
+            let window = PaletteWindow {
+                offset: *slot as usize,
+                ..palette
+            };
+            let (command, slots) = plan_home_scene_device(scene, target, transition_ms, window)?;
+            consumed += slots;
+            commands.push(command);
+        }
+        let affected_node_ids = commands
+            .iter()
+            .map(|command| command.public_node_id.clone())
+            .collect();
+        return Ok(PlannedSceneTarget {
+            plan: SceneApplicationPlan {
+                commands,
+                affected_node_ids,
+                unresolved_node_ids: Vec::new(),
+                palette_slots_consumed: consumed,
+            },
+            managed_dispatches: Vec::new(),
+        });
+    }
     let rendered =
         render_scene_lights_locked(s, runtime, scene, target_id, transition_ms, palette)?;
     if rendered.scope_node_ids.is_empty() {
@@ -5719,6 +5780,31 @@ fn do_scene_apply_definition_inner(
     let _scene_transaction = scene_transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
+    do_scene_apply_definition_in_transaction(
+        state,
+        source,
+        request,
+        commit_state,
+        persist_state,
+        preview_id,
+        ephemeral_projection,
+        palette,
+        &_scene_transaction,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_scene_apply_definition_in_transaction(
+    state: &SharedState,
+    source: SceneApplySource,
+    request: SceneApplyRequest,
+    commit_state: bool,
+    persist_state: bool,
+    preview_id: Option<String>,
+    ephemeral_projection: bool,
+    palette: PaletteWindow,
+    _transaction: &std::sync::MutexGuard<'_, ()>,
+) -> Result<SceneApplyResponse> {
     let mut scene = match source {
         SceneApplySource::Stored(scene_id) => {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -5790,6 +5876,7 @@ fn do_scene_apply_definition_inner(
             &target_id,
             &plan.affected_node_ids,
             palette,
+            None,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids);
@@ -6267,6 +6354,14 @@ pub fn do_home_scene_apply(
         );
     }
 
+    let motion_scene_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let _motion_scene_guard = motion_scene_lock
+        .write()
+        .map_err(|_| anyhow::anyhow!("motion/scene transaction lock"))?;
     let scene_transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scene_lifecycle_transaction_lock.clone()
@@ -6332,6 +6427,7 @@ pub fn do_home_scene_apply(
                 offset: palette_offset,
                 span: Some(house_span),
                 seed,
+                device_mode: false,
             };
             let result = plan_scene_target_locked(
                 &s,
@@ -6515,6 +6611,7 @@ pub fn do_home_scene_apply(
             target_id,
             &plan.affected_node_ids,
             *palette,
+            None,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids);
@@ -6804,6 +6901,7 @@ fn home_scene_apply_to_devices(
                 offset: palette_slot,
                 span: Some(house_span),
                 seed,
+                device_mode: true,
             };
             let result = plan_home_scene_device(&scene, &target, request.transition_ms, window);
             let result = result.map(|(command, consumed)| {
@@ -6967,6 +7065,10 @@ fn home_scene_apply_to_devices(
                     &target.node_id,
                     &affected,
                     *window,
+                    Some(&BTreeMap::from([(
+                        target.node_id.clone(),
+                        window.offset as u32,
+                    )])),
                 );
                 if let Ok(mut s) = state.lock() {
                     clear_scene_preview_sessions_locked(&mut s, &target.node_id, &affected);
@@ -6976,7 +7078,20 @@ fn home_scene_apply_to_devices(
         }
     }
     for (room_id, window, members) in &rooms {
-        set_scene_committed_state(state, &runtime, &scene.id, room_id, members, *window);
+        let slots = applied
+            .iter()
+            .filter(|(target, _, _)| target.room_id.as_ref() == Some(room_id))
+            .map(|(target, window, _)| (target.node_id.clone(), window.offset as u32))
+            .collect::<BTreeMap<_, _>>();
+        set_scene_committed_state(
+            state,
+            &runtime,
+            &scene.id,
+            room_id,
+            members,
+            *window,
+            Some(&slots),
+        );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, room_id, members);
         }
@@ -7104,6 +7219,7 @@ fn do_native_scene_apply(
             &target_id,
             &affected_node_ids,
             PaletteWindow::default(),
+            None,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
@@ -9819,8 +9935,25 @@ fn queue_node_dispatch_batch(
     dispatch_spacing: Duration,
 ) -> Result<()> {
     if persist_after && !work_items.is_empty() {
-        work_items.push(WorkItem::DeferredPersist {
-            node_id: dispatch_label.to_string(),
+        // Brightness can now edit a Mood definition, not only a room offset.
+        // Inspect the operation rather than the current room mode because the
+        // mode can change before the worker executes this batch.
+        let edits_lighting_settings = work_items.iter().any(|item| {
+            matches!(
+                item,
+                WorkItem::SetNodeBrightness { .. }
+                    | WorkItem::SetNodeCurveModifier {
+                        modifier: NodeCurveModifier::Brightness(_),
+                        ..
+                    }
+            )
+        });
+        work_items.push(if edits_lighting_settings {
+            WorkItem::DeferredPersistLightingSettings
+        } else {
+            WorkItem::DeferredPersist {
+                node_id: dispatch_label.to_string(),
+            }
         });
     }
 
@@ -9905,12 +10038,9 @@ fn set_fixed_profile_brightness(config: &mut LightProfileConfig, brightness: u8)
 fn base_mood_profile_config_locked(
     s: &AppState,
     snapshot: &rhythm_core::NodeSnapshot,
-    profile_id: &str,
 ) -> LightProfileConfig {
-    if let Some(config) = s.light_profile_config(profile_id).cloned() {
-        return config;
-    }
-
+    // Resolve the current binding and its overrides. A cached generated
+    // profile may belong to an earlier selection with a different color.
     let mode_configs = s.mode_configs();
     let local = current_local_datetime(s.utc_offset_hours);
     let local_hour =
@@ -9950,7 +10080,7 @@ where
     let (profile, profile_settings) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let profile_id = node_mood_profile_id(node_id);
-        let mut profile = base_mood_profile_config_locked(&s, snapshot, &profile_id);
+        let mut profile = base_mood_profile_config_locked(&s, snapshot);
         profile.id = profile_id.clone();
         profile.name = node_mood_profile_name(snapshot);
         update(&mut profile);
@@ -10058,6 +10188,7 @@ fn update_scene_brightness_for_target(
     snapshot: &rhythm_core::NodeSnapshot,
     node_id: &str,
     brightness: u8,
+    palette: PaletteWindow,
 ) -> Result<()> {
     let layer = scene
         .light
@@ -10066,18 +10197,15 @@ fn update_scene_brightness_for_target(
     let mut updated = false;
     if snapshot.kind.is_room() {
         if let Some(default_output) = &mut layer.default_output {
-            default_output.power = LightScenePower::On;
             default_output.brightness = brightness;
             updated = true;
         }
         for output in &mut layer.palette {
-            output.power = LightScenePower::On;
             output.brightness = brightness;
             updated = true;
         }
         for entry in &mut layer.entries {
             if scope_node_ids.contains(entry.target.node_id()) {
-                entry.output.power = LightScenePower::On;
                 entry.output.brightness = brightness;
                 updated = true;
             }
@@ -10087,16 +10215,12 @@ fn update_scene_brightness_for_target(
         .iter_mut()
         .find(|entry| entry.target.node_id() == node_id)
     {
-        entry.output.power = LightScenePower::On;
         entry.output.brightness = brightness;
         updated = true;
     } else if let Some(mut output) = layer
-        .palette
-        .first()
-        .cloned()
+        .palette_output_with_seed(palette.offset, palette.span_or(1), palette.seed)
         .or_else(|| layer.default_output.clone())
     {
-        output.power = LightScenePower::On;
         output.brightness = brightness;
         layer.entries.push(LightSceneEntry {
             target: LightSceneTargetRef::Node {
@@ -10302,10 +10426,45 @@ fn update_node_mood_scene_brightness(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     node_id: &str,
-    snapshot: &rhythm_core::NodeSnapshot,
+    _snapshot: &rhythm_core::NodeSnapshot,
     brightness: u8,
     persist: bool,
 ) -> Result<()> {
+    let motion_scene_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let _motion_scene_guard = motion_scene_lock
+        .write()
+        .map_err(|_| anyhow::anyhow!("motion/scene transaction lock"))?;
+    let node_lock = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        node_command_gate(&mut s, node_id)
+    };
+    let _node_guard = node_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node command lock"))?;
+    let scene_transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .scene_lifecycle_transaction_lock
+        .clone();
+    let scene_transaction = scene_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
+    let latest = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let snapshot = &latest;
+    if !snapshot.mood_active || snapshot.hard_off {
+        anyhow::bail!("Mood state changed before brightness adjustment; retry the request");
+    }
+    if snapshot.profile_settings.mood_scene_palette_span.is_some()
+        && snapshot.profile_settings.mood_scene_device_mode.is_none()
+    {
+        anyhow::bail!("Reapply the scene before adjusting its brightness: the legacy binding has no dispatch mode");
+    }
     let bound_scene_id = snapshot
         .profile_settings
         .mood_scene_id
@@ -10324,8 +10483,8 @@ fn update_node_mood_scene_brightness(
         node_scene_id
     };
 
-    {
-        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let scene = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let mut scene = s
             .scenes
             .get(&bound_scene_id)
@@ -10336,6 +10495,8 @@ fn update_node_mood_scene_brightness(
             scene.name = node_mood_scene_name(snapshot);
             scene.description = None;
             scene.source = SceneSource::User;
+            // This is one target's brightness copy, not a home-wide theme.
+            scene.extensions.remove("whole_home");
         }
         update_scene_brightness_for_target(
             &mut scene,
@@ -10343,8 +10504,31 @@ fn update_node_mood_scene_brightness(
             snapshot,
             node_id,
             brightness,
+            palette,
         )?;
+        scene
+    };
+
+    // Dispatch the candidate without publishing it. A failed controller write
+    // must leave the previous scene and binding available for retry/recovery.
+    let response = do_scene_apply_definition_in_transaction(
+        state,
+        SceneApplySource::Definition(scene.clone()),
+        SceneApplyRequest {
+            target_id: node_id.to_string(),
+            transition_ms: None,
+        },
+        false,
+        false,
+        None,
+        false,
+        palette,
+        &scene_transaction,
+    )?;
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene_id.clone(), scene);
+        clear_scene_preview_sessions_locked(&mut s, node_id, &response.affected_node_ids);
         if persist {
             persist_scenes_locked(&s);
         }
@@ -10371,18 +10555,15 @@ fn update_node_mood_scene_brightness(
         );
     }
 
-    do_scene_apply_inner(
+    set_scene_committed_state(
         state,
+        runtime,
         &scene_id,
-        SceneApplyRequest {
-            target_id: node_id.to_string(),
-            transition_ms: None,
-        },
-        true,
-        false,
-        None,
+        node_id,
+        &response.affected_node_ids,
         palette,
-    )?;
+        None,
+    );
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
 
@@ -14446,6 +14627,14 @@ pub fn do_set_node_brightness(
     let brightness = brightness.clamp(1, 100);
     info!(target: "cmd", "set_node_brightness: {} -> {}", node_id, brightness);
 
+    let motion_scene_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .motion_scene_transaction_lock
+        .clone();
+    let motion_scene_guard = motion_scene_lock
+        .read()
+        .map_err(|_| anyhow::anyhow!("motion/scene transaction lock"))?;
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
@@ -14458,6 +14647,9 @@ pub fn do_set_node_brightness(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     if snapshot.mood_active && !snapshot.hard_off {
         if snapshot.profile_settings.mood_scene_id.is_some() {
+            // The scene editor needs exclusive arbitration and re-reads the
+            // binding after acquiring it. Never upgrade a held read guard.
+            drop(motion_scene_guard);
             info!(
                 target: "cmd",
                 "set_node_brightness: {} updating mood scene brightness",
@@ -14573,6 +14765,7 @@ pub fn queue_set_node_brightness_batch(
 /// This is the explicit curve-aware contract behind app sliders. Brightness
 /// computes a persistent brightness offset, while color temperature moves the
 /// room along the active curve and can preserve the current effective brightness.
+/// In Mood, brightness edits the bound scene/profile instead of adaptive output.
 pub fn do_set_node_curve_modifier(
     state: &SharedState,
     node_id: &str,
@@ -14604,7 +14797,7 @@ pub fn do_set_node_curve_modifier(
 
     match modifier {
         NodeCurveModifier::Brightness(brightness) => {
-            runtime.set_room_brightness(node_id, brightness)?;
+            return do_set_node_brightness(state, node_id, brightness, persist);
         }
         NodeCurveModifier::ColorTemperature {
             kelvin,
@@ -18549,6 +18742,16 @@ pub fn persist_registry(state: &SharedState) {
     }
 }
 
+/// Persist definitions edited by a lighting batch before its room bindings.
+pub fn persist_lighting_settings(state: &SharedState) {
+    {
+        let Ok(s) = state.lock() else { return };
+        persist_light_profiles_locked(&s);
+        persist_scenes_locked(&s);
+    }
+    persist_rooms(state);
+}
+
 /// Persist room state.
 pub fn persist_rooms(state: &SharedState) {
     let (runtime, has_storage) = {
@@ -21845,6 +22048,10 @@ mod tests {
             Mutex<Option<Arc<crate::topology_transaction::ExternalTopologyTransactionLock>>>,
         pause_after_scene_dispatch: AtomicBool,
         scene_dispatch_paused: AtomicBool,
+        before_brightness_binding:
+            Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        before_adaptive_brightness:
+            Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
         current_hour: f32,
     }
 
@@ -21872,6 +22079,8 @@ mod tests {
                 scene_dispatch_transaction_lock: Mutex::new(None),
                 pause_after_scene_dispatch: AtomicBool::new(false),
                 scene_dispatch_paused: AtomicBool::new(false),
+                before_brightness_binding: Mutex::new(None),
+                before_adaptive_brightness: Mutex::new(None),
                 current_hour,
             }
         }
@@ -22073,6 +22282,15 @@ mod tests {
             self.snapshots.lock().unwrap().clone()
         }
         fn restore_room_state(&self, room_id: &str, state: RestoredRoomState) {
+            if state.profile_settings.mood_scene_id.as_deref()
+                == Some(node_mood_scene_id(room_id).as_str())
+            {
+                let pause = self.before_brightness_binding.lock().unwrap().take();
+                if let Some((started, resume)) = pause {
+                    started.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }
             if let Some(snap) = self
                 .snapshots
                 .lock()
@@ -22192,6 +22410,9 @@ mod tests {
                     })
                 })
                 .transpose()?;
+            if self.fail_turn_on.load(Ordering::SeqCst) {
+                anyhow::bail!("simulated turn-on failure");
+            }
             let room_state = self
                 .engine_room_snapshot(room_id)
                 .map(|snap| {
@@ -22258,6 +22479,11 @@ mod tests {
             false
         }
         fn set_room_brightness(&self, room_id: &str, _: u8) -> anyhow::Result<()> {
+            let pause = self.before_adaptive_brightness.lock().unwrap().take();
+            if let Some((started, resume)) = pause {
+                started.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             self.set_target_lights(room_id, true);
             Ok(())
         }
@@ -23753,6 +23979,8 @@ mod tests {
             mood_scene_palette_offset: None,
             mood_scene_palette_span: None,
             mood_scene_palette_seed: None,
+            mood_scene_device_mode: None,
+            mood_scene_device_slots: None,
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
@@ -24967,7 +25195,15 @@ mod tests {
             });
         }
 
-        update_scene_brightness_for_target(&mut room_scene, &scope, &room, "room1", 22).unwrap();
+        update_scene_brightness_for_target(
+            &mut room_scene,
+            &scope,
+            &room,
+            "room1",
+            22,
+            PaletteWindow::default(),
+        )
+        .unwrap();
         let layer = room_scene.light.as_ref().unwrap();
         assert_eq!(layer.default_output.as_ref().unwrap().brightness, 22);
         assert_eq!(layer.palette[0].brightness, 22);
@@ -24975,8 +25211,15 @@ mod tests {
         assert_eq!(layer.entries[1].output.brightness, 14);
 
         let mut device_scene = scene_for_light("device-scene", "device-a");
-        update_scene_brightness_for_target(&mut device_scene, &scope, &device, "device-a", 33)
-            .unwrap();
+        update_scene_brightness_for_target(
+            &mut device_scene,
+            &scope,
+            &device,
+            "device-a",
+            33,
+            PaletteWindow::default(),
+        )
+        .unwrap();
         assert_eq!(
             device_scene.light.as_ref().unwrap().entries[0]
                 .output
@@ -24985,12 +25228,49 @@ mod tests {
         );
 
         let mut fallback_scene = scene_with_default_output("fallback-scene", 55, 2700);
-        update_scene_brightness_for_target(&mut fallback_scene, &scope, &device, "device-a", 34)
-            .unwrap();
+        update_scene_brightness_for_target(
+            &mut fallback_scene,
+            &scope,
+            &device,
+            "device-a",
+            34,
+            PaletteWindow::default(),
+        )
+        .unwrap();
         let fallback_entries = &fallback_scene.light.as_ref().unwrap().entries;
         assert_eq!(fallback_entries.len(), 1);
         assert_eq!(fallback_entries[0].target.node_id(), "device-a");
         assert_eq!(fallback_entries[0].output.brightness, 34);
+
+        let mut offset_scene = scene_with_palette("offset-scene", &halloween_palette());
+        let palette = PaletteWindow {
+            offset: 2,
+            span: Some(5),
+            seed: Some(17),
+            device_mode: true,
+        };
+        let expected_color = offset_scene
+            .light
+            .as_ref()
+            .unwrap()
+            .palette_output_with_seed(2, 5, Some(17))
+            .unwrap()
+            .color;
+        update_scene_brightness_for_target(
+            &mut offset_scene,
+            &scope,
+            &device,
+            "device-a",
+            24,
+            palette,
+        )
+        .unwrap();
+        let output = &offset_scene.light.as_ref().unwrap().entries[0].output;
+        assert_eq!(
+            output.color, expected_color,
+            "roomless light keeps its assigned palette slot"
+        );
+        assert_eq!(output.brightness, 24);
 
         assert!(update_scene_brightness_for_target(
             &mut scene_without_light("missing-light"),
@@ -24998,6 +25278,7 @@ mod tests {
             &device,
             "device-a",
             40,
+            PaletteWindow::default(),
         )
         .unwrap_err()
         .to_string()
@@ -25009,6 +25290,7 @@ mod tests {
             &device,
             "device-a",
             40,
+            PaletteWindow::default(),
         )
         .unwrap_err()
         .to_string()
@@ -26717,6 +26999,426 @@ mod tests {
             "three commands must be spaced twice: elapsed {elapsed:?}"
         );
         assert_eq!(harness.runtime.applied_commands().len(), 3);
+    }
+
+    #[test]
+    fn scene_brightness_preserves_color_after_disabling_sibling() {
+        let harness = setup_home_scene_rooms();
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let before = harness.runtime.applied_commands();
+        {
+            let mut snapshots = harness.runtime.snapshots.lock().unwrap();
+            snapshots
+                .iter_mut()
+                .find(|s| s.id == harness.room_a_lights[0])
+                .unwrap()
+                .disabled = true;
+        }
+        do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(25),
+            false,
+        )
+        .unwrap();
+        let after = harness.runtime.applied_commands();
+        assert_eq!(after.len(), before.len() + 1);
+        for (node, command) in &after[before.len()..] {
+            let original = &before.iter().find(|(id, _)| id == node).unwrap().1;
+            assert_eq!(command.rgb, original.rgb, "surviving light changes color");
+            assert_eq!(command.brightness, 25);
+        }
+        harness
+            .runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.id == harness.room_a_lights[0])
+            .unwrap()
+            .disabled = false;
+        do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(40),
+            false,
+        )
+        .unwrap();
+        let restored = harness.runtime.applied_commands();
+        assert_eq!(restored.len(), after.len() + 2);
+        for (node, command) in &restored[after.len()..] {
+            assert_eq!(
+                command.rgb,
+                before.iter().find(|(id, _)| id == node).unwrap().1.rgb
+            );
+            assert_eq!(command.brightness, 40);
+        }
+    }
+
+    #[test]
+    fn scene_brightness_does_not_assign_colors_to_newly_enabled_lights() {
+        let harness = setup_home_scene_rooms();
+        let first = &harness.room_a_lights[0];
+        harness
+            .runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|s| &s.id == first)
+            .unwrap()
+            .disabled = true;
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let before = harness.runtime.applied_commands();
+        harness
+            .runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|s| &s.id == first)
+            .unwrap()
+            .disabled = false;
+        do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(25),
+            false,
+        )
+        .unwrap();
+        let after = harness.runtime.applied_commands();
+        assert_eq!(after.len(), before.len() + 1);
+        let (node, command) = after.last().unwrap();
+        assert_ne!(node, &crate::topology::device_light_node_id(first));
+        assert_eq!(
+            command.rgb,
+            before.iter().find(|(id, _)| id == node).unwrap().1.rgb
+        );
+        assert_eq!(command.brightness, 25);
+    }
+
+    #[test]
+    fn adaptive_brightness_finishes_before_a_concurrent_home_scene_commits() {
+        let harness = setup_home_scene_rooms();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *harness.runtime.before_adaptive_brightness.lock().unwrap() = Some((started_tx, resume_rx));
+        let state = harness.state.clone();
+        let brightness = std::thread::spawn(move || {
+            do_set_node_curve_modifier(&state, "room-a", NodeCurveModifier::Brightness(25), false)
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let state = harness.state.clone();
+        let scene = std::thread::spawn(move || {
+            let result =
+                do_home_scene_apply(&state, "halloween", Default::default(), Duration::ZERO);
+            completed_tx.send(()).unwrap();
+            result
+        });
+        let applied_early = completed_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        resume_tx.send(()).unwrap();
+        brightness.join().unwrap().unwrap();
+        scene.join().unwrap().unwrap();
+        assert!(
+            !applied_early,
+            "scene must not commit ahead of in-flight adaptive brightness I/O"
+        );
+        let snapshot = harness.runtime.engine_room_snapshot("room-a").unwrap();
+        assert!(snapshot.mood_active);
+        assert_eq!(
+            snapshot.profile_settings.mood_scene_id.as_deref(),
+            Some("halloween")
+        );
+    }
+
+    #[test]
+    fn scene_brightness_serializes_binding_commit_with_another_scene_apply() {
+        let harness = setup_home_scene_rooms();
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        do_scene_upsert(&harness.state, scene_with_default_output("later", 70, 2700)).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *harness.runtime.before_brightness_binding.lock().unwrap() = Some((started_tx, resume_rx));
+        let state = harness.state.clone();
+        let brightness = std::thread::spawn(move || {
+            do_set_node_curve_modifier(&state, "room-a", NodeCurveModifier::Brightness(25), false)
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Dispatch is complete, but the binding is not committed yet.
+        let transaction = harness
+            .state
+            .lock()
+            .unwrap()
+            .scene_lifecycle_transaction_lock
+            .clone();
+        let serialized = transaction.try_lock().is_err();
+        let state = harness.state.clone();
+        let later = std::thread::spawn(move || {
+            do_home_scene_apply(
+                &state,
+                "later",
+                HomeSceneApplyRequest::default(),
+                Duration::ZERO,
+            )
+        });
+        resume_tx.send(()).unwrap();
+        brightness.join().unwrap().unwrap();
+        later.join().unwrap().unwrap();
+        assert!(
+            serialized,
+            "scene apply may interleave between brightness dispatch and commit"
+        );
+        assert_eq!(
+            harness
+                .runtime
+                .engine_room_snapshot("room-a")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("later")
+        );
+        assert_eq!(
+            harness
+                .runtime
+                .applied_commands()
+                .last()
+                .unwrap()
+                .1
+                .brightness,
+            70
+        );
+    }
+
+    #[test]
+    fn halloween_brightness_commands_vary_and_curve_slider_preserves_each_light_color() {
+        let harness = setup_home_scene_rooms();
+        let scene = factory_default_scene_map().remove("halloween").unwrap();
+        let catalog_json = serde_json::to_value(&scene).unwrap();
+        let palette = scene.light.clone().unwrap().palette;
+        do_scene_upsert(&harness.state, scene).unwrap();
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let before = harness.runtime.applied_commands();
+        assert_eq!(before.len(), 3);
+        for (_, command) in &before {
+            let output = palette.iter().find(|output| {
+                matches!(output.color, Some(LightSceneColor::Rgb { rgb }) if rgb == command.rgb)
+            }).unwrap();
+            assert_eq!(command.brightness, output.brightness);
+        }
+        let brightnesses: BTreeSet<_> = before
+            .iter()
+            .map(|(_, command)| command.brightness)
+            .collect();
+        assert_eq!(
+            brightnesses.len(),
+            3,
+            "initial brightness follows each color"
+        );
+
+        for room in ["room-a", "room-b"] {
+            do_set_node_curve_modifier(
+                &harness.state,
+                room,
+                NodeCurveModifier::Brightness(25),
+                false,
+            )
+            .unwrap();
+            let snapshot = harness.runtime.engine_room_snapshot(room).unwrap();
+            assert!(snapshot.mood_active);
+            assert_eq!(snapshot.profile_settings.mood_scene_device_mode, Some(true));
+            assert_eq!(snapshot.brightness_offset, 0.0);
+        }
+        let after = harness.runtime.applied_commands();
+        assert_eq!(after.len(), 6);
+        for (node, command) in &after[3..] {
+            let original = &before.iter().find(|(id, _)| id == node).unwrap().1;
+            assert_eq!(command.rgb, original.rgb);
+            assert_eq!(command.brightness, 25);
+        }
+        assert_eq!(
+            serde_json::to_value(&harness.state.lock().unwrap().scenes["halloween"]).unwrap(),
+            catalog_json
+        );
+        assert!(
+            !harness.state.lock().unwrap().scenes["node-mood-scene-room-a"]
+                .extensions
+                .contains_key("whole_home")
+        );
+        let runtime: Arc<dyn RuntimeHandle> = harness.runtime.clone();
+        let scene_id = harness
+            .runtime
+            .engine_room_snapshot("room-a")
+            .unwrap()
+            .profile_settings
+            .mood_scene_id
+            .unwrap();
+        apply_mood_scene_or_tick(&harness.state, &runtime, "room-a", Some(&scene_id), false)
+            .unwrap();
+        let resumed = harness.runtime.applied_commands();
+        assert_eq!(resumed.len(), 8);
+        for (node, command) in &resumed[6..] {
+            assert_eq!(
+                command.rgb,
+                before.iter().find(|(id, _)| id == node).unwrap().1.rgb
+            );
+            assert_eq!(command.brightness, 25);
+        }
+    }
+
+    #[test]
+    fn whole_home_scene_brightness_keeps_grouped_room_on_device_routes() {
+        let (state, runtime, _, _, _, _) = setup_mixed_room_with_hub_groups();
+        do_scene_upsert(
+            &state,
+            factory_default_scene_map().remove("halloween").unwrap(),
+        )
+        .unwrap();
+        do_home_scene_apply(
+            &state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let before = runtime.applied_commands();
+        assert!(before.len() > 1);
+        assert!(before.iter().all(|(id, _)| id != "room1"));
+        do_set_node_curve_modifier(&state, "room1", NodeCurveModifier::Brightness(18), false)
+            .unwrap();
+        let after = runtime.applied_commands();
+        assert_eq!(after.len(), before.len() * 2);
+        for (node, command) in &after[before.len()..] {
+            assert_ne!(node, "room1");
+            assert_eq!(
+                command.rgb,
+                before.iter().find(|(id, _)| id == node).unwrap().1.rgb
+            );
+            assert_eq!(command.brightness, 18);
+        }
+    }
+
+    #[test]
+    fn legacy_home_scene_brightness_requires_reapply_without_dispatching() {
+        let harness = setup_home_scene_rooms();
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        {
+            let mut snapshots = harness.runtime.snapshots.lock().unwrap();
+            let room = snapshots
+                .iter_mut()
+                .find(|room| room.id == "room-a")
+                .unwrap();
+            room.profile_settings.mood_scene_device_mode = None;
+        }
+        let before = harness.runtime.applied_commands().len();
+        let error = do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(25),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Reapply the scene"));
+        assert_eq!(harness.runtime.applied_commands().len(), before);
+        assert_eq!(
+            harness
+                .runtime
+                .engine_room_snapshot("room-a")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("halloween")
+        );
+    }
+
+    #[test]
+    fn scene_brightness_dispatch_failure_keeps_binding_and_can_retry() {
+        let harness = setup_home_scene_rooms();
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let before = harness
+            .runtime
+            .engine_room_snapshot("room-a")
+            .unwrap()
+            .profile_settings;
+        harness.runtime.fail_turn_on();
+        assert!(do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(19),
+            false
+        )
+        .is_err());
+        assert_eq!(
+            harness
+                .runtime
+                .engine_room_snapshot("room-a")
+                .unwrap()
+                .profile_settings,
+            before
+        );
+        assert!(!harness
+            .state
+            .lock()
+            .unwrap()
+            .scenes
+            .contains_key("node-mood-scene-room-a"));
+        harness.runtime.fail_turn_on.store(false, Ordering::SeqCst);
+        do_set_node_curve_modifier(
+            &harness.state,
+            "room-a",
+            NodeCurveModifier::Brightness(19),
+            false,
+        )
+        .unwrap();
+        assert_eq!(harness.runtime.applied_commands().len(), 5);
+        assert_eq!(
+            harness
+                .runtime
+                .applied_commands()
+                .last()
+                .unwrap()
+                .1
+                .brightness,
+            19
+        );
     }
 
     #[test]
