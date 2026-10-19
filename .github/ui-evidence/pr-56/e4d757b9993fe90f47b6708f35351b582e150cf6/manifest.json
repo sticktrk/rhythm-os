@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 56,
+  "head": "e4d757b9993fe90f47b6708f35351b582e150cf6",
+  "uses_mock_data": true,
+  "source_test": "test/widgets/room_card_test.dart",
+  "screenshots": [
+    {
+      "file": "scene-motion.png",
+      "caption": "Generated whole-home brightness copy keeps motion paused without changing the saved preference."
+    }
+  ]
+}
