@@ -8,6 +8,32 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn process_brightness_batch(
+    source: &TestHarness,
+    rx: &std::sync::mpsc::Receiver<rhythm_os::state::WorkItem>,
+    count: usize,
+    persist: bool,
+) {
+    // Queue acceptance starts a producer thread; an empty channel does not
+    // establish batch completion. Await the admitted writes and final flush.
+    for _ in 0..count {
+        let item = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("brightness work was not enqueued");
+        event_loop::process_work_item(&source.state, item);
+    }
+    if persist {
+        let item = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("lighting persistence was not enqueued");
+        assert!(matches!(
+            item,
+            rhythm_os::state::WorkItem::DeferredPersistLightingSettings
+        ));
+        event_loop::process_work_item(&source.state, item);
+    }
+}
+
 fn assert_home_scene_ignores_motion(
     source: &TestHarness,
     spy: &rhythm_core::spy_controller::SpyLightController,
@@ -358,9 +384,7 @@ fn queued_scene_brightness_survives_disk_restart_without_a_backup() {
             persist,
         );
         assert_eq!(response.status, 200, "{}", response.body);
-        while let Ok(item) = rx.try_recv() {
-            event_loop::process_work_item(&source.state, item);
-        }
+        process_brightness_batch(&source, &rx, 1, persist);
     }
     assert_eq!(spy.turn_on_calls().last().unwrap().1.brightness, 60);
     let binding = source.snapshot(&kitchen).unwrap().profile_settings;
@@ -442,28 +466,31 @@ fn queued_mood_profile_brightness_persists_through_both_batch_routes() {
         let (source, _) = TestHarness::with_spy_controller();
         source.state.lock().unwrap().storage = Some(disk.clone());
         let source = source.with_discovery(
-            vec![room("kitchen", "Kitchen")],
-            vec![light("lamp-1", "kitchen")],
+            vec![room("kitchen", "Kitchen"), room("hall", "Hall")],
+            vec![light("lamp-1", "kitchen"), light("lamp-2", "hall")],
         );
         source.sync();
         let kitchen = source.resolve("kitchen");
-        commands::do_node_preferences_set(
-            &source.state,
-            &kitchen,
-            None,
-            None,
-            None,
-            Some(RoomModeState::Mood),
-            None,
-            true,
-        )
-        .unwrap();
-        assert!(source.snapshot(&kitchen).unwrap().mood_active);
+        let hall = source.resolve("hall");
+        for node_id in [&kitchen, &hall] {
+            commands::do_node_preferences_set(
+                &source.state,
+                node_id,
+                None,
+                None,
+                None,
+                Some(RoomModeState::Mood),
+                None,
+                true,
+            )
+            .unwrap();
+            assert!(source.snapshot(node_id).unwrap().mood_active);
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         source.state.lock().unwrap().work_tx = Some(tx);
         for brightness in [35, 20] {
             let body = json!({
-                "nodes": [{"node_id": kitchen, "brightness": brightness}],
+                "nodes": [{"node_id": kitchen, "brightness": brightness}, {"node_id": hall, "brightness": brightness}],
                 "dispatch_spacing_ms": 0
             });
             let response = if curve_route {
@@ -472,28 +499,35 @@ fn queued_mood_profile_brightness_persists_through_both_batch_routes() {
                 handlers::handle_set_node_brightness(&source.state, &body, true)
             };
             assert_eq!(response.status, 200, "{}", response.body);
-            while let Ok(item) = rx.try_recv() {
-                event_loop::process_work_item(&source.state, item);
-            }
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["queued"],
+                true
+            );
+            process_brightness_batch(&source, &rx, 2, true);
         }
-        let binding = source.snapshot(&kitchen).unwrap().profile_settings;
+        let bindings: Vec<_> = [&kitchen, &hall]
+            .into_iter()
+            .map(|node_id| (node_id, source.snapshot(node_id).unwrap().profile_settings))
+            .collect();
         let (restored, restored_spy) = TestHarness::with_spy_controller();
         restored.state.lock().unwrap().storage = Some(disk);
         storage::load_persisted_state(&mut restored.state.lock().unwrap());
-        let profile_id = binding.mood_profile_id.as_ref().unwrap();
-        assert_eq!(
-            restored
-                .state
-                .lock()
-                .unwrap()
-                .light_profile_config(profile_id)
-                .unwrap()
-                .max_brightness,
-            20
-        );
+        for (_, binding) in &bindings {
+            let profile_id = binding.mood_profile_id.as_ref().unwrap();
+            assert_eq!(
+                restored
+                    .state
+                    .lock()
+                    .unwrap()
+                    .light_profile_config(profile_id)
+                    .unwrap()
+                    .max_brightness,
+                20
+            );
+        }
         let restored = restored.with_discovery(
-            vec![room("kitchen", "Kitchen")],
-            vec![light("lamp-1", "kitchen")],
+            vec![room("kitchen", "Kitchen"), room("hall", "Hall")],
+            vec![light("lamp-1", "kitchen"), light("lamp-2", "hall")],
         );
         restored.sync();
         // The scenario harness creates a bare runtime; production lifecycle
@@ -508,26 +542,28 @@ fn queued_mood_profile_brightness_persists_through_both_batch_routes() {
         for profile in profiles.into_values() {
             runtime.set_light_profile_config(profile).unwrap();
         }
-        assert_eq!(
-            restored.snapshot(&kitchen).unwrap().profile_settings,
-            binding
-        );
-        restored_spy.reset();
-        commands::do_node_preferences_set(
-            &restored.state,
-            &kitchen,
-            None,
-            None,
-            None,
-            Some(RoomModeState::Mood),
-            None,
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            restored_spy.turn_on_calls().last().unwrap().1.brightness,
-            20
-        );
+        for (node_id, binding) in bindings {
+            assert_eq!(
+                restored.snapshot(node_id).unwrap().profile_settings,
+                binding
+            );
+            restored_spy.reset();
+            commands::do_node_preferences_set(
+                &restored.state,
+                node_id,
+                None,
+                None,
+                None,
+                Some(RoomModeState::Mood),
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                restored_spy.turn_on_calls().last().unwrap().1.brightness,
+                20
+            );
+        }
     }
 }
 
@@ -605,9 +641,7 @@ fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync(
         3,
         "queue acceptance does not mean physical dispatch"
     );
-    while let Ok(item) = rx.try_recv() {
-        event_loop::process_work_item(&source.state, item);
-    }
+    process_brightness_batch(&source, &rx, 2, true);
     let changed = spy.turn_on_calls();
     assert_eq!(changed.len(), 5);
     for (node, command) in &changed[3..] {
