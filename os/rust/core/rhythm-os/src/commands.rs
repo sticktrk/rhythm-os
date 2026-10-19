@@ -5492,6 +5492,28 @@ fn companion_scene_plan_locked(
 /// The palette window a node's bound mood scene was rendered with, as
 /// persisted by the apply that bound it. Nodes bound by a single-target apply
 /// start at slot 0 and span their own lights.
+/// Return the active whole-home scene owner of a target. A canonical parent's
+/// ownership wins over a child's saved custom Mood binding or local mode.
+/// Callers arbitrate automatic output against scene commits before consulting
+/// this snapshot; saved scene metadata alone does not establish ownership.
+pub(crate) fn active_whole_home_scene_owner(
+    state: &crate::state::AppState,
+    runtime: &dyn RuntimeHandle,
+    node_id: &str,
+) -> Option<rhythm_core::NodeSnapshot> {
+    let owns_home_scene = |snapshot: &rhythm_core::NodeSnapshot| {
+        snapshot.mood_active
+            && snapshot.profile_settings.mood_scene_id.is_some()
+            && snapshot.profile_settings.mood_scene_palette_span.is_some()
+    };
+    state
+        .topology
+        .device_parent_room_id(node_id)
+        .and_then(|parent_id| runtime.engine_node_snapshot(parent_id))
+        .filter(owns_home_scene)
+        .or_else(|| runtime.engine_node_snapshot(node_id).filter(owns_home_scene))
+}
+
 fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -> PaletteWindow {
     runtime
         .engine_effective_node_snapshot(node_id)
