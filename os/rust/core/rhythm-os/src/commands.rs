@@ -10524,9 +10524,27 @@ fn update_node_mood_scene_color(
     update: MoodSceneColorUpdate,
 ) -> Result<()> {
     let node_scene_id = node_mood_scene_id(node_id);
-    // Editing one light re-renders the node's bound scene from the palette
-    // slot it was bound with so the untouched lights keep their colours.
+    // Preserve device dispatch and whole-home motion ownership. Unlike dimming
+    // or replay, an explicit color selection binds the current eligible lights,
+    // including lights assigned since the previous home scene was applied.
     let palette = stored_mood_palette_window(runtime, node_id);
+    let device_slots = if palette.device_mode {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let scope = light_scene_target_scope_node_ids(&s, runtime, node_id);
+        let targets = home_scene_device_targets_locked(&s, runtime);
+        Some(
+            targets
+                .eligible
+                .iter()
+                .filter(|target| scope.contains(&target.node_id))
+                // This generated scene contains explicit colors, not a palette;
+                // the slot only records membership for later dimming/replay.
+                .map(|target| (target.node_id.clone(), palette.offset as u32))
+                .collect(),
+        )
+    } else {
+        None
+    };
     let (scene_id, seed_scene, current_scene_is_node_scene) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let current_scene_id = snapshot
@@ -10650,6 +10668,7 @@ fn update_node_mood_scene_color(
     profile_settings.mood_enabled = Some(true);
     profile_settings.mood_profile_id = None;
     profile_settings.mood_scene_id = Some(normalized_scene_id.clone());
+    profile_settings.mood_scene_device_slots = device_slots;
     runtime.restore_node_state(
         node_id,
         RestoredNodeState {
