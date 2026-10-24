@@ -1022,6 +1022,18 @@ fn register_canonical_identity(
     };
 
     let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    // A saved setup payload is only a commissioning shortcut. Re-adding an
+    // archived bulb must create fresh application state, not resurrect its
+    // old room, name, endpoint preferences or per-device lighting settings.
+    // Keep active-device connection recovery and the separate secret store.
+    let archived_id = state
+        .canonical_registry
+        .find_by_native_id(hub_key, device_id)
+        .filter(|device| device.is_removed())
+        .map(|device| device.id.clone());
+    if let Some(archived_id) = archived_id {
+        state.canonical_registry.remove_device(&archived_id);
+    }
     state.canonical_registry.resolve(&identity, hub_key, now);
     let canonical_id = state
         .canonical_registry
@@ -1069,9 +1081,8 @@ fn materialize_paired_canonical_device(
         .topology
         .get_device_node(&canonical_id)
         .is_some();
-    // Archive retains the canonical room but removes its topology node. A
-    // runtime rebuild only projects existing topology; it cannot restore that
-    // missing membership. The remembered room may also have been deleted.
+    // Active-device recovery can repair missing topology for an existing room.
+    // Re-added archived devices have a fresh identity with no room selection.
     let room_id = room_id.filter(|id| state_guard.topology.get(id).is_some());
     drop(state_guard);
 
