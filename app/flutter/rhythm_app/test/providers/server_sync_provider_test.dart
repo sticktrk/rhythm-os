@@ -10,13 +10,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_app/backend/backend.dart' show AuthUser;
+import 'package:rhythm_app/backend/backend.dart'
+    show AuthUser, BackendProvider, OfflineAuthBackend;
 import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
@@ -35,6 +37,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/ui_evidence_fonts.dart';
+import '../helpers/capturing_analytics_backend.dart';
 
 class _TestSubscriptionProvider extends ChangeNotifier
     implements SubscriptionProvider {
@@ -202,6 +205,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Map<String, dynamic>? unpairResult = const {'status': 'complete'};
   List<Map<String, dynamic>?>? unpairResults;
   Completer<Map<String, dynamic>?>? unpairCompleter;
+  final List<bool> unpairArchiveFlags = [];
   final List<String?> unpairDeviceTypes = [];
   final List<String?> unpairCorrelationIds = [];
   bool removeCanonicalEndpointOnUnpair = true;
@@ -1006,6 +1010,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     bool archive = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
+    unpairArchiveFlags.add(archive);
     unpairDeviceTypes.add(deviceType);
     unpairCorrelationIds.add(correlationId);
     unpairCalls.add((
@@ -11252,6 +11257,254 @@ void main() {
     expect(find.text('Hue Bluetooth'), findsOneWidget);
     expect(find.text('Remove Device'), findsOneWidget);
   });
+
+  for (final merged in [false, true]) {
+    testWidgets(
+        'Monster removal confirms, retries safely, and preserves connections (merged=$merged)',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      final analytics = CapturingAnalyticsBackend();
+      await analytics.initialize();
+      BackendProvider.setInstanceForTesting(
+        auth: OfflineAuthBackend(),
+        analytics: analytics,
+      );
+      AnalyticsService().resetForTesting();
+      await AnalyticsService().initialize();
+      addTearDown(() {
+        AnalyticsService().resetForTesting();
+        BackendProvider.resetForTesting();
+      });
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1000));
+      api.canonicalDevices['light-1'] = {
+        'id': 'light-1',
+        'name': 'Private lamp name',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'monster', 'address': 'local'},
+            'native_id': 'monster-fixture',
+            'preferred': true,
+          },
+          if (merged)
+            {
+              'hub_key': {'hub_type': 'hue_ble', 'address': 'local'},
+              'native_id': 'hue-ble-fixture',
+              'preferred': false,
+            },
+        ],
+      };
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'features': [RhythmFeature.removedDeviceArchive],
+          'hubs': [
+            {
+              'type': 'monster',
+              'supports_unpairing': true,
+              'unpairable_device_types': ['light']
+            },
+            {'type': 'hue_ble', 'supports_unpairing': true},
+          ],
+        },
+      }));
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: Builder(
+            builder: (context) => TextButton(
+                  onPressed: () => DeviceDetailSheet.show(
+                    context,
+                    const RhythmDevice(
+                        id: 'light-1',
+                        type: RhythmDeviceType.light,
+                        name: 'Private lamp name'),
+                    '',
+                  ),
+                  child: const Text('Open device'),
+                )),
+      ));
+      await tester.tap(find.text('Open device'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Network'));
+      await tester.pumpAndSettle();
+      final action = merged ? 'Remove Monster Connection' : 'Remove Device';
+      expect(find.text(action), findsOneWidget);
+      expect(find.text('Move to Removed Bulbs'), findsNothing);
+      await tester.tap(find.text(action));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('It will not factory-reset'), findsOneWidget);
+      expect(find.textContaining('or remove it from the Monster app'),
+          findsOneWidget);
+      if (merged) {
+        expect(
+            find.textContaining(
+                'remain in Rhythm through its other connection'),
+            findsOneWidget);
+      }
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(api.unpairCalls, isEmpty);
+      expect(analytics.events.last.properties['outcome'], 'cancelled');
+
+      // Neither an offline/no-response result nor a server rejection may
+      // force-remove, close the sheet, or hide the retained endpoint.
+      for (final failure in <Map<String, dynamic>?>[
+        null,
+        {'status': 'failed', 'error': 'private-server-detail'},
+      ]) {
+        api.unpairResult = failure;
+        await tester.tap(find.text(action));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Remove'));
+        await tester.pumpAndSettle();
+        expect(find.text('Couldn’t remove device'), findsOneWidget);
+        expect(find.text('Force Remove'), findsNothing);
+        expect(find.textContaining('private-server-detail'), findsNothing);
+        await tester.tap(find.text('OK'));
+        await tester.pumpAndSettle();
+        expect(find.byType(DeviceDetailSheet), findsOneWidget);
+        expect(find.text(action), findsOneWidget);
+        expect(connection.reconnectCalls, 0);
+        expect(analytics.events.last.properties['outcome'], 'failed');
+      }
+
+      final completer = Completer<Map<String, dynamic>?>();
+      api.unpairCompleter = completer;
+      await tester.tap(find.text(action));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Removing...'), findsOneWidget);
+      expect(api.unpairCalls, hasLength(3));
+      await tester.tap(find.text('Removing...'));
+      await tester.pump();
+      expect(api.unpairCalls, hasLength(3));
+      completer.complete(
+          {'status': 'complete', 'completion_scope': 'local_state_only'});
+      await tester.pumpAndSettle();
+      expect(connection.reconnectCalls, 1);
+      expect(
+          api.unpairCalls.every((call) =>
+              call.hubType == 'monster' &&
+              call.deviceId == 'monster-fixture' &&
+              call.hubAddress == 'local' &&
+              !call.force),
+          isTrue);
+      expect(api.unpairArchiveFlags, everyElement(isFalse));
+      expect(api.unpairDeviceTypes, everyElement('light'));
+      expect(api.unpairCorrelationIds,
+          everyElement(startsWith('monster-remove-')));
+      if (merged) {
+        expect(find.byType(DeviceDetailSheet), findsOneWidget);
+        expect(find.text('Remove Monster Connection'), findsNothing);
+        expect(find.text('Hue Bluetooth'), findsOneWidget);
+        expect(
+            (api.canonicalDevices['light-1']!['endpoints'] as List)
+                .single['native_id'],
+            'hue-ble-fixture');
+      } else {
+        expect(find.byType(DeviceDetailSheet), findsNothing);
+      }
+      final events = analytics.events
+          .where((e) => e.name == 'monster_device_removal')
+          .toList();
+      expect(events.map((e) => e.properties['stage']), [
+        'confirmation',
+        'completed',
+        'confirmation',
+        'attempt',
+        'completed',
+        'confirmation',
+        'attempt',
+        'completed',
+        'confirmation',
+        'attempt',
+        'completed',
+      ]);
+      expect(events.last.properties['outcome'], 'succeeded');
+      expect(
+          events.last.properties['journey_id'], api.unpairCorrelationIds.last);
+      expect(events.map((e) => e.properties).toString(),
+          isNot(contains('private')));
+      for (final event in events) {
+        expect(event.properties.keys,
+            everyElement(isIn(['journey_id', 'stage', 'outcome'])));
+      }
+    });
+  }
+
+  for (final capability in <Map<String, dynamic>?>[
+    null,
+    {
+      'type': 'monster',
+      'supports_unpairing': false,
+      'unpairable_device_types': ['light']
+    },
+    {'type': 'monster', 'supports_unpairing': true},
+    {
+      'type': 'monster',
+      'supports_unpairing': true,
+      'unpairable_device_types': ['button']
+    },
+  ]) {
+    testWidgets(
+        'Monster removal requires typed server capability ($capability)',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+          connection: connection,
+          roomProvider: roomProvider,
+          homeProvider: _TestHomeProvider(const []));
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      api.canonicalDevices['light-1'] = {
+        'id': 'light-1',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'monster', 'address': 'local'},
+            'native_id': 'monster-fixture',
+          }
+        ],
+      };
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'hubs': [if (capability != null) capability]
+        },
+      }));
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+            device: RhythmDevice(
+                id: 'light-1',
+                type: RhythmDeviceType.light,
+                name: 'Fixture lamp'),
+            roomId: ''),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Network'));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove Device'), findsNothing);
+      expect(api.unpairCalls, isEmpty);
+    });
+  }
 
   testWidgets(
       'merged Hue Bridge removal targets its bridge and preserves Bluetooth',
