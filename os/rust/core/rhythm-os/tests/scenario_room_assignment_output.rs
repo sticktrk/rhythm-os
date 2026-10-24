@@ -398,3 +398,257 @@ fn room_assignment_preserves_active_off_standby_and_unbound_mood_output() {
         );
     }
 }
+
+#[test]
+fn explicit_room_color_includes_lights_moved_after_home_scene_assignment() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[
+        ("source", "Source"),
+        ("first", "First"),
+        ("second", "Second"),
+    ]);
+    let harness = harness.with_discovery(rooms, devices);
+    harness.sync();
+    commands::do_home_scene_apply(
+        &harness.state,
+        "halloween",
+        Default::default(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let device_id = harness
+        .state
+        .lock()
+        .unwrap()
+        .canonical_registry
+        .find_by_native_id(&harness.hub_key, "light-source")
+        .unwrap()
+        .id
+        .clone();
+    let set_color = |target: &str, rgb| {
+        commands::do_set_node_color(
+            &harness.state,
+            target,
+            NodeColorUpdate {
+                rgb,
+                xy: None,
+                brightness: Some(47),
+                transition_ms: None,
+                scope: NodeColorScope::Mood,
+            },
+            true,
+        )
+        .unwrap();
+    };
+    // The same light works independently before it joins a room whose
+    // whole-home scene was applied before this membership change.
+    commands::do_canonical_assign_room(&harness.state, &device_id, None).unwrap();
+    let entry_id = harness
+        .state
+        .lock()
+        .unwrap()
+        .canonical_registry
+        .triage()
+        .pending_by_kind(rhythm_os::canonical::triage::TriageKind::UnassignedDevice)[0]
+        .id
+        .clone();
+    commands::do_triage_new_device(&harness.state, &entry_id).unwrap();
+    spy.reset();
+    set_color(&device_id, Rgb::new(255, 0, 0));
+    assert_eq!(
+        spy.last_command_for(&device_id).unwrap().rgb,
+        Rgb::new(255, 0, 0)
+    );
+
+    for (room, rgb) in [
+        ("first", Rgb::new(0, 0, 255)),
+        ("second", Rgb::new(0, 255, 0)),
+    ] {
+        let target = harness.resolve(room);
+        let before = harness.snapshot(&target).unwrap().profile_settings;
+        assert_eq!(before.mood_scene_device_mode, Some(true));
+        assert!(!before
+            .mood_scene_device_slots
+            .as_ref()
+            .unwrap()
+            .contains_key(&device_id));
+        commands::do_canonical_assign_room(&harness.state, &device_id, Some(&target)).unwrap();
+        spy.reset();
+        set_color(&target, rgb);
+        let calls = spy.turn_on_calls();
+        let command = calls
+            .iter()
+            .find(|(id, _)| {
+                id == &device_id || id == &rhythm_os::topology::device_light_node_id(&device_id)
+            })
+            .map(|(_, command)| command)
+            .unwrap_or_else(|| {
+                panic!("explicit room color must reach the newly assigned light: {calls:?}")
+            });
+        assert_eq!(command.rgb, rgb);
+        assert_eq!(command.brightness, 47);
+        assert_eq!(
+            spy.turn_on_count(),
+            2,
+            "only the current room's two lights change"
+        );
+        let after = harness.snapshot(&target).unwrap().profile_settings;
+        assert_eq!(
+            after.mood_scene_palette_span, before.mood_scene_palette_span,
+            "an explicit color edit retains whole-home motion ownership"
+        );
+        // Subsequent dimming and Mood resume must continue to include the light.
+        spy.reset();
+        commands::do_set_node_curve_modifier(
+            &harness.state,
+            &target,
+            commands::NodeCurveModifier::Brightness(25),
+            true,
+        )
+        .unwrap();
+        let command = spy
+            .last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+            .unwrap();
+        assert_eq!(command.rgb, rgb);
+        assert_eq!(command.brightness, 25);
+        spy.reset();
+        harness.action(&target, "off").unwrap();
+        commands::do_node_preferences_set(
+            &harness.state,
+            &target,
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            spy.last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+                .unwrap()
+                .rgb,
+            rgb
+        );
+    }
+    let bundle = commands::build_backup_bundle_dto(&harness.state, false).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut restored, restored_spy) = TestHarness::with_spy_controller();
+    restored.state.lock().unwrap().storage = Some(Arc::new(
+        rhythm_os::storage::FileStorage::new(directory.path().to_str().unwrap()).unwrap(),
+    ));
+    commands::do_backup_restore(&restored.state, bundle).unwrap();
+    let key = restored.add_hub("mock", "192.168.1.100");
+    let (rooms, devices) = rooms_with_lights(&[
+        ("source", "Source"),
+        ("first", "First"),
+        ("second", "Second"),
+    ]);
+    restored.set_hub_discovery(&key, rooms, devices);
+    rhythm_os::storage::load_persisted_state(&mut restored.state.lock().unwrap());
+    restored.sync_all();
+    restored_spy.reset();
+    let target = restored.resolve("second");
+    commands::do_node_preferences_set(
+        &restored.state,
+        &target,
+        None,
+        None,
+        None,
+        Some(RoomModeState::Mood),
+        None,
+        false,
+    )
+    .unwrap();
+    let command = restored_spy
+        .last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+        .unwrap();
+    assert_eq!(command.rgb, Rgb::new(0, 255, 0));
+    assert_eq!(command.brightness, 25);
+    assert_eq!(restored_spy.turn_on_count(), 2);
+}
+
+#[test]
+fn explicit_child_color_after_move_keeps_siblings_and_disabled_lights_untouched() {
+    let (harness, spy, device_id, target) = assignment_fixture();
+    commands::do_home_scene_apply(
+        &harness.state,
+        "halloween",
+        Default::default(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let room_binding = harness.snapshot(&target).unwrap().profile_settings;
+    commands::do_canonical_assign_room(&harness.state, &device_id, Some(&target)).unwrap();
+    let color = Rgb::new(255, 0, 128);
+    spy.reset();
+    commands::do_set_node_color(
+        &harness.state,
+        &device_id,
+        NodeColorUpdate {
+            rgb: color,
+            xy: None,
+            brightness: Some(60),
+            transition_ms: None,
+            scope: NodeColorScope::Mood,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        spy.turn_on_count(),
+        1,
+        "a direct color edit changes only its target"
+    );
+    assert_eq!(
+        spy.last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+            .unwrap()
+            .rgb,
+        color
+    );
+    assert_eq!(
+        harness.snapshot(&target).unwrap().profile_settings,
+        room_binding
+    );
+
+    commands::do_node_preferences_set(
+        &harness.state,
+        &device_id,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    spy.reset();
+    commands::do_set_node_color(
+        &harness.state,
+        &target,
+        NodeColorUpdate {
+            rgb: color,
+            xy: None,
+            brightness: Some(60),
+            transition_ms: None,
+            scope: NodeColorScope::Mood,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        spy.turn_on_count(),
+        1,
+        "disabled lights stay excluded from room color edits"
+    );
+    assert!(spy
+        .last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+        .is_none());
+    assert!(!harness
+        .snapshot(&target)
+        .unwrap()
+        .profile_settings
+        .mood_scene_device_slots
+        .unwrap()
+        .contains_key(&device_id));
+}
