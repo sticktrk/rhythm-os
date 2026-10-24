@@ -1418,6 +1418,26 @@ class AnalyticsService {
     });
   }
 
+  /// Measure local Monster removal without device identity or raw failures.
+  Future<void> logMonsterDeviceRemoval({
+    required String journeyId,
+    required String stage,
+    String? outcome,
+  }) async {
+    if (!const {'confirmation', 'attempt', 'completed'}.contains(stage)) {
+      return;
+    }
+    if (stage == 'completed' &&
+        !const {'succeeded', 'failed', 'cancelled'}.contains(outcome)) {
+      return;
+    }
+    await logEvent('monster_device_removal', {
+      'journey_id': journeyId,
+      'stage': stage,
+      if (stage == 'completed') 'outcome': outcome!,
+    });
+  }
+
   /// Track a terminal Hue Bridge device removal without retaining identity.
   Future<void> logHueBridgeDeviceRemovalCompleted({
     required String journeyId,

@@ -874,6 +874,14 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairHueBridge = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBridgeDeviceType(device.type),
     );
+    final canUnpairMonster = context.select<ServerSyncProvider, bool>(
+      (sync) =>
+          device.type == RhythmDeviceType.light &&
+          (sync
+                  .hubCapabilities('monster')
+                  ?.supportsUnpairingDeviceType('light') ??
+              false),
+    );
     // Low glow and profile overrides are node-level settings. Only expose
     // them for bulbs that the server reports as independently addressable
     // light nodes.
@@ -1007,6 +1015,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         canUnpairHueBle,
                         canUnpairLocalBle,
                         canUnpairHueBridge,
+                        canUnpairMonster,
                       ),
                     _DeviceTab.info => _buildInfoTab(context, device),
                   },
@@ -1190,6 +1199,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     bool canUnpairHueBle,
     bool canUnpairLocalBle,
     bool canUnpairHueBridge,
+    bool canUnpairMonster,
   ) {
     final isLight = device.type == RhythmDeviceType.light;
     final removableEndpoints = _removableEndpoints.where((endpoint) {
@@ -1198,6 +1208,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         'hue_ble' => canUnpairHueBle,
         'local_ble' => canUnpairLocalBle,
         'hue' => canUnpairHueBridge,
+        'monster' => canUnpairMonster,
         _ => false,
       };
     }).toList(growable: false);
@@ -1248,7 +1259,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               context,
               endpoint,
               removesConnectionOnly: hasMultipleConnections,
-              archive: canArchiveRemovedDevices &&
+              // Monster can delete its canonical endpoint during unpairing;
+              // it does not support the retained Removed Bulbs archive.
+              archive: endpoint.hubType != 'monster' &&
+                  canArchiveRemovedDevices &&
                   isLight &&
                   !hasMultipleConnections,
             ),
@@ -1827,7 +1841,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       if ((hubType == 'matter' ||
               hubType == 'hue_ble' ||
               hubType == 'local_ble' ||
-              hubType == 'hue') &&
+              hubType == 'hue' ||
+              hubType == 'monster') &&
           nativeId.isNotEmpty) {
         removable.add((
           hubType: hubType,
@@ -1840,6 +1855,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   String _endpointLabel(_DeviceEndpoint endpoint) => switch (endpoint.hubType) {
+        'monster' => 'Monster',
         'hue' => 'Hue Bridge',
         'hue_ble' => 'Hue Bluetooth',
         'local_ble' => 'Local Bluetooth',
@@ -1867,6 +1883,17 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }) {
     final name = _deviceDisplayName;
     final connectionLabel = _endpointLabel(endpoint);
+    if (endpoint.hubType == 'monster') {
+      final target = removesConnectionOnly
+          ? 'the Monster connection for "$name"'
+          : '"$name"';
+      final otherConnectionNote = removesConnectionOnly
+          ? ' The device will remain in Rhythm through its other connection.'
+          : '';
+      return 'This will remove $target from Rhythm.$otherConnectionNote '
+          'It will not factory-reset the device, change its Wi-Fi settings, '
+          'or remove it from the Monster app. You can add it to Rhythm again later.';
+    }
     if (endpoint.hubType == 'hue') {
       final otherConnectionNote = removesConnectionOnly
           ? ' The device will remain in Rhythm through its other connection.'
@@ -1987,6 +2014,17 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         : archive
             ? 'Move to Removed Bulbs'
             : 'Remove Device';
+    final monsterJourneyId = endpoint.hubType == 'monster'
+        ? 'monster-remove-${const Uuid().v4()}'
+        : null;
+    if (monsterJourneyId != null) {
+      unawaited(
+        AnalyticsService().logMonsterDeviceRemoval(
+          journeyId: monsterJourneyId,
+          stage: 'confirmation',
+        ),
+      );
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2019,12 +2057,24 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       ),
     );
 
-    if (confirmed != true || !context.mounted) return;
+    if (confirmed != true || !context.mounted) {
+      if (monsterJourneyId != null) {
+        unawaited(
+          AnalyticsService().logMonsterDeviceRemoval(
+            journeyId: monsterJourneyId,
+            stage: 'completed',
+            outcome: 'cancelled',
+          ),
+        );
+      }
+      return;
+    }
     await _removeDevice(
       context,
       endpoint,
       removesConnectionOnly: removesConnectionOnly,
       archive: archive,
+      monsterJourneyId: monsterJourneyId,
     );
   }
 
@@ -2033,6 +2083,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
     required bool archive,
+    String? monsterJourneyId,
   }) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final api = syncProvider.api;
@@ -2040,8 +2091,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         ? 'removed-bulb-archive-${const Uuid().v4()}'
         : endpoint.hubType == 'hue'
             ? 'hue-bridge-remove-${const Uuid().v4()}'
-            : null;
+            : monsterJourneyId;
 
+    if (monsterJourneyId != null) {
+      unawaited(
+        AnalyticsService().logMonsterDeviceRemoval(
+          journeyId: monsterJourneyId,
+          stage: 'attempt',
+        ),
+      );
+    }
     var retryHueBleRelease = false;
     var forceAttempted = false;
     Map<String, dynamic>? completionResult;
@@ -2056,7 +2115,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             hubType: endpoint.hubType,
             deviceId: endpoint.nativeId,
             hubAddress:
-                endpoint.hubType == 'hue' && endpoint.hubAddress.isNotEmpty
+                (endpoint.hubType == 'hue' || endpoint.hubType == 'monster') &&
+                        endpoint.hubAddress.isNotEmpty
                     ? endpoint.hubAddress
                     : null,
             deviceType: _deviceTypeAnalyticsLabel,
@@ -2068,6 +2128,29 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         confirmForceRemove: (error) async {
           if (!context.mounted) return false;
           setState(() => _removingEndpoint = null);
+
+          if (endpoint.hubType == 'monster') {
+            // Monster removal is already local-only. Force cannot bypass a
+            // failed server write; keep the device visible for a fresh retry.
+            await showDialog<void>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: CelestialColors.backgroundCard,
+                title: const Text('Couldn’t remove device'),
+                content: const Text(
+                  'Rhythm could not confirm removal. Check your connection '
+                  'to the Rhythm server and try again.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+            return false;
+          }
 
           if (endpoint.hubType == 'hue_ble') {
             final choice = await showDialog<_HueBleRemovalFailureChoice>(
@@ -2163,7 +2246,17 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       );
     } while (retryHueBleRelease && context.mounted);
 
-    if (!archive && removalJourneyId != null) {
+    if (monsterJourneyId != null) {
+      unawaited(
+        AnalyticsService().logMonsterDeviceRemoval(
+          journeyId: monsterJourneyId,
+          stage: 'completed',
+          outcome:
+              outcome == MatterRemovalOutcome.removed ? 'succeeded' : 'failed',
+        ),
+      );
+    }
+    if (!archive && endpoint.hubType == 'hue' && removalJourneyId != null) {
       unawaited(
         AnalyticsService().logHueBridgeDeviceRemovalCompleted(
           journeyId: removalJourneyId,

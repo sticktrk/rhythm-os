@@ -25,6 +25,50 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
+  test('Monster removal analytics is bounded, private, and optional', () async {
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey', stage: 'confirmation');
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey', stage: 'attempt', outcome: 'secret');
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey', stage: 'completed', outcome: 'failed');
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey', stage: 'private-error');
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey',
+        stage: 'completed',
+        outcome: 'private-error');
+    expect(backend.events, hasLength(3));
+    expect(backend.events.map((event) => event.name),
+        everyElement('monster_device_removal'));
+    expect(backend.events.last.properties, {
+      'journey_id': 'opaque-journey',
+      'stage': 'completed',
+      'outcome': 'failed',
+    });
+    expect(backend.events[1].properties.keys, ['journey_id', 'stage']);
+    expect(backend.events.map((event) => event.properties).toString(),
+        isNot(contains('private-error')));
+    analytics.resetForTesting();
+    await analytics.logMonsterDeviceRemoval(
+        journeyId: 'opaque-journey', stage: 'attempt');
+    expect(backend.events, hasLength(3));
+  });
+
+  test('Monster removal analytics cannot block removal when capture fails', () async {
+    final unavailable = _UnavailableAnalyticsBackend();
+    await unavailable.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(), analytics: unavailable,
+    );
+    await expectLater(analytics.logMonsterDeviceRemoval(
+      journeyId: 'opaque-journey', stage: 'attempt',
+    ), completes);
+    await expectLater(analytics.logMonsterDeviceRemoval(
+      journeyId: 'opaque-journey', stage: 'completed', outcome: 'succeeded',
+    ), completes);
+  });
+
   test('lighting settings analytics bounds counts and excludes private failures', () async {
     await analytics.logLightingSettingsRestore(
       outcome: 'started', fromAppliance: true,
