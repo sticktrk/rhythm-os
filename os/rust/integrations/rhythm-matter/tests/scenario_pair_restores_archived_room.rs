@@ -3,12 +3,75 @@
 #[path = "common/mod.rs"]
 mod harness;
 
+use rhythm_matter::transport::MatterTransport;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ExternalLightHubIntegration, HubType};
 use rhythm_os::pairing::{PairingStatus, UnpairingRequest};
 use rhythm_os::{commands, handlers};
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn assert_archived_light(rig: &harness::TestRig, device_id: &str, room_id: &str) {
+    let state = rig.state.lock().unwrap();
+    let device = state.canonical_registry.get(device_id).unwrap();
+    assert!(
+        device.is_removed(),
+        "passive discovery must not revive an archived Matter light"
+    );
+    assert_eq!(device.room_id.as_deref(), Some(room_id));
+    assert_eq!(device.name, "Old custom bulb name");
+    assert!(state.topology.get_device_node(device_id).is_none());
+    assert!(state.topology.get(room_id).unwrap().devices.is_empty());
+    assert_eq!(
+        state.canonical_registry.triage().pending_unassigned_count(),
+        0
+    );
+    assert!(state
+        .hub_runtime()
+        .unwrap()
+        .engine_node_snapshot(device_id)
+        .is_none());
+}
+
+#[test]
+fn discovery_during_pairing_finalization_cannot_revive_archived_settings() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (rig, old_id, room_id) = archived_room_light();
+    // The transport exposes the commissioned node before pairing finalization
+    // registers it. record_commissioned_device also clears unpair suppression.
+    rig.transport.add_device(100, "Vendor", "Lamp");
+    rig.hub_data
+        .record_commissioned_device(&rig.transport.probe_light(100).unwrap());
+    rhythm_os::room_sync::sync_all_hubs(&rig.state).unwrap();
+    assert_archived_light(&rig, &old_id, &room_id);
+
+    let new_id = pair(&rig);
+    assert_ne!(new_id, old_id);
+    assert_unassigned_light(&rig, &new_id, &room_id);
+    assert!(rig
+        .state
+        .lock()
+        .unwrap()
+        .canonical_registry
+        .get(&old_id)
+        .is_none());
+}
+
+#[test]
+fn discovery_after_restart_keeps_archive_until_explicit_pairing() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (rig, old_id, room_id) = archived_room_light();
+    // A crash after transport commissioning can leave the node discoverable
+    // while durable application state still records the archived device.
+    let restarted = harness::reconnect_rig_with_transport(rig.data_dir.clone(), |transport| {
+        transport.add_device(100, "Vendor", "Lamp");
+    });
+    rhythm_os::room_sync::sync_all_hubs(&restarted.state).unwrap();
+    assert_archived_light(&restarted, &old_id, &room_id);
+    let new_id = pair(&restarted);
+    assert_ne!(new_id, old_id);
+    assert_unassigned_light(&restarted, &new_id, &room_id);
+}
 
 fn pair(rig: &harness::TestRig) -> String {
     pair_with_payload(rig, "3497-011-2332")
