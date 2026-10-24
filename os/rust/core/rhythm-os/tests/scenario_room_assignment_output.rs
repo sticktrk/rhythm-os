@@ -652,3 +652,60 @@ fn explicit_child_color_after_move_keeps_siblings_and_disabled_lights_untouched(
         .unwrap()
         .contains_key(&device_id));
 }
+
+fn plain_blue_after_assignment(stale_saved_membership: bool) {
+    let (harness, spy, device_id, target) = mood_assignment_fixture(false);
+    // Start with an ordinary single-color room. No whole-home scene is applied.
+    // Older saved settings can nevertheless retain per-device dispatch metadata;
+    // reproduce that state without assuming which user action created it.
+    if stale_saved_membership {
+        let (runtime, existing) = {
+            let state = harness.state.lock().unwrap();
+            (
+                state.hub_runtime().unwrap(),
+                state
+                    .canonical_registry
+                    .find_by_native_id(&harness.hub_key, "light-target")
+                    .unwrap()
+                    .id
+                    .clone(),
+            )
+        };
+        let snapshot = runtime.engine_node_snapshot(&target).unwrap();
+        let mut saved = rhythm_core::RestoredNodeState::from(&snapshot);
+        saved.profile_settings.mood_scene_device_mode = Some(true);
+        saved.profile_settings.mood_scene_palette_span = Some(2);
+        saved.profile_settings.mood_scene_device_slots =
+            Some(std::collections::BTreeMap::from([(existing, 0)]));
+        runtime.restore_node_state(&target, saved);
+    }
+    commands::do_canonical_assign_room(&harness.state, &device_id, Some(&target)).unwrap();
+    spy.reset();
+    let response = rhythm_os::handlers::handle_set_node_color(
+        &harness.state,
+        &serde_json::json!({
+            "node_id": target,
+            "rgb": {"r": 0, "g": 0, "b": 255},
+            "brightness": 80,
+            "scope": "auto"
+        }),
+        false,
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+    let command = spy
+        .last_command_for(&rhythm_os::topology::device_light_node_id(&device_id))
+        .or_else(|| spy.last_command_for(&target))
+        .expect("plain room blue must dispatch to the moved light or its current room");
+    assert_eq!(command.rgb, Rgb::new(0, 0, 255));
+    assert_eq!(command.brightness, 80);
+}
+
+#[test]
+fn plain_room_blue_after_assignment_works_without_saved_device_assignments() {
+    plain_blue_after_assignment(false);
+}
+
+#[test]
+fn plain_room_blue_repairs_stale_saved_membership_without_applying_a_home_scene() {
+    plain_blue_after_assignment(true);
+}
