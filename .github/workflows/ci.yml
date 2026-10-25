@@ -120,10 +120,30 @@ jobs:
       - run: npm run test:mode-write-payload
       - run: npm run build
       - run: npm run build:homeassistant
+  matter-migration:
+    name: Matter fabric migration (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22', '24']
+    defaults:
+      run:
+        working-directory: tools/matter-fabric-migration
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: tools/matter-fabric-migration/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
   required:
     name: Public contributor checks
     if: always()
-    needs: [changes, source, flutter, rust, dart, admin-ui]
+    needs: [changes, source, flutter, rust, dart, admin-ui, matter-migration]
     runs-on: ubuntu-latest
     steps:
       - name: Require all contributor checks to pass
