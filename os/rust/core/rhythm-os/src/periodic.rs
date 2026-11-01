@@ -1156,11 +1156,15 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         if light_breaker_enabled {
             crate::commands::apply_pending_mode_outputs_if_ready(&state);
             match time_check {
-                PeriodicTimeCheckResult::Continuous { last_hour } => {
-                    check_mode_transitions(&state, last_hour, current_hour);
+                PeriodicTimeCheckResult::Continuous { .. } => {
                     if let Some(previous_observed_at) = previous_observed_at {
                         let elapsed = observed_at.saturating_duration_since(previous_observed_at);
                         if let Ok(elapsed) = chrono::Duration::from_std(elapsed) {
+                            check_mode_transitions_between(
+                                &state,
+                                current_utc - elapsed,
+                                current_utc,
+                            );
                             check_light_schedule_transitions_between(
                                 &state,
                                 current_utc - elapsed,
@@ -1307,7 +1311,7 @@ fn advance_periodic_time_check(
         };
     }
 
-    // Solar and mode-trigger hours use the current offset. Rebase the prior
+    // Solar midnight uses the current offset. Rebase the prior
     // observation into that same clock before checking a crossing; a DST
     // backward adjustment alone must not look like an overnight wrap.
     PeriodicTimeCheckResult::Continuous {
@@ -1881,7 +1885,55 @@ fn replay_missed_mode_transitions(state: &SharedState) {
     }
 }
 
-/// Trigger configured scheduled mode transitions when their event time is crossed.
+/// Trigger global mode changes whose exact occurrence is in the UTC interval.
+///
+/// Wall-clock schedules keep their configured local time across offset changes;
+/// comparing their UTC occurrences also distinguishes repeated fall-back hours
+/// and excludes nonexistent spring-forward times.
+pub fn check_mode_transitions_between(
+    state: &SharedState,
+    start_utc: chrono::NaiveDateTime,
+    end_utc: chrono::NaiveDateTime,
+) {
+    let candidate = {
+        let Ok(s) = state.lock() else { return };
+        let configs = s.mode_transition_configs();
+        resolved_replayed_mode_transition(
+            s.active_mode,
+            start_utc,
+            end_utc,
+            ReplayTransitionContext {
+                solar: SolarTriggerContext {
+                    solar_noon: s.solar_noon_hour(),
+                    latitude: s.latitude,
+                    longitude: s.longitude,
+                    timezone_name: s.timezone_name.as_deref(),
+                },
+                utc_offset: s.utc_offset_hours,
+                configs: &configs,
+            },
+        )
+        .map(|transition| (s.active_mode, transition))
+    };
+
+    let Some((from_mode, transition)) = candidate else {
+        return;
+    };
+    info!(
+        "Mode transition {:?} -> {:?} on {:?} in UTC interval ({} -> {})",
+        from_mode, transition.to_mode, transition.trigger, start_utc, end_utc
+    );
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(
+        state,
+        transition.to_mode,
+        transition.trigger,
+    ) {
+        warn!("Failed to apply mode transition: {}", e);
+    }
+}
+
+/// Legacy local-hour entry point retained for callers without UTC observations.
+/// The periodic loop uses [`check_mode_transitions_between`] to handle DST.
 pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
     let candidate = {
         let Ok(s) = state.lock() else { return };
