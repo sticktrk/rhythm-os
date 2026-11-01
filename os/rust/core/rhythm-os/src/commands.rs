@@ -8576,6 +8576,7 @@ fn restore_backup_location(state: &SharedState, location: Option<StoredLocation>
     };
 
     if let Some(runtime) = runtime {
+        runtime.set_timezone(timezone_name.as_deref(), utc_offset_hours)?;
         let local_now = if let Some(ref tz_name) = timezone_name {
             rhythm_core::Timezone::new(tz_name)
                 .local_datetime_from_utc(chrono::Utc::now().naive_utc())
@@ -16926,7 +16927,7 @@ pub fn do_location_set(
             );
             let day_of_year = rhythm_core::timezone::day_of_year(year, month, day);
             // Also refresh utc_offset from timezone
-            s.utc_offset_hours = tz.utc_offset(year, month, day, local_now.time().hour());
+            s.utc_offset_hours = tz.utc_offset_at_utc(now);
             (
                 rhythm_core::calculate_solar_noon(lon, year, month, day, &tz),
                 day_of_year,
@@ -16955,6 +16956,7 @@ pub fn do_location_set(
         );
 
         if let Some(runtime) = s.hub_runtime() {
+            runtime.set_timezone(s.timezone_name.as_deref(), s.utc_offset_hours)?;
             let solar_time = rhythm_core::SolarTime::new(solar_noon, lat, day_of_year);
             if let Err(e) = runtime.set_solar(solar_time) {
                 warn!(target: "cmd", "Failed to update solar time: {}", e);
@@ -25104,6 +25106,106 @@ mod tests {
             "day length should be positive, got {}",
             sun_times.day_length
         );
+    }
+
+    fn setup_state_with_system_clock() -> (SharedState, Arc<dyn RuntimeHandle>, TestStorage) {
+        let runtime = rhythm_core::RhythmRuntime::new(
+            Arc::new(rhythm_core::NoOpController::new()),
+            rhythm_core::SystemTimeProvider::new(0.0),
+            rhythm_core::NoOpScheduler::new(),
+            rhythm_core::SimpleDeviceRegistry::new(),
+            rhythm_core::RuntimeConfig::default(),
+        );
+        runtime.add_room("clock-room", "Clock Room");
+        {
+            let mut engine = runtime.engine().write().unwrap();
+            let room = engine.rooms_mut().get_mut("clock-room").unwrap();
+            room.rhythm_enabled = true;
+            room.time_offset_minutes = 18.0;
+            room.brightness_offset = -7.0;
+        }
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(runtime);
+        let (state, _) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        {
+            let mut app = state.lock().unwrap();
+            app.hubs.values_mut().next().unwrap().runtime = Some(runtime.clone());
+            app.storage = Some(Arc::new(storage.clone()));
+        }
+        (state, runtime, storage)
+    }
+
+    fn assert_runtime_clock_matches_location(state: &SharedState, runtime: &dyn RuntimeHandle) {
+        let (timezone_name, offset) = {
+            let app = state.lock().unwrap();
+            (app.timezone_name.clone(), app.utc_offset_hours)
+        };
+        let now = chrono::Utc::now().naive_utc();
+        let local = match timezone_name {
+            Some(name) => rhythm_core::Timezone::new(&name).local_datetime_from_utc(now),
+            None => now + chrono::Duration::seconds((offset * 3600.0) as i64),
+        };
+        let expected =
+            local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0;
+        let actual = runtime.current_hour();
+        let difference = (actual - expected + 12.0).rem_euclid(24.0) - 12.0;
+        assert!(
+            difference.abs() < 2.0 / 3600.0,
+            "runtime hour {actual} should match location hour {expected}"
+        );
+        let room = runtime.engine_room_snapshot("clock-room").unwrap();
+        assert_eq!(room.time_offset_minutes, 18.0);
+        assert_eq!(room.brightness_offset, -7.0);
+    }
+
+    #[test]
+    fn location_set_updates_running_clock_and_preserves_room_offsets() {
+        let (state, runtime, storage) = setup_state_with_system_clock();
+
+        for (timezone, offset) in [
+            (Some("Asia/Tokyo"), None),
+            (Some("America/New_York"), None),
+            (None, Some(5.5)),
+        ] {
+            do_location_set(&state, 35.0, -78.0, offset, timezone.map(str::to_owned)).unwrap();
+            assert_runtime_clock_matches_location(&state, runtime.as_ref());
+            let saved = storage.load_location().unwrap();
+            assert_eq!(saved.timezone_name.as_deref(), timezone);
+            assert_eq!(
+                saved.utc_offset_hours,
+                state.lock().unwrap().utc_offset_hours
+            );
+        }
+    }
+
+    #[test]
+    fn restore_backup_location_updates_running_clock_and_accepts_legacy_fixed_offset() {
+        let (state, runtime, storage) = setup_state_with_system_clock();
+        let named = StoredLocation {
+            latitude: Some(35.0),
+            longitude: Some(139.0),
+            utc_offset_hours: -4.0,
+            timezone_name: Some("Asia/Tokyo".into()),
+        };
+        // Existing backups can omit timezone_name and retain a fixed offset.
+        let legacy: StoredLocation = serde_json::from_value(serde_json::json!({
+            "latitude": 35.0,
+            "longitude": 78.0,
+            "utc_offset_hours": 5.5
+        }))
+        .unwrap();
+
+        for location in [Some(named), Some(legacy), None] {
+            let expected_timezone = location.as_ref().and_then(|loc| loc.timezone_name.clone());
+            restore_backup_location(&state, location).unwrap();
+            assert_runtime_clock_matches_location(&state, runtime.as_ref());
+            let saved = storage.load_location().unwrap();
+            assert_eq!(saved.timezone_name, expected_timezone);
+        }
+        let app = state.lock().unwrap();
+        assert!(app.latitude.is_none());
+        assert!(app.longitude.is_none());
+        assert_eq!(app.utc_offset_hours, 0.0);
     }
 
     #[test]

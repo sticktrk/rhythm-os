@@ -379,8 +379,9 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
     let (utc_offset, solar_noon, day_of_year, sun_times) = if let Some(ref tz_name) = timezone_name
     {
         let tz = rhythm_core::Timezone::new(tz_name);
-        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-        let fresh_offset = tz.utc_offset(year, month, day, hour);
+        let now_utc = chrono::Utc::now().naive_utc();
+        let (year, month, day, _) = tz.local_date_hour_from_utc(now_utc);
+        let fresh_offset = tz.utc_offset_at_utc(now_utc);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
         let sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
@@ -390,7 +391,12 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
         (utc_offset, noon, day_of_year, None)
     };
-    let time_provider = SystemTimeProvider::new(utc_offset);
+    let time_provider = match timezone_name.as_deref() {
+        Some(name) => {
+            SystemTimeProvider::new(utc_offset).with_timezone(rhythm_core::Timezone::new(name))
+        }
+        None => SystemTimeProvider::new(utc_offset),
+    };
 
     // Write back the fresh offset to state (may differ from startup if DST changed)
     if let Some(ref tz_name) = timezone_name {
@@ -809,8 +815,9 @@ pub fn ensure_composite_runtime(
     let (utc_offset, solar_noon, day_of_year, sun_times) = if let Some(ref tz_name) = timezone_name
     {
         let tz = rhythm_core::Timezone::new(tz_name);
-        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-        let fresh_offset = tz.utc_offset(year, month, day, hour);
+        let now_utc = chrono::Utc::now().naive_utc();
+        let (year, month, day, _) = tz.local_date_hour_from_utc(now_utc);
+        let fresh_offset = tz.utc_offset_at_utc(now_utc);
         let noon = rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
         let sun_times = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
         let doy = rhythm_core::timezone::day_of_year(year, month, day);
@@ -820,7 +827,12 @@ pub fn ensure_composite_runtime(
         let noon = rhythm_core::calculate_solar_noon_from_offset(lon, utc_offset, day_of_year);
         (utc_offset, noon, day_of_year, None)
     };
-    let time_provider = SystemTimeProvider::new(utc_offset);
+    let time_provider = match timezone_name.as_deref() {
+        Some(name) => {
+            SystemTimeProvider::new(utc_offset).with_timezone(rhythm_core::Timezone::new(name))
+        }
+        None => SystemTimeProvider::new(utc_offset),
+    };
 
     // Write back fresh offset
     if timezone_name.is_some() {

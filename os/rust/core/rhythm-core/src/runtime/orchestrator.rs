@@ -136,6 +136,12 @@ where
         self.time_provider.current_hour()
     }
 
+    /// Update the location used by time-sensitive actions on this runtime.
+    pub fn set_timezone(&self, timezone_name: Option<&str>, utc_offset_hours: f32) {
+        self.time_provider
+            .set_timezone(timezone_name, utc_offset_hours);
+    }
+
     /// Get the runtime configuration.
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
