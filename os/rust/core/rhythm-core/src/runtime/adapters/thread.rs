@@ -5,24 +5,30 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc};
 use tracing::debug;
 
 use crate::runtime::error::{RuntimeError, RuntimeResult};
 use crate::runtime::scheduler::{ScheduleHandle, Scheduler};
 use crate::runtime::time::TimeProvider;
 
-/// Time provider using std::time::SystemTime.
+/// Time provider using the system UTC clock.
 ///
-/// This provider requires a UTC offset to be set, as SystemTime only
-/// provides UTC time. The offset should be set based on the local timezone.
+/// A named timezone resolves its current offset on every read so a long-lived
+/// runtime follows daylight saving changes. Fixed-offset installations retain
+/// the offset supplied to [`Self::new`]. Clones share location changes.
 #[derive(Clone)]
 pub struct SystemTimeProvider {
-    /// UTC offset in hours (e.g., -5.0 for EST).
+    config: Arc<RwLock<SystemTimeConfig>>,
+}
+
+struct SystemTimeConfig {
     utc_offset_hours: f32,
+    timezone: Option<crate::Timezone>,
 }
 
 impl SystemTimeProvider {
@@ -32,34 +38,35 @@ impl SystemTimeProvider {
     ///
     /// * `utc_offset_hours` - The UTC offset in hours (e.g., -5.0 for EST, -8.0 for PST)
     pub fn new(utc_offset_hours: f32) -> Self {
-        Self { utc_offset_hours }
-    }
-
-    /// Get the UTC hour as a float (0.0 - 24.0).
-    fn utc_hour(&self) -> f32 {
-        if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            let secs = duration.as_secs();
-            let seconds_in_day = secs % 86400;
-            let hour = seconds_in_day / 3600;
-            let minute = (seconds_in_day % 3600) / 60;
-            let second = seconds_in_day % 60;
-            return hour as f32 + minute as f32 / 60.0 + second as f32 / 3600.0;
+        Self {
+            config: Arc::new(RwLock::new(SystemTimeConfig {
+                utc_offset_hours,
+                timezone: None,
+            })),
         }
-        12.0 // Default to noon if time unavailable
     }
 
-    /// Calculate day of year from Unix timestamp.
-    fn day_of_year_from_timestamp(&self, secs: u64) -> u32 {
-        // Days since epoch (1970-01-01)
-        let days_since_epoch = secs / 86400;
+    /// Resolve local time using an IANA timezone, including future DST changes.
+    pub fn with_timezone(self, timezone: crate::Timezone) -> Self {
+        self.config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .timezone = Some(timezone);
+        self
+    }
 
-        // This is a simplified calculation that doesn't account for leap years perfectly
-        // but is good enough for lighting purposes
-        let year = 1970 + (days_since_epoch / 365) as i32;
-        let leap_years = ((year - 1970) / 4) as u64;
-        let day_in_year = (days_since_epoch - ((year - 1970) as u64 * 365) - leap_years) % 365;
-
-        (day_in_year + 1) as u32
+    fn local_datetime_at_utc(&self, utc: DateTime<Utc>) -> DateTime<FixedOffset> {
+        let config = self
+            .config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(timezone) = &config.timezone {
+            timezone.local_datetime_with_offset_from_utc(utc.naive_utc())
+        } else {
+            let offset = FixedOffset::east_opt((config.utc_offset_hours * 3600.0) as i32)
+                .unwrap_or_else(|| FixedOffset::east_opt(0).expect("valid UTC offset"));
+            utc.with_timezone(&offset)
+        }
     }
 }
 
@@ -72,34 +79,25 @@ impl Default for SystemTimeProvider {
 
 impl TimeProvider for SystemTimeProvider {
     fn current_hour(&self) -> f32 {
-        let utc_hour = self.utc_hour();
-        // Apply offset and wrap around 24 hours
-        let local_hour = utc_hour + self.utc_offset_hours;
-        if local_hour < 0.0 {
-            local_hour + 24.0
-        } else if local_hour >= 24.0 {
-            local_hour - 24.0
-        } else {
-            local_hour
-        }
+        let local = self.local_datetime_at_utc(Utc::now());
+        local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0
     }
 
     fn day_of_year(&self) -> u32 {
-        if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            self.day_of_year_from_timestamp(duration.as_secs())
-        } else {
-            172 // Default to summer solstice
-        }
+        self.local_datetime_at_utc(Utc::now()).ordinal()
     }
 
     fn year(&self) -> i32 {
-        if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            let secs = duration.as_secs();
-            let days_since_epoch = secs / 86400;
-            1970 + (days_since_epoch / 365) as i32
-        } else {
-            2024
-        }
+        self.local_datetime_at_utc(Utc::now()).year()
+    }
+
+    fn set_timezone(&self, timezone_name: Option<&str>, utc_offset_hours: f32) {
+        let mut config = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        config.utc_offset_hours = utc_offset_hours;
+        config.timezone = timezone_name.map(crate::Timezone::new);
     }
 }
 
@@ -246,7 +244,190 @@ impl Scheduler for ThreadScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spy_controller::SpyLightController;
+    use crate::{NoOpScheduler, RhythmRuntime, RuntimeConfig, RuntimeHandle, SimpleDeviceRegistry};
+    use chrono::TimeZone;
     use std::sync::atomic::AtomicU32;
+
+    #[derive(Clone)]
+    struct ControlledSystemTime {
+        provider: SystemTimeProvider,
+        utc: Arc<Mutex<DateTime<Utc>>>,
+    }
+
+    impl ControlledSystemTime {
+        fn new(provider: SystemTimeProvider, utc: DateTime<Utc>) -> Self {
+            Self {
+                provider,
+                utc: Arc::new(Mutex::new(utc)),
+            }
+        }
+
+        fn set_utc(&self, utc: DateTime<Utc>) {
+            *self.utc.lock().unwrap() = utc;
+        }
+
+        fn local(&self) -> DateTime<FixedOffset> {
+            self.provider
+                .local_datetime_at_utc(*self.utc.lock().unwrap())
+        }
+    }
+
+    impl TimeProvider for ControlledSystemTime {
+        fn current_hour(&self) -> f32 {
+            let local = self.local();
+            local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0
+        }
+
+        fn day_of_year(&self) -> u32 {
+            self.local().ordinal()
+        }
+
+        fn year(&self) -> i32 {
+            self.local().year()
+        }
+
+        fn set_timezone(&self, timezone_name: Option<&str>, utc_offset_hours: f32) {
+            self.provider.set_timezone(timezone_name, utc_offset_hours);
+        }
+    }
+
+    fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+    }
+
+    fn assert_runtime_actions_follow_dst(
+        startup_offset: f32,
+        observations: &[(DateTime<Utc>, f32)],
+    ) {
+        let clock = ControlledSystemTime::new(
+            SystemTimeProvider::new(startup_offset)
+                .with_timezone(crate::Timezone::new("America/New_York")),
+            observations[0].0,
+        );
+        let spy = Arc::new(SpyLightController::new());
+        spy.set_any_lights_on(true);
+        let runtime = RhythmRuntime::new(
+            spy.clone(),
+            clock.clone(),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        );
+        let handle: &dyn RuntimeHandle = &runtime;
+
+        for (instant, expected_hour) in observations {
+            clock.set_utc(*instant);
+            assert!((handle.current_hour() - expected_hour).abs() < 0.0001);
+        }
+
+        let expected_hour = observations.last().unwrap().1;
+        handle.add_room("motion-room", "Motion Room");
+        handle.add_room("periodic-room", "Periodic Room");
+        handle.turn_on_room("motion-room").unwrap();
+        handle.turn_on_room("periodic-room").unwrap();
+        handle
+            .periodic_tick_room("periodic-room", expected_hour)
+            .unwrap();
+        let action = spy.last_command_for("motion-room").unwrap();
+        let periodic = spy.last_command_for("periodic-room").unwrap();
+        assert_eq!(
+            (action.brightness, action.kelvin),
+            (periodic.brightness, periodic.kelvin),
+            "a long-lived runtime must use the same local hour for motion and periodic lighting"
+        );
+
+        // The scenario must distinguish the stale startup offset from the
+        // correct clock, rather than passing because both times look identical.
+        let stale_hour = expected_hour + if startup_offset == -4.0 { 1.0 } else { -1.0 };
+        handle.add_room("stale-clock-room", "Stale Clock Room");
+        handle.turn_on_room("stale-clock-room").unwrap();
+        handle
+            .periodic_tick_room("stale-clock-room", stale_hour)
+            .unwrap();
+        let stale = spy.last_command_for("stale-clock-room").unwrap();
+        assert_ne!(
+            (action.brightness, action.kelvin),
+            (stale.brightness, stale.kelvin),
+            "the morning curve should expose an hour of clock skew"
+        );
+    }
+
+    #[test]
+    fn runtime_motion_and_periodic_lighting_agree_after_dst_fall_back() {
+        assert_runtime_actions_follow_dst(
+            -4.0,
+            &[
+                (utc(2026, 11, 1, 5, 30), 1.5),
+                (utc(2026, 11, 1, 5, 59), 1.0 + 59.0 / 60.0),
+                (utc(2026, 11, 1, 6, 0), 1.0),
+                (utc(2026, 11, 1, 6, 30), 1.5),
+                (utc(2026, 11, 1, 12, 3), 7.05),
+            ],
+        );
+    }
+
+    #[test]
+    fn runtime_motion_and_periodic_lighting_agree_after_dst_spring_forward() {
+        assert_runtime_actions_follow_dst(
+            -5.0,
+            &[
+                (utc(2026, 3, 8, 6, 59), 1.0 + 59.0 / 60.0),
+                (utc(2026, 3, 8, 7, 0), 3.0),
+                (utc(2026, 3, 8, 11, 3), 7.05),
+            ],
+        );
+    }
+
+    #[test]
+    fn runtime_clock_follows_location_updates_and_fixed_offset_fallback() {
+        let clock = ControlledSystemTime::new(
+            SystemTimeProvider::new(-4.0).with_timezone(crate::Timezone::new("America/New_York")),
+            utc(2026, 11, 1, 12, 3),
+        );
+        let runtime = RhythmRuntime::new(
+            Arc::new(crate::NoOpController),
+            clock.clone(),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        );
+        let handle: &dyn RuntimeHandle = &runtime;
+        assert!((handle.current_hour() - 7.05).abs() < 0.0001);
+
+        handle
+            .set_timezone(Some("America/Los_Angeles"), -8.0)
+            .unwrap();
+        assert!((handle.current_hour() - 4.05).abs() < 0.0001);
+        assert!((clock.current_hour() - 4.05).abs() < 0.0001);
+
+        handle.set_timezone(None, 5.5).unwrap();
+        assert!((handle.current_hour() - 17.55).abs() < 0.0001);
+        handle.set_timezone(Some("America/New_York"), -4.0).unwrap();
+        assert!((handle.current_hour() - 7.05).abs() < 0.0001);
+    }
+
+    #[test]
+    fn named_and_fixed_clock_dates_follow_local_midnight_and_leap_days() {
+        let named = ControlledSystemTime::new(
+            SystemTimeProvider::new(0.0).with_timezone(crate::Timezone::new("America/New_York")),
+            utc(2026, 1, 1, 0, 30),
+        );
+        assert_eq!((named.year(), named.day_of_year()), (2025, 365));
+        assert!((named.current_hour() - 19.5).abs() < 0.0001);
+        named.set_utc(utc(2024, 3, 1, 0, 30));
+        assert_eq!((named.year(), named.day_of_year()), (2024, 60));
+
+        let fixed =
+            ControlledSystemTime::new(SystemTimeProvider::new(5.5), utc(2024, 2, 29, 20, 0));
+        assert_eq!((fixed.year(), fixed.day_of_year()), (2024, 61));
+        assert!((fixed.current_hour() - 1.5).abs() < 0.0001);
+        fixed.set_utc(utc(2026, 1, 1, 20, 0));
+        assert_eq!((fixed.year(), fixed.day_of_year()), (2026, 2));
+        assert!((fixed.current_hour() - 1.5).abs() < 0.0001);
+    }
 
     #[test]
     fn test_system_time_provider() {
