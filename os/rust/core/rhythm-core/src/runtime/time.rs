@@ -21,6 +21,12 @@ pub trait TimeProvider: Send + Sync {
 
     /// Get the current year.
     fn year(&self) -> i32;
+
+    /// Update the runtime's location clock without recreating the runtime.
+    ///
+    /// A named timezone follows DST automatically. Without one, use the supplied
+    /// fixed offset. Providers backed by externally managed clocks may ignore it.
+    fn set_timezone(&self, _timezone_name: Option<&str>, _utc_offset_hours: f32) {}
 }
 
 /// A mock time provider for testing.

@@ -301,6 +301,8 @@ pub const FEATURE_MATTER_WIFI_NETWORK: &str = "matter_wifi_network_v1";
 pub const FEATURE_MATTER_WIFI_CHANGE: &str = "matter_wifi_change_v1";
 pub const FEATURE_SAVED_WIFI_PROFILES: &str = "saved_wifi_profiles_v1";
 pub const FEATURE_HOME_SCENE_APPLY: &str = "home_scene_apply_v1";
+/// Curve brightness updates preserve a bound scene and its per-light layout.
+pub const FEATURE_SCENE_BRIGHTNESS: &str = "scene_brightness_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -373,6 +375,7 @@ impl Serialize for ApiCapabilitiesDto {
             FEATURE_RESET_TO_MODE_DEFAULT,
             FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
             FEATURE_HOME_SCENE_APPLY,
+            FEATURE_SCENE_BRIGHTNESS,
             FEATURE_SAVED_WIFI_PROFILES,
             FEATURE_MATTER_WIFI_CHANGE,
             FEATURE_MATTER_WIFI_NETWORK,
@@ -1734,6 +1737,7 @@ mod tests {
             FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
             FEATURE_RESET_TO_MODE_DEFAULT,
             FEATURE_HOME_SCENE_APPLY,
+            FEATURE_SCENE_BRIGHTNESS,
         ] {
             assert!(features.contains(&serde_json::json!(feature)));
         }
