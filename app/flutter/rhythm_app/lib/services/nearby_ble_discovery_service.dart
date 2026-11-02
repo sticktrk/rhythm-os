@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import 'analytics_service.dart';
+import 'package:rhythm_core/rhythm_core.dart' show DirectHubAccess;
 
 /// How a nearby family is paired once the person picks it.
 enum NearbyBleFamilyKind {
@@ -199,6 +200,11 @@ class NearbyBleDiscoveryService {
     required String source,
     required Set<NearbyBleFamily> families,
   }) {
+    if (!DirectHubAccess.allowed) {
+      return Future.value(const NearbyBleDiscoveryResult(
+          NearbyBleDiscoveryOutcome.unsupported));
+    }
+    final access = DirectHubAccess.capture();
     final existing = _inFlight;
     if (existing != null) return existing;
     if (families.isEmpty) {
@@ -208,12 +214,19 @@ class NearbyBleDiscoveryService {
     }
 
     late final Future<NearbyBleDiscoveryResult> request;
-    request = Future.sync(() => _platformScan(families, scanTimeout))
+    request = Future.sync(() {
+      access.check();
+      return _platformScan(families, scanTimeout);
+    })
         .onError(
       (error, stackTrace) =>
           const NearbyBleDiscoveryResult(NearbyBleDiscoveryOutcome.failed),
     )
         .then((result) async {
+      if (!access.isCurrent) {
+        return const NearbyBleDiscoveryResult(
+            NearbyBleDiscoveryOutcome.unsupported);
+      }
       await AnalyticsService().logNearbyDeviceScanCompleted(
         source: source,
         outcome: analyticsOutcome(result.outcome),
@@ -245,6 +258,8 @@ class NearbyBleDiscoveryService {
     Set<NearbyBleFamily> families,
     Duration timeout,
   ) async {
+    final access = DirectHubAccess.capture();
+    access.check();
     if (kIsWeb || !(Platform.isAndroid || Platform.isIOS || Platform.isMacOS)) {
       return const NearbyBleDiscoveryResult(
         NearbyBleDiscoveryOutcome.unsupported,
@@ -295,7 +310,15 @@ class NearbyBleDiscoveryService {
 
     final seen = <NearbyBleFamily, Set<String>>{};
     StreamSubscription<List<ScanResult>>? subscription;
+    var ownsScan = false;
+    final stopWatching = access.cancelOnChange(() {
+      if (ownsScan) {
+        ownsScan = false;
+        unawaited(FlutterBluePlus.stopScan().catchError((Object _) {}));
+      }
+    });
     try {
+      access.check();
       subscription = FlutterBluePlus.onScanResults.listen((results) {
         for (final result in results) {
           final advertisement = result.advertisementData;
@@ -313,6 +336,8 @@ class NearbyBleDiscoveryService {
 
       // Let the full window elapse so every family gets a chance to show up
       // instead of stopping on the first match.
+      access.check();
+      ownsScan = true;
       await FlutterBluePlus.startScan(
         withServices: [
           for (final family in families)
@@ -347,8 +372,9 @@ class NearbyBleDiscoveryService {
     } catch (_) {
       return const NearbyBleDiscoveryResult(NearbyBleDiscoveryOutcome.failed);
     } finally {
+      stopWatching();
       await subscription?.cancel();
-      if (FlutterBluePlus.isScanningNow) {
+      if (ownsScan && FlutterBluePlus.isScanningNow) {
         try {
           await FlutterBluePlus.stopScan();
         } catch (_) {

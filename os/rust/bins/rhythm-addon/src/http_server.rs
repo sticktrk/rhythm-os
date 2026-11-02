@@ -21,9 +21,39 @@ use tower::ServiceExt;
 
 use crate::mobile_access::MobileAccess;
 
+/// A write is admitted under the reset barrier. HA handlers may release it
+/// while waiting on HA, then take the barrier again before local commits.
+#[derive(Clone)]
+pub(crate) struct MutationGuard(Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>);
+
+impl MutationGuard {
+    pub(crate) fn release(&self) {
+        self.0.lock().expect("mutation guard lock").take();
+    }
+}
+
 fn shared_routes() -> Router<SharedState> {
     rhythm_os::axum_router::api_routes()
         .route("/api/addon/status", get(crate::policy::status))
+        .route("/api/addon/matter", get(crate::matter::catalog))
+        .route("/api/addon/matter/pair", post(crate::matter::pair))
+        .route(
+            "/api/addon/matter/pairing/:session",
+            get(crate::matter::pairing_status).delete(crate::matter::acknowledge_pairing),
+        )
+        .route(
+            "/api/addon/matter/pairing/:session/device",
+            post(crate::matter::bind_device),
+        )
+        .route(
+            "/api/addon/matter/setup-code/:id",
+            get(crate::matter::setup_code).put(crate::matter::save_code),
+        )
+        .route("/api/addon/matter/share/:id", post(crate::matter::share))
+        .route(
+            "/api/addon/matter/devices/:id",
+            delete(crate::matter::remove),
+        )
         .route(
             "/api/addon/lights",
             get(crate::selection::get).put(crate::selection::put),
@@ -156,7 +186,7 @@ async fn buffer_request_body(request: Request<Body>, next: Next) -> Response {
 
 async fn serialize_mutations(
     Extension(access): Extension<Arc<MobileAccess>>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     // A reset must drain earlier writes before deleting durable state. Requests
@@ -168,7 +198,9 @@ async fn serialize_mutations(
     {
         return next.run(request).await;
     }
-    let guard = access.mutation_gate.clone().lock_owned().await;
+    let guard = MutationGuard(Arc::new(std::sync::Mutex::new(Some(
+        access.mutation_gate.clone().lock_owned().await,
+    ))));
     if access.is_resetting() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -176,6 +208,7 @@ async fn serialize_mutations(
         )
             .into_response();
     }
+    request.extensions_mut().insert(guard.clone());
     // A disconnected client must not release the barrier while a handler's
     // spawn_blocking mutation continues writing to storage.
     match tokio::spawn(async move {
@@ -222,7 +255,9 @@ async fn mobile_auth(
         )
             .into_response();
     }
-    if path.starts_with("/api/addon/mobile-tokens") && role != Some(ApiTokenRole::Owner) {
+    if (path.starts_with("/api/addon/mobile-tokens") || path.starts_with("/api/addon/matter"))
+        && role != Some(ApiTokenRole::Owner)
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"Owner bearer token required"})),

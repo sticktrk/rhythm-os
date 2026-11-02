@@ -9,18 +9,39 @@ struct PhoneMatterRequestContext: Codable {
   let originalSetupPayload: String
   let sessionID: String
   let createdAt: Date
+  let backend: String?
+  let codeSource: String?
+
+  init(baseURL: String, authToken: String?, originalSetupPayload: String,
+       sessionID: String, createdAt: Date, backend: String? = nil, codeSource: String? = nil) {
+    self.baseURL = baseURL; self.authToken = authToken
+    self.originalSetupPayload = originalSetupPayload; self.sessionID = sessionID
+    self.createdAt = createdAt; self.backend = backend; self.codeSource = codeSource
+  }
 
   static let lifetime: TimeInterval = 600
 
   func handoffRequest(onboardingPayload: String) throws -> URLRequest {
+    guard backend == nil || backend == "rhythm" || backend == "ha_addon",
+      codeSource == nil || codeSource == "original_label" || codeSource == "sharing"
+    else { throw ContextError.invalidRequest }
+    let path = backend == "ha_addon" ? "/api/addon/matter/pair" : "/api/devices/pair"
     guard let url = URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-      + "/api/devices/pair") else { throw ContextError.invalidRequest }
+      + path) else { throw ContextError.invalidRequest }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.timeoutInterval = 240
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if let token = authToken, !token.isEmpty {
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    if backend == "ha_addon" {
+      request.httpBody = try JSONSerialization.data(withJSONObject: [
+        "session_id": sessionID, "setup_code": originalSetupPayload,
+        "code_source": codeSource ?? "original_label", "rendezvous": "phone",
+        "handoff_setup_payload": onboardingPayload,
+      ])
+      return request
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: [
       "hub_type": "matter",
@@ -34,6 +55,48 @@ struct PhoneMatterRequestContext: Codable {
       ],
     ])
     return request
+  }
+
+  /// Keep the platform's commissioning window open until HA confirms completion.
+  /// Only receipt GETs are repeated; a lost result never replays commissioning.
+  func awaitHaCompletion(data initialData: Data, statusCode initialStatus: Int,
+                         session: URLSession, pollNanoseconds: UInt64 = 1_500_000_000,
+                         isCurrent: () -> Bool = { true }) async throws -> Data {
+    guard isCurrent() else { throw CancellationError() }
+    guard backend == "ha_addon" else {
+      return try PhoneMatterBridge.responseEnvelope(data: initialData, statusCode: initialStatus)
+    }
+    guard sessionID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil,
+      let url = URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        + "/api/addon/matter/pairing/" + sessionID) else { throw ContextError.invalidRequest }
+    let deadline = Date().addingTimeInterval(230)
+    var data = initialData
+    var status = initialStatus
+    while true {
+      guard isCurrent() else { throw CancellationError() }
+      _ = try PhoneMatterBridge.responseEnvelope(data: data, statusCode: status)
+      guard let receipt = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        receipt["session_id"] as? String == sessionID else { throw ContextError.invalidRequest }
+      if receipt["status"] as? String == "completed" {
+        return try PhoneMatterBridge.responseEnvelope(data: data, statusCode: status)
+      }
+      guard receipt["status"] as? String == "pending", Date() < deadline else {
+        throw PhoneMatterBridge.ServerPairingError(message:
+          "Home Assistant did not confirm pairing. Check this attempt in Rhythm before trying again.")
+      }
+      try await Task.sleep(nanoseconds: pollNanoseconds)
+      guard isCurrent() else { throw CancellationError() }
+      var request = URLRequest(url: url)
+      request.timeoutInterval = 10
+      request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+      if let token = authToken, !token.isEmpty {
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      let response: URLResponse
+      (data, response) = try await session.data(for: request)
+      guard let httpResponse = response as? HTTPURLResponse else { throw ContextError.invalidRequest }
+      status = httpResponse.statusCode
+    }
   }
 
   func store(in container: URL) throws -> String {
@@ -103,8 +166,8 @@ enum PhoneMatterBridge {
   static let failureStageKey = "phone_matter.failure_stage"
   static let failureMessageKey = "phone_matter.failure_message"
 
-  /// Phone-assisted commissioning is deferred until the extension is provisioned
-  /// and embedded again. The app must use Box pairing when it is not packaged.
+  /// Only offer phone-assisted commissioning when the extension is embedded.
+  /// Runtime availability remains gated for builds without this optional target.
   static func isExtensionPackaged(in bundle: Bundle = .main) -> Bool {
     guard let plugins = bundle.builtInPlugInsURL else { return false }
     let path = plugins.appendingPathComponent("MatterCommissioningExtension.appex").path

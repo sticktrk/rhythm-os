@@ -24,3 +24,5 @@ pub mod ws_client;
 pub use desktop_lifecycle as reqwest_lifecycle;
 
 pub mod light;
+pub mod matter;
+pub mod matter_store;

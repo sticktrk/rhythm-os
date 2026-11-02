@@ -33,6 +33,8 @@ pub struct MobileAccess {
     enrollment: Mutex<Option<Enrollment>>,
     resetting: AtomicBool,
     pub mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Keep HA administration ordered without blocking ordinary light writes.
+    pub matter_gate: tokio::sync::Mutex<()>,
 }
 
 struct Enrollment {
@@ -64,6 +66,7 @@ impl MobileAccess {
             enrollment: Mutex::new(None),
             resetting: AtomicBool::new(false),
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            matter_gate: tokio::sync::Mutex::new(()),
         })
     }
 

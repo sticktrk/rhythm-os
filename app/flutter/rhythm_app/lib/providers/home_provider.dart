@@ -10,6 +10,7 @@ import '../services/server_identity.dart';
 import '../services/auth_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/settings_service.dart';
+import '../services/device_access_policy.dart';
 
 /// Resolved location with source indicator for debugging.
 typedef ResolvedLocation = ({
@@ -361,7 +362,29 @@ class HomeProvider extends ChangeNotifier {
   /// Get the current user ID from AuthService.
   String? get currentUserId => AuthService().currentUserId;
 
-  HomeProvider();
+  HomeProvider({DeviceAccessPolicy? deviceAccessPolicy})
+      : deviceAccessPolicy = deviceAccessPolicy ?? DeviceAccessPolicy();
+
+  final DeviceAccessPolicy deviceAccessPolicy;
+
+  void refreshDirectHubAccess() {
+    if (_initCompleter != null && _isLoading) {
+      deviceAccessPolicy.suspendWhileLoading();
+      return;
+    }
+    deviceAccessPolicy.select(
+      homeId: currentHome?.id,
+      server: activeServerHub,
+      demoMode: HueServiceLocator.isDemoMode,
+    );
+  }
+
+  @override
+  void notifyListeners() {
+    // Apply ownership before listeners can probe cached hubs or stale screens.
+    refreshDirectHubAccess();
+    super.notifyListeners();
+  }
 
   /// Initialize the provider.
   ///
@@ -810,7 +833,7 @@ class HomeProvider extends ChangeNotifier {
     }
 
     // 2. Hue bridge geolocation
-    if (hueConfig != null) {
+    if (DirectHubAccess.allowed && hueConfig != null) {
       HueServiceLocator.realInstance.configure(hueConfig);
       final hueGeo = await HueServiceLocator.instance.fetchGeolocation();
       if (hueGeo != null) {
@@ -824,7 +847,9 @@ class HomeProvider extends ChangeNotifier {
     }
 
     // 3. HA config
-    if (haWebSocket != null && haWebSocket.isConnected) {
+    if (DirectHubAccess.allowed &&
+        haWebSocket != null &&
+        haWebSocket.isConnected) {
       try {
         final haConfig = await haWebSocket.getConfig();
         final lat = (haConfig['latitude'] as num?)?.toDouble();
@@ -905,6 +930,7 @@ class HomeProvider extends ChangeNotifier {
     bool useSsl = false,
     required String token,
   }) async {
+    if (!DirectHubAccess.allowed) return null;
     if (_currentHome == null) {
       _error = 'No home selected';
       notifyListeners();
@@ -938,6 +964,7 @@ class HomeProvider extends ChangeNotifier {
     required String bridgeIp,
     required String appKey,
   }) async {
+    if (!HueServiceLocator.isDemoMode && !DirectHubAccess.allowed) return null;
     if (_currentHome == null) {
       _error = 'No home selected';
       notifyListeners();
@@ -1084,6 +1111,12 @@ class HomeProvider extends ChangeNotifier {
     Hub hub, {
     bool clearCloudRemoteEndpoint = false,
   }) async {
+    if (hub.type != HubType.server &&
+        hub.homeId == currentHome?.id &&
+        !DirectHubAccess.allowed &&
+        !(HueServiceLocator.isDemoMode && hub.type == HubType.hue)) {
+      return false;
+    }
     if (clearCloudRemoteEndpoint) {
       _pendingCloudRemoteEndpointClears.add(hub.id);
     }
@@ -1200,6 +1233,9 @@ class HomeProvider extends ChangeNotifier {
   /// Ensure the demo user has a Home + RhythmServer hub so they can reach
   /// surfaces like Matter pairing without manual setup.
   Future<void> _seedDemoEnvironment() async {
+    // Entering demo can reuse the selected home, so close its real transports
+    // even when no saved Home or Hub record needs to change.
+    refreshDirectHubAccess();
     if (_currentHome == null) {
       final home = await _repository.createHome(
         name: 'Demo Home',
