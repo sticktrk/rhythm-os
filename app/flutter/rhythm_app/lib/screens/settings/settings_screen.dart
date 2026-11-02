@@ -11,6 +11,8 @@ import '../../providers/home_provider.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
 import '../power_usage_screen.dart';
+import '../../services/apple_health_service.dart';
+import 'apple_health_screen.dart';
 import 'sections/account_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
 import 'sections/rhythm_server_section.dart';
@@ -107,6 +109,13 @@ class SettingsScreen extends StatelessWidget {
             _buildPowerUsageRow(context),
           ],
         ),
+        if (AppleHealthService.supportedPlatform) ...[
+          const SettingsSectionHeader(title: 'Health', icon: Icons.favorite_outline,
+            subtitle: 'Your sleep button activity.'),
+          SettingsGroup(children: [SettingsRow(icon: Icons.favorite_outline,
+            iconColor: CelestialColors.accentBlue, label: 'Apple Health',
+            onTap: () => AppleHealthScreen.show(context))]),
+        ],
         const SettingsSectionHeader(
           title: 'App',
           icon: Icons.tune_rounded,

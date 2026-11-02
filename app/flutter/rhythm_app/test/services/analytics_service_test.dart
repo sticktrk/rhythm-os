@@ -51,6 +51,26 @@ void main() {
     expect(backend.events.last.properties.containsKey('journey_id'), isFalse);
   });
 
+  test('Health operation analytics excludes health values and scope identity', () async {
+    await analytics.logAppleHealthAction('enable', 'opaque-journey');
+    await analytics.logAppleHealthOutcome('succeeded', 'none', 'opaque-journey');
+    await analytics.logAppleHealthOutcome('failed', 'private-error', 'opaque-journey');
+    await analytics.logAppleHealthAction('private-action', 'opaque-journey');
+    expect(backend.events.map((event) => event.name), [
+      'apple_health_sync_action', 'apple_health_sync_outcome', 'apple_health_sync_outcome']);
+    expect(backend.events.first.properties, {'action': 'enable', 'journey_id': 'opaque-journey'});
+    expect(backend.events[1].properties, {'outcome': 'succeeded', 'failure_stage': 'none', 'journey_id': 'opaque-journey'});
+    expect(backend.events.last.properties.containsKey('failure_stage'), isFalse);
+    for (final event in backend.events) {
+      expect(event.properties.keys, isNot(anyElement(isIn([
+        'node_id', 'home_id', 'server_id', 'sleep_time', 'wake_time', 'duration', 'sample_count']))));
+      expect(event.properties.toString(), isNot(contains('private-error')));
+    }
+    analytics.resetForTesting();
+    await analytics.logAppleHealthAction('sync', 'opaque-journey');
+    expect(backend.events, hasLength(3));
+  });
+
   test('Monster removal analytics is bounded, private, and optional', () async {
     await analytics.logMonsterDeviceRemoval(
         journeyId: 'opaque-journey', stage: 'confirmation');
