@@ -2,10 +2,29 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import tempfile
 import unittest
+
+
+class IOSAppMetadataTests(unittest.TestCase):
+    def test_healthkit_requires_both_nonempty_usage_descriptions(self):
+        ios = Path(__file__).resolve().parents[2]/'app/flutter/rhythm_app/ios'
+        with (ios/'Runner/Runner.entitlements').open('rb') as source:
+            entitlements = plistlib.load(source)
+        if not entitlements.get('com.apple.developer.healthkit'):
+            self.skipTest('Runner does not enable HealthKit')
+        with (ios/'Runner/Info.plist').open('rb') as source:
+            info = plistlib.load(source)
+        for key in ['NSHealthShareUsageDescription', 'NSHealthUpdateUsageDescription']:
+            with self.subTest(key=key):
+                purpose = info.get(key)
+                self.assertIsInstance(purpose, str,
+                                      f'HealthKit-enabled Runner must declare {key}')
+                self.assertTrue(purpose.strip(),
+                                f'HealthKit-enabled Runner must explain {key}')
 
 
 class TestFlightBuildTests(unittest.TestCase):
