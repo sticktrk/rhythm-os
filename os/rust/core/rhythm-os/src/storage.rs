@@ -615,6 +615,25 @@ impl StoredLocation {
         runtime_config: &mut RuntimeConfig,
         timezone_name: &mut Option<String>,
     ) {
+        self.apply_to_state_at_utc(
+            latitude,
+            longitude,
+            utc_offset_hours,
+            runtime_config,
+            timezone_name,
+            chrono::Utc::now().naive_utc(),
+        );
+    }
+
+    fn apply_to_state_at_utc(
+        &self,
+        latitude: &mut Option<f32>,
+        longitude: &mut Option<f32>,
+        utc_offset_hours: &mut f32,
+        runtime_config: &mut RuntimeConfig,
+        timezone_name: &mut Option<String>,
+        now_utc: chrono::NaiveDateTime,
+    ) {
         *latitude = self.latitude;
         *longitude = self.longitude;
         *timezone_name = self.timezone_name.clone();
@@ -625,9 +644,8 @@ impl StoredLocation {
 
         if let Some(ref tz_name) = self.timezone_name {
             let tz = rhythm_core::Timezone::new(tz_name);
-            let (year, month, day, hour) =
-                tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-            *utc_offset_hours = tz.utc_offset(year, month, day, hour);
+            let (year, month, day, _) = tz.local_date_hour_from_utc(now_utc);
+            *utc_offset_hours = tz.utc_offset_at_utc(now_utc);
             if let Some(lon) = self.longitude {
                 runtime_config.solar_noon_hour =
                     rhythm_core::calculate_solar_noon(lon, year, month, day, &tz);
@@ -3197,6 +3215,64 @@ mod tests {
     use crate::factory_default_config::factory_default_light_profile_config_map;
     use crate::hub::HubCredentials;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn stored_location_recomputes_offset_from_exact_utc_when_restarting_during_dst() {
+        let location: StoredLocation = serde_json::from_value(serde_json::json!({
+            "latitude": 40.0,
+            "longitude": -74.0,
+            "utc_offset_hours": -5.0,
+            "timezone_name": "America/New_York"
+        }))
+        .unwrap();
+        for (month, day, hour, minute, expected_offset) in [
+            (11, 1, 5, 30, -4.0),
+            (11, 1, 6, 30, -5.0),
+            (3, 8, 6, 59, -5.0),
+            (3, 8, 7, 0, -4.0),
+        ] {
+            let utc = chrono::NaiveDate::from_ymd_opt(2026, month, day)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap();
+            let (mut latitude, mut longitude, mut offset, mut timezone) = (None, None, 0.0, None);
+            let mut config = RuntimeConfig::default();
+            location.apply_to_state_at_utc(
+                &mut latitude,
+                &mut longitude,
+                &mut offset,
+                &mut config,
+                &mut timezone,
+                utc,
+            );
+            assert_eq!(offset, expected_offset, "{utc}");
+            assert_eq!(latitude, location.latitude);
+            assert_eq!(longitude, location.longitude);
+            assert_eq!(timezone, location.timezone_name);
+        }
+    }
+
+    #[test]
+    fn stored_location_without_timezone_preserves_legacy_fixed_offset() {
+        let location: StoredLocation = serde_json::from_value(serde_json::json!({
+            "latitude": 20.0,
+            "longitude": 80.0,
+            "utc_offset_hours": 5.5
+        }))
+        .unwrap();
+        let (mut latitude, mut longitude, mut offset, mut timezone) =
+            (None, None, 0.0, Some("America/New_York".to_string()));
+        let mut config = RuntimeConfig::default();
+        location.apply_to_state(
+            &mut latitude,
+            &mut longitude,
+            &mut offset,
+            &mut config,
+            &mut timezone,
+        );
+        assert_eq!(offset, 5.5);
+        assert_eq!(timezone, None);
+    }
 
     #[derive(Default)]
     struct TestStorage {

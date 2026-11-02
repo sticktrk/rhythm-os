@@ -32,6 +32,7 @@ class MoodSheet extends StatefulWidget {
   final MoodColorChanged onColorChanged;
   final MoodSceneSelected onSceneSelected;
   final ValueChanged<int>? onBrightnessChanged;
+  final String? Function()? brightnessUnavailableReason;
   final ValueChanged<MoodTab>? onTabChanged;
   final bool showHueTab;
   final int initialBrightness;
@@ -47,6 +48,7 @@ class MoodSheet extends StatefulWidget {
     this.initialScenes = const [],
     this.initialBrightness = 50,
     this.onBrightnessChanged,
+    this.brightnessUnavailableReason,
     this.onTabChanged,
     this.showHueTab = false,
   });
@@ -63,6 +65,7 @@ class MoodSheet extends StatefulWidget {
     List<RhythmSceneDefinition> initialScenes = const [],
     int initialBrightness = 50,
     ValueChanged<int>? onBrightnessChanged,
+    String? Function()? brightnessUnavailableReason,
     ValueChanged<MoodTab>? onTabChanged,
     bool showHueTab = false,
   }) {
@@ -81,6 +84,7 @@ class MoodSheet extends StatefulWidget {
         initialScenes: initialScenes,
         initialBrightness: initialBrightness,
         onBrightnessChanged: onBrightnessChanged,
+        brightnessUnavailableReason: brightnessUnavailableReason,
         onTabChanged: onTabChanged,
         showHueTab: showHueTab,
       ),
@@ -212,12 +216,14 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       applied = false;
     }
     if (!mounted ||
-        applied ||
         generation != _sceneSelectionGeneration ||
         _selectedSceneId != scene.id) {
       return;
     }
-    setState(() => _selectedSceneId = previousSceneId);
+    // Applying a scene can establish the missing brightness authority.
+    setState(() {
+      if (!applied) _selectedSceneId = previousSceneId;
+    });
   }
 
   void _switchTab(MoodTab tab) {
@@ -335,6 +341,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       );
 
   Widget _brightnessSlider(Color accent) {
+    final unavailableReason = widget.brightnessUnavailableReason?.call();
     return Semantics(
       container: true,
       label: 'Scene brightness',
@@ -386,14 +393,30 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
               value: _brightness.toDouble(),
               min: 1,
               max: 100,
-              onChanged: (value) {
-                setState(() => _brightness = value.round());
-              },
-              onChangeEnd: (value) {
-                widget.onBrightnessChanged?.call(value.round());
-              },
+              onChanged: unavailableReason == null
+                  ? (value) {
+                      if (widget.brightnessUnavailableReason?.call() != null) {
+                        setState(() {});
+                        return;
+                      }
+                      setState(() => _brightness = value.round());
+                    }
+                  : null,
+              onChangeEnd: unavailableReason == null
+                  ? (value) {
+                      widget.onBrightnessChanged?.call(value.round());
+                    }
+                  : null,
             ),
           ),
+          if (unavailableReason != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(unavailableReason,
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.72),
+                      fontSize: 12)),
+            ),
         ],
       ),
     );

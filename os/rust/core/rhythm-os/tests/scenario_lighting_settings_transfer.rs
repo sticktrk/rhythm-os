@@ -27,6 +27,57 @@ fn room_harness(id: &str) -> TestHarness {
 }
 
 #[test]
+fn device_scene_slots_follow_reviewed_light_mappings() {
+    let source = room_harness("old-room");
+    commands::do_home_scene_apply(
+        &source.state,
+        "halloween",
+        Default::default(),
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let source_id = source.resolve("old-room");
+    let incoming = export(&source);
+    let slots = source
+        .snapshot(&source_id)
+        .unwrap()
+        .profile_settings
+        .mood_scene_device_slots
+        .unwrap();
+    let target = room_harness("new-room");
+    let target_id = target.resolve("new-room");
+    let target_lights: Vec<_> = target
+        .state
+        .lock()
+        .unwrap()
+        .topology
+        .device_nodes()
+        .filter(|node| node.parent_id.as_ref() == Some(&target_id))
+        .map(|node| node.id.clone())
+        .collect();
+    let mut mappings = BTreeMap::from([(source_id, target_id.clone())]);
+    // Transfer only one light; unmapped identities must not survive the import.
+    let (old_light, slot) = slots.iter().next().unwrap();
+    mappings.insert(old_light.clone(), target_lights[0].clone());
+    commands::do_lighting_settings_import(
+        &target.state,
+        LightingSettingsImportPayload {
+            settings: incoming,
+            node_mappings: mappings,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        target
+            .snapshot(&target_id)
+            .unwrap()
+            .profile_settings
+            .mood_scene_device_slots,
+        Some(BTreeMap::from([(target_lights[0].clone(), *slot)]))
+    );
+}
+
+#[test]
 fn rpiz_backup_transfers_room_preferences_and_rebinds_scenes_without_ownership_or_live_state() {
     let source = room_harness("old-room");
     let source_id = source.resolve("old-room");

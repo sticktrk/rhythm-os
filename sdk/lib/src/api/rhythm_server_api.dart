@@ -495,7 +495,9 @@ class RhythmServerApi {
         .states;
   }
 
-  /// Apply brightness curve modifiers to multiple nodes in a single request.
+  /// Set brightness for multiple nodes in a single queued request.
+  /// Appliances advertising `scene_brightness_v1` edit bound Mood
+  /// scenes/profiles while preserving colors; other states use curve offsets.
   Future<RhythmDispatchResult> nodeCurveBrightnessBatchResult(
     List<({String nodeId, int brightness})> items, {
     int? dispatchSpacingMs,

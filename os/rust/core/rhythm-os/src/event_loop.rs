@@ -445,8 +445,29 @@ pub fn process_button_inline(
     };
 
     let event = runtime_event_for_button(node_id, action, device_id);
-    match crate::light_runtime::run_selected_light_runtime_event(state, event) {
-        Ok(report) => {
+    match commands::with_scene_brightness_button(state, node_id, action, false, || {
+        crate::light_runtime::run_selected_light_runtime_event(state, event)
+    }) {
+        Ok(None) => {
+            tracing::info!(
+                target: "evt",
+                event = "button_action_applied",
+                command_id = %command_id,
+                action = ?action,
+                node_id = %node_id,
+                device_id = ?device_id,
+                source = "inline",
+                lighting_target = "whole_home_scene",
+                latency_ms = started.elapsed().as_millis(),
+                "Inline button adjusted scene brightness"
+            );
+            let mut record =
+                crate::activity::LightActivityRecord::physical_button(node_id, action, device_id);
+            record.correlation_id = Some(command_id.to_string());
+            crate::activity::record_light_activity(state, record);
+            true
+        }
+        Ok(Some(report)) => {
             tracing::info!(
                 target: "evt",
                 event = "button_action_applied",
@@ -600,6 +621,12 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LightButtonIngressSource {
+    PhysicalButton,
+    Contact,
+}
+
 fn run_button_ingress_action(
     state: &SharedState,
     node_id: &str,
@@ -607,6 +634,7 @@ fn run_button_ingress_action(
     device_id: Option<&str>,
     command_id: &str,
     persist_after: bool,
+    source: LightButtonIngressSource,
 ) {
     if !commands::rhythm_automation_allowed_for_node(state, node_id) {
         tracing::info!(
@@ -621,7 +649,43 @@ fn run_button_ingress_action(
     }
     // Physical button ingress is fast lane: execute inline on the ingress
     // dispatch thread and never enqueue behind paced HTTP/system batches.
-    if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
+    let applied = if source == LightButtonIngressSource::Contact {
+        // Contacts are automatic input, even though they use On/Off planners.
+        // Recheck after waiting for scene commit, then hold the read lease
+        // through I/O so an in-flight contact cannot overwrite a newer scene.
+        let arbitration = {
+            let Ok(s) = state.lock() else { return };
+            s.motion_scene_transaction_lock.clone()
+        };
+        let Ok(_guard) = arbitration.read() else {
+            return;
+        };
+        // Authority may change while this automatic action waits for a scene.
+        if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+            return;
+        }
+        let scene_held = {
+            let Ok(s) = state.lock() else { return };
+            if !s.light_breaker_enabled {
+                return;
+            }
+            let Some(runtime) = s.hub_runtime() else {
+                return;
+            };
+            commands::active_whole_home_scene_owner(&s, runtime.as_ref(), node_id).is_some()
+        };
+        if scene_held {
+            tracing::info!(target: "evt", event = "contact_node_control_suppressed",
+                command_id = %command_id, node_id = %node_id,
+                reason = "whole_home_scene", "Contact automation paused by whole-home scene");
+            false
+        } else {
+            process_button_inline(state, node_id, action, device_id, command_id)
+        }
+    } else {
+        process_button_inline(state, node_id, action, device_id, command_id)
+    };
+    if applied && persist_after {
         {
             let runtime = {
                 let Ok(s) = state.lock() else { return };
@@ -637,9 +701,21 @@ fn run_button_ingress_action(
             s.work_tx.clone()
         };
         if let Some(tx) = work_tx {
-            let _ = tx.try_send(WorkItem::DeferredPersist {
-                node_id: node_id.to_string(),
+            let edits_scene = commands::is_scene_brightness_button(action);
+            let queued = tx.try_send(if edits_scene {
+                WorkItem::DeferredPersistLightingSettings
+            } else {
+                WorkItem::DeferredPersist {
+                    node_id: node_id.to_string(),
+                }
             });
+            if edits_scene && queued.is_err() {
+                // A physical brightness edit already committed its definition.
+                // A full queue must not leave only an in-memory scene binding.
+                commands::persist_lighting_settings(state);
+            }
+        } else if commands::is_scene_brightness_button(action) {
+            commands::persist_lighting_settings(state);
         } else {
             commands::persist_rooms(state);
         }
@@ -653,6 +729,7 @@ fn spawn_button_ingress_action(
     device_id: Option<String>,
     command_id: String,
     persist_after: bool,
+    source: LightButtonIngressSource,
 ) {
     let builder = std::thread::Builder::new().name("evt-button".to_string());
 
@@ -669,6 +746,7 @@ fn spawn_button_ingress_action(
             device_id_clone.as_deref(),
             &command_id_clone,
             persist_after,
+            source,
         );
     }) {
         warn!(
@@ -683,6 +761,7 @@ fn spawn_button_ingress_action(
             device_id.as_deref(),
             &command_id,
             persist_after,
+            source,
         );
     }
 }
@@ -824,28 +903,51 @@ fn spawn_input_binding_action(
     }
 }
 
-fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
-    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl FnOnce()) {
+    let Some(transaction) = state
+        .lock()
+        .ok()
+        .map(|s| s.motion_scene_transaction_lock.clone())
+    else {
+        return;
+    };
+    let Ok(_guard) = transaction.read() else {
+        return;
+    };
+    let reason = if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        Some("external_room_authority")
+    } else {
+        motion_suppression_reason_for_target(state, node_id)
+    };
+    if let Some(reason) = reason {
         tracing::info!(
             target: "evt",
             event = "queued_motion_automation_suppressed",
             node_id = %node_id,
-            reason = "external_room_authority",
-            "Queued motion action retired after an authority handoff"
+            reason,
+            "Queued motion action retired after its target changed"
         );
         return;
     }
-    // Motion ingress is fast lane for occupancy responsiveness.
-    if !turn_on_node_inline(state, node_id) {
-        return;
-    }
-    let runtime = {
-        let Ok(s) = state.lock() else { return };
-        s.hub_runtime()
-    };
-    if let Some(runtime) = runtime {
-        crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
-    }
+    // Hold arbitration through I/O: a home scene must not commit between the
+    // eligibility check and a previously admitted motion command dispatch.
+    action();
+}
+
+fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    run_motion_action_if_allowed(state, node_id, || {
+        // Motion ingress is fast lane for occupancy responsiveness.
+        if !turn_on_node_inline(state, node_id) {
+            return;
+        }
+        let runtime = {
+            let Ok(s) = state.lock() else { return };
+            s.hub_runtime()
+        };
+        if let Some(runtime) = runtime {
+            crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+        }
+    });
 }
 
 fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
@@ -866,15 +968,19 @@ fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
     }
 }
 
+fn run_motion_dim_action(state: &SharedState, node_id: &str, factor: f32) {
+    run_motion_action_if_allowed(state, node_id, || {
+        dim_node_inline(state, node_id, factor);
+    });
+}
+
 fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     let builder = std::thread::Builder::new().name("evt-motion-dim".to_string());
     let state_clone = state.clone();
     let node_id_clone = node_id.clone();
 
     if let Err(error) = builder.spawn(move || {
-        if commands::rhythm_automation_allowed_for_node(&state_clone, &node_id_clone) {
-            dim_node_inline(&state_clone, &node_id_clone, factor);
-        }
+        run_motion_dim_action(&state_clone, &node_id_clone, factor);
     }) {
         warn!(
             target: "evt",
@@ -1727,6 +1833,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     device_id.clone(),
                     command_id.clone(),
                     true,
+                    LightButtonIngressSource::PhysicalButton,
                 );
             }
         }
@@ -2156,6 +2263,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 Some(sensor_id.clone()),
                 command_id,
                 true,
+                LightButtonIngressSource::Contact,
             );
         }
 
@@ -2598,6 +2706,17 @@ fn motion_timeout_mode_default(
 }
 
 fn run_motion_timeout_restore(
+    state: &SharedState,
+    target_node_id: &str,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: &str,
+) {
+    run_motion_action_if_allowed(state, target_node_id, || {
+        run_motion_timeout_restore_inner(state, target_node_id, mode_default, command_id);
+    });
+}
+
+fn run_motion_timeout_restore_inner(
     state: &SharedState,
     target_node_id: &str,
     mode_default: Option<rhythm_core::RoomModeState>,
@@ -3407,26 +3526,44 @@ fn motion_suppression_reason_for_target(
     state: &SharedState,
     target_node_id: &str,
 ) -> Option<&'static str> {
-    state
-        .lock()
-        .ok()
-        .and_then(|s| s.hub_runtime())
-        .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
-        .and_then(|snapshot| {
-            if !snapshot.profile_settings.motion_activation_enabled() {
-                return Some("motion_activation_disabled");
-            }
-            if snapshot.mood_active
-                && snapshot
-                    .profile_settings
-                    .mood_scene_id
-                    .as_deref()
-                    .is_some_and(|scene_id| !is_generated_mood_scene_id(scene_id))
-            {
-                return Some("active_scene");
-            }
-            None
-        })
+    let (runtime, parent_id) = {
+        let s = state.lock().ok()?;
+        (
+            s.hub_runtime()?,
+            s.topology
+                .device_parent_room_id(target_node_id)
+                .map(str::to_string),
+        )
+    };
+    let snapshot = runtime.engine_effective_node_snapshot(target_node_id)?;
+    if !snapshot.profile_settings.motion_activation_enabled() {
+        return Some("motion_activation_disabled");
+    }
+    // A child's saved custom Mood binding can mask its parent's scene metadata
+    // in the effective snapshot. Whole-home ownership still covers that child,
+    // even after a child-only Reset or while its own mode is Off.
+    let parent_has_home_scene = parent_id
+        .as_deref()
+        .and_then(|parent_id| runtime.engine_node_snapshot(parent_id))
+        .is_some_and(|parent| {
+            parent.mood_active
+                && parent.profile_settings.mood_scene_id.is_some()
+                && parent.profile_settings.mood_scene_palette_span.is_some()
+        });
+    if parent_has_home_scene
+        || (snapshot.mood_active
+            && snapshot
+                .profile_settings
+                .mood_scene_id
+                .as_deref()
+                .is_some_and(|scene_id| {
+                    !is_generated_mood_scene_id(scene_id)
+                        || snapshot.profile_settings.mood_scene_palette_span.is_some()
+                }))
+    {
+        return Some("active_scene");
+    }
+    None
 }
 
 fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {
@@ -3679,8 +3816,29 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 dispatch_spacing,
             );
             let event = runtime_event_for_button(&node_id, action, device_id.as_deref());
-            match crate::light_runtime::run_selected_light_runtime_event(state, event) {
-                Ok(report) => {
+            match commands::with_scene_brightness_button(
+                state,
+                &node_id,
+                action,
+                persist_after,
+                || crate::light_runtime::run_selected_light_runtime_event(state, event),
+            ) {
+                Ok(None) => {
+                    tracing::info!(
+                        target: "evt",
+                        event = "queued_node_action_applied",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        source = "worker",
+                        lighting_target = "whole_home_scene",
+                        latency_ms = started.elapsed().as_millis(),
+                        "Worker button adjusted scene brightness"
+                    );
+                    return;
+                }
+                Ok(Some(report)) => {
                     tracing::info!(
                         target: "evt",
                         event = "queued_node_action_applied",
@@ -3827,9 +3985,14 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             transition_ms,
             dispatch_spacing,
             dispatch_generation,
+            provenance,
         } => {
             let started = Instant::now();
-            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+            let is_mode_output =
+                matches!(provenance, crate::state::NodeOutputProvenance::Mode { .. });
+            if is_mode_output
+                && !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "lights_off_room_skipped",
@@ -3847,13 +4010,15 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             };
             let Some(runtime) = runtime else { return };
 
-            if !crate::periodic::wait_for_node_dispatch_slot_if_current(
-                state,
-                &command_id,
-                &node_id,
-                dispatch_spacing,
-                dispatch_generation,
-            ) {
+            if is_mode_output
+                && !crate::periodic::wait_for_node_dispatch_slot_if_current(
+                    state,
+                    &command_id,
+                    &node_id,
+                    dispatch_spacing,
+                    dispatch_generation,
+                )
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "lights_off_room_skipped",
@@ -3863,6 +4028,22 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                     reason = "stale_dispatch_generation_after_pace",
                     "Skipping stale lights_off_room"
                 );
+                return;
+            }
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            if !commands::queued_node_output_current(
+                state,
+                &runtime,
+                &node_id,
+                dispatch_generation,
+                &provenance,
+            ) {
                 return;
             }
             match runtime.lights_off_room(&node_id, transition_ms) {
@@ -3903,8 +4084,18 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             command,
             dispatch_spacing: _,
             dispatch_generation,
+            provenance,
         } => {
-            if !crate::periodic::light_dispatch_generation_current(state, dispatch_generation) {
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            if matches!(provenance, crate::state::NodeOutputProvenance::Mode { .. })
+                && !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
                 tracing::debug!(
                     target: "cmd",
                     event = "apply_node_command_skipped",
@@ -3921,6 +4112,15 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 s.hub_runtime()
             };
             let Some(runtime) = runtime else { return };
+            if !commands::queued_node_output_current(
+                state,
+                &runtime,
+                &node_id,
+                dispatch_generation,
+                &provenance,
+            ) {
+                return;
+            }
 
             // Manual mode-apply commands are paced producer-side by
             // dispatch_room_commands. We intentionally do not wait on
@@ -4054,10 +4254,38 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
             let schedule_node_id = emit_parent_node_id
                 .as_deref()
                 .unwrap_or(settings_node_id.as_str());
-            if crate::commands::reconcile_room_schedule_before_tick(
+            let arbitration = match state.lock() {
+                Ok(s) => s.motion_scene_transaction_lock.clone(),
+                Err(_) => return,
+            };
+            let Ok(_guard) = arbitration.read() else {
+                return;
+            };
+            let scene_held = state.lock().ok().is_some_and(|s| {
+                commands::active_whole_home_scene_owner(&s, runtime.as_ref(), &settings_node_id)
+                    .is_some()
+                    || commands::active_whole_home_scene_owner(
+                        &s,
+                        runtime.as_ref(),
+                        schedule_node_id,
+                    )
+                    .is_some()
+            });
+            if scene_held
+                || !crate::periodic::light_dispatch_generation_current(state, dispatch_generation)
+            {
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
+                );
+                return;
+            }
+            if crate::commands::reconcile_room_schedule_before_tick_inner(
                 state,
                 schedule_node_id,
                 current_hour,
+                true,
             )
             .is_err()
             {
@@ -4148,6 +4376,9 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
 
         WorkItem::DeferredPersist { node_id: _ } => {
             commands::persist_rooms(state);
+        }
+        WorkItem::DeferredPersistLightingSettings => {
+            commands::persist_lighting_settings(state);
         }
         WorkItem::DeferredPersistState => {
             commands::persist_state(state);
@@ -6968,6 +7199,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::with_transition(50, 4000, 500),
                 dispatch_spacing: Duration::from_secs(3),
                 dispatch_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         let elapsed = started.elapsed();
@@ -7172,6 +7406,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(40, 3000),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: 1,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7182,6 +7419,9 @@ mod tests {
                 transition_ms: Some(250),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: 1,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -7336,6 +7576,7 @@ mod tests {
             Some("button-a"),
             "button-ingress",
             true,
+            LightButtonIngressSource::PhysicalButton,
         );
 
         match rx.try_recv().expect("deferred persist should enqueue") {
@@ -7351,6 +7592,7 @@ mod tests {
             None,
             "button-ingress-no-persist",
             false,
+            LightButtonIngressSource::PhysicalButton,
         );
         assert!(
             rx.try_recv().is_err(),
@@ -7413,6 +7655,9 @@ mod tests {
                 transition_ms: Some(250),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7423,6 +7668,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(50, 3200),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -7495,6 +7743,9 @@ mod tests {
                 transition_ms: None,
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: fail_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
         process_work_item(
@@ -7505,6 +7756,9 @@ mod tests {
                 command: rhythm_core::LightingCommand::new(40, 2800),
                 dispatch_spacing: Duration::ZERO,
                 dispatch_generation: fail_generation,
+                provenance: crate::state::NodeOutputProvenance::Mode {
+                    preserve_home_scene: false,
+                },
             },
         );
 
@@ -7909,6 +8163,231 @@ mod tests {
             assert!(motion.motion_owned.contains("room_a"));
             assert_eq!(turn_on_calls.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn queued_sensor_callbacks_wait_for_home_scene_and_retire_without_dispatch() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (scene_gate, arbitration) = {
+            let s = state.lock().unwrap();
+            (
+                s.scene_lifecycle_transaction_lock.clone(),
+                s.motion_scene_transaction_lock.clone(),
+            )
+        };
+        let scene_guard = scene_gate.lock().unwrap();
+        let apply_state = state.clone();
+        let home_apply = std::thread::spawn(move || {
+            commands::do_home_scene_apply(
+                &apply_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while arbitration.try_write().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "home apply did not acquire motion arbitration"
+            );
+            std::thread::yield_now();
+        }
+        // These callbacks were admitted before the scene became visible, but
+        // cannot pass the execution-time guard until its binding is committed.
+        let mut callbacks = Vec::new();
+        for action in 0..6 {
+            let callback_state = state.clone();
+            callbacks.push(std::thread::spawn(move || match action {
+                0 => run_motion_turn_on_action(&callback_state, "room_a"),
+                1 => run_motion_dim_action(&callback_state, "room_a", 0.5),
+                2 => run_motion_dim_action(&callback_state, "room_a", 1.0),
+                3 => run_motion_timeout_restore(&callback_state, "room_a", None, "stale-timeout"),
+                _ => run_button_ingress_action(
+                    &callback_state,
+                    "room_a",
+                    if action == 4 {
+                        ButtonAction::OnPress
+                    } else {
+                        ButtonAction::OffPress
+                    },
+                    Some("door"),
+                    "stale-contact",
+                    false,
+                    LightButtonIngressSource::Contact,
+                ),
+            }));
+        }
+        drop(scene_guard);
+        home_apply.join().unwrap().unwrap();
+        for callback in callbacks {
+            callback.join().unwrap();
+        }
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
+        assert!(runtime.turn_on_calls.lock().unwrap().is_empty());
+        assert!(runtime.dim_calls.lock().unwrap().is_empty());
+        assert!(runtime.events.lock().unwrap().is_empty());
+        assert!(runtime.lights_off_calls.lock().unwrap().is_empty());
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn home_scene_waits_for_in_flight_automatic_output() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let arbitration = state.lock().unwrap().motion_scene_transaction_lock.clone();
+        let generation = state.lock().unwrap().light_dispatch_generation;
+        // Hold the controller's recording mutex so the real worker is paused
+        // inside physical dispatch, after its execution-time ownership check.
+        let dispatch_gate = runtime.apply_calls.lock().unwrap();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            process_work_item(
+                &worker_state,
+                WorkItem::ApplyNodeCommand {
+                    command_id: "automatic-before-party".into(),
+                    node_id: "room_a".into(),
+                    command: rhythm_core::LightingCommand::with_transition(40, 2700, 0),
+                    dispatch_spacing: Duration::ZERO,
+                    dispatch_generation: generation,
+                    provenance: crate::state::NodeOutputProvenance::Mode {
+                        preserve_home_scene: true,
+                    },
+                },
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while arbitration.try_write().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "worker did not acquire arbitration"
+            );
+            std::thread::yield_now();
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let home_state = state.clone();
+        let home = std::thread::spawn(move || {
+            let result = commands::do_home_scene_apply(
+                &home_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        let completed_early = done_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(dispatch_gate);
+        worker.join().unwrap();
+        home.join().unwrap().unwrap();
+        assert!(
+            !completed_early,
+            "scene must wait until old automatic I/O finishes"
+        );
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 2);
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn home_scene_waits_for_an_in_flight_motion_dispatch_to_finish() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let motion_state = state.clone();
+        let motion = std::thread::spawn(move || {
+            run_motion_action_if_allowed(&motion_state, "room_a", || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(turn_on_node_inline(&motion_state, "room_a"));
+            });
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let apply_state = state.clone();
+        let home_apply = std::thread::spawn(move || {
+            let result = commands::do_home_scene_apply(
+                &apply_state,
+                "halloween",
+                Default::default(),
+                Duration::ZERO,
+            );
+            completed_tx.send(()).unwrap();
+            result
+        });
+        assert!(completed_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        release_tx.send(()).unwrap();
+        motion.join().unwrap();
+        home_apply.join().unwrap().unwrap();
+        assert_eq!(runtime.turn_on_calls.lock().unwrap().len(), 1);
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+    }
+
+    #[test]
+    fn slow_motion_dispatch_does_not_block_an_unrelated_room() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+            room_snapshot_with_flags("room_b", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow_state = state.clone();
+        let slow = std::thread::spawn(move || {
+            run_motion_action_if_allowed(&slow_state, "room_a", || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(turn_on_node_inline(&slow_state, "room_a"));
+            });
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let sibling_state = state.clone();
+        let sibling = std::thread::spawn(move || {
+            run_motion_turn_on_action(&sibling_state, "room_b");
+            completed_tx.send(()).unwrap();
+        });
+        let sibling_completed = completed_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release_tx.send(()).unwrap();
+        slow.join().unwrap();
+        sibling.join().unwrap();
+        assert!(
+            sibling_completed,
+            "an unrelated slow hub must not delay motion"
+        );
+        assert_eq!(runtime.turn_on_calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn motion_timeout_can_reenter_a_mood_scene_without_relocking_arbitration() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.mood_scene_id = Some("halloween".into());
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let state = make_state_with_runtime(runtime.clone());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let callback = std::thread::spawn(move || {
+            run_motion_timeout_restore(
+                &state,
+                "room_a",
+                Some(rhythm_core::RoomModeState::Mood),
+                "timeout",
+            );
+            completed_tx.send(()).unwrap();
+        });
+        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        callback.join().unwrap();
+        assert!(runtime.engine_room_snapshot("room_a").unwrap().mood_active);
+        assert_eq!(runtime.apply_calls.lock().unwrap().len(), 1);
     }
 
     #[test]
