@@ -1493,3 +1493,312 @@ async fn health_and_admin_status_expose_the_same_build_identity_without_secrets(
     let (status, _) = json_request(f.admin(), Method::GET, "/health", None, json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn ha_rejected_commissioning_stays_unknown_until_explicit_review() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let session = "ha-post-admission-error";
+    let request: crate::matter::PairRequest = serde_json::from_value(json!({
+        "session_id":session,"setup_code":"12345678901",
+        "code_source":"original_label","rendezvous":"on_network"
+    }))
+    .unwrap();
+    let fingerprint = rhythm_os::pairing::pairing_request_fingerprint_for_state(
+        &f.state,
+        "homeassistant",
+        &serde_json::to_value(&request).unwrap(),
+    )
+    .unwrap();
+    let lease =
+        rhythm_os::pairing::begin_pairing_result(&f.state, session, "homeassistant", &fingerprint)
+            .unwrap();
+    // HA reports the same bounded error for an interview failure after fabric
+    // admission as for a rejected operation. Neither proves pairing did not run.
+    crate::matter::finish_pairing(
+        &f.state,
+        &f.access,
+        &request,
+        &fingerprint,
+        Err(rhythm_ha::matter::Rejected.into()),
+    )
+    .await;
+    drop(lease);
+    let route = format!("/api/addon/matter/pairing/{session}");
+    let (status, receipt) = json_request(
+        f.mobile(),
+        Method::GET,
+        &route,
+        phone["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["status"], "unknown");
+    assert_eq!(receipt["can_close_attempt"], true);
+    assert_eq!(receipt["acknowledged"], false);
+    // The uncertainty survives a restart and prevents reusing the request ID.
+    let restarted =
+        create_mobile_router(load(&f.root), Arc::new(MobileAccess::new(ADMIN).unwrap()));
+    let (_, persisted) = json_request(
+        restarted,
+        Method::GET,
+        &route,
+        phone["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(persisted["status"], "unknown");
+    assert_eq!(
+        json_request(
+            f.mobile(),
+            Method::DELETE,
+            &route,
+            phone["token"].as_str(),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(rhythm_os::pairing::pairing_result_is_tombstoned(&f.state, session).unwrap());
+}
+
+#[tokio::test]
+async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_results() {
+    use futures_util::{SinkExt, StreamExt};
+    use rhythm_ha::{matter::HaMatterClient, transport::HaConnectionConfig};
+    use tokio_tungstenite::tungstenite::Message;
+
+    for remove in [false, true] {
+        for reset in [false, true] {
+            let f = Fixture::new();
+            let phone = f.enroll().await;
+            let scope = f.state.lock().unwrap().server_instance_id.clone();
+            let registry = json!([{"id":"device","config_entries":["entry"],
+                "identifiers":[["matter","deviceid_0123456789ABCDEF-0000000000000001-MatterNodeDevice"]]}]);
+            let device = rhythm_ha::matter::parse_catalog(&scope, "entry", &registry, &json!([]))
+                .unwrap()
+                .remove(0);
+            rhythm_ha::matter_store::save_original(
+                f.root.to_str().unwrap(),
+                &scope,
+                &device,
+                "12345678901",
+            )
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            let upstream = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                socket
+                    .send(Message::Text(json!({"type":"auth_required"}).to_string()))
+                    .await
+                    .unwrap();
+                socket.next().await.unwrap().unwrap();
+                socket
+                    .send(Message::Text(json!({"type":"auth_ok"}).to_string()))
+                    .await
+                    .unwrap();
+                for result in [
+                    json!([{"entry_id":"entry","domain":"matter","state":"loaded"}]),
+                    registry,
+                    json!([]),
+                ] {
+                    let command: Value = serde_json::from_str(
+                        socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                    )
+                    .unwrap();
+                    socket
+                        .send(Message::Text(
+                            json!({"id":command["id"],"success":true,"result":result}).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                let command: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(
+                    command["type"],
+                    if remove {
+                        "config/device_registry/remove_config_entry"
+                    } else {
+                        "matter/open_commissioning_window"
+                    }
+                );
+                entered_tx.send(()).unwrap();
+                finish_rx.await.unwrap();
+                let result = if remove {
+                    Value::Null
+                } else {
+                    json!({"setup_qr_code":"MT:SHARING","setup_manual_code":"12345678901"})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":command["id"],"success":true,"result":result}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                if remove {
+                    for result in [
+                        json!([{"entry_id":"entry","domain":"matter","state":"loaded"}]),
+                        json!([]),
+                        json!([]),
+                    ] {
+                        let command: Value = serde_json::from_str(
+                            socket.next().await.unwrap().unwrap().to_text().unwrap(),
+                        )
+                        .unwrap();
+                        socket
+                            .send(Message::Text(
+                                json!({"id":command["id"],"success":true,"result":result})
+                                    .to_string(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                }
+            });
+            let identity = device.identity.clone();
+            let path = if remove {
+                "/api/addon/matter/devices/device"
+            } else {
+                "/api/addon/matter/share/device"
+            };
+            let handler =
+                move |State(state): State<SharedState>,
+                      Extension(access): Extension<Arc<MobileAccess>>,
+                      Extension(mutation): Extension<MutationGuard>| {
+                    let identity = identity.clone();
+                    async move {
+                        let config = HaConnectionConfig {
+                            host: "127.0.0.1".into(),
+                            port,
+                            token: "synthetic".into(),
+                            use_ssl: false,
+                        };
+                        if remove {
+                            crate::matter::remove_with_client(
+                                &state,
+                                &access,
+                                &mutation,
+                                "device",
+                                &identity,
+                                HaMatterClient::connect(&config),
+                            )
+                            .await
+                        } else {
+                            crate::matter::share_with_client(
+                                &state,
+                                &access,
+                                &mutation,
+                                "device",
+                                &identity,
+                                HaMatterClient::connect(&config),
+                            )
+                            .await
+                        }
+                    }
+                };
+            // Substitute only the connection boundary; admission, reset barrier,
+            // production HA protocol and response/local commit paths are real.
+            let route = if remove {
+                delete(handler)
+            } else {
+                post(handler)
+            };
+            let router = Router::new()
+                .route(path, route)
+                .with_state(f.state.clone())
+                .layer(middleware::from_fn_with_state(f.state.clone(), mobile_auth))
+                .layer(middleware::from_fn(serialize_mutations))
+                .layer(middleware::from_fn_with_state(
+                    f.state.clone(),
+                    crate::policy::enforce,
+                ))
+                .layer(Extension(f.access.clone()));
+            let token = phone["token"].as_str().unwrap().to_owned();
+            let operation = tokio::spawn(async move {
+                json_request(
+                    router,
+                    if remove { Method::DELETE } else { Method::POST },
+                    path,
+                    Some(&token),
+                    json!({}),
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            // A real control write completes while HA deliberately stays blocked.
+            let light = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                json_request(
+                    f.mobile(),
+                    Method::PUT,
+                    "/api/light-breaker",
+                    phone["token"].as_str(),
+                    json!({"enabled":true}),
+                ),
+            )
+            .await
+            .expect("HA administration blocked an unrelated light write");
+            assert_eq!(light.0, StatusCode::OK);
+            if reset {
+                let controller = Arc::new(
+                    rhythm_os::remote_access::ChildProcessRemoteAccessController::new("/missing"),
+                );
+                crate::install_factory_reset_hook(&f.state, f.access.clone(), controller).unwrap();
+                f.state.lock().unwrap().after_factory_reset_fn = None;
+                assert_eq!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        json_request(
+                            f.admin(),
+                            Method::POST,
+                            "/api/factory-reset",
+                            Some(ADMIN),
+                            json!({}),
+                        )
+                    )
+                    .await
+                    .expect("reset waited on HA network I/O")
+                    .0,
+                    StatusCode::OK
+                );
+            }
+            finish_tx.send(()).unwrap();
+            let result = operation.await.unwrap();
+            upstream.await.unwrap();
+            assert_eq!(
+                result.0,
+                if reset {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                }
+            );
+            if reset {
+                assert!(!f.root.join("matter/ha-setup-payloads.json").exists());
+                assert!(!f.root.join("pairing_history.json").exists());
+                assert!(result.1.get("setup_code").is_none());
+            } else if remove {
+                assert!(rhythm_ha::matter_store::original(
+                    f.root.to_str().unwrap(),
+                    &scope,
+                    &device
+                )
+                .unwrap()
+                .is_none());
+            } else {
+                assert_eq!(result.1["setup_code"], "MT:SHARING");
+            }
+        }
+    }
+}

@@ -30,3 +30,7 @@ sha2 = "0.10"
 percent-encoding = "2"
 log = "0.4"
 socket2 = "0.6"
+
+[dev-dependencies]
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }

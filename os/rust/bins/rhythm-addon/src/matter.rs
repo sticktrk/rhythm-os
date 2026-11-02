@@ -1,5 +1,6 @@
 //! Owner-only HA Matter facade. Every physical operation is delegated to HA Core.
 
+use crate::http_server::MutationGuard;
 use crate::mobile_access::MobileAccess;
 use anyhow::{Context, Result};
 use axum::{
@@ -9,7 +10,7 @@ use axum::{
     Json,
 };
 use rhythm_ha::{
-    matter::{validate_setup_code, HaMatterClient, MatterCatalog, MatterDevice, Rejected},
+    matter::{validate_setup_code, HaMatterClient, MatterCatalog, MatterDevice},
     matter_store,
 };
 use rhythm_os::{
@@ -290,14 +291,7 @@ fn receipt(state: &SharedState, session: &str, tombstone: bool) -> Result<Value>
     let acknowledged = record.is_none() && pairing::pairing_result_is_tombstoned(state, session)?;
     let status = match result {
         Some(r) if r.status == PairingStatus::Complete => "completed",
-        Some(r)
-            if matches!(
-                r.error.as_deref(),
-                Some("Home Assistant rejected pairing") | Some(NOT_STARTED)
-            ) =>
-        {
-            "failed"
-        }
+        Some(r) if r.error.as_deref() == Some(NOT_STARTED) => "failed",
         Some(_) => "unknown",
         None if record.is_some() => "pending",
         None => "failed",
@@ -437,10 +431,9 @@ pub(super) async fn finish_pairing(
         Err(e) if e.downcast_ref::<NotStarted>().is_some() => {
             terminal(PairingStatus::Failed, Some(NOT_STARTED))
         }
-        Err(e) if e.downcast_ref::<Rejected>().is_some() => terminal(
-            PairingStatus::Failed,
-            Some("Home Assistant rejected pairing"),
-        ),
+        // Even HA's structured error can follow successful fabric admission
+        // (for example, a later interview failure). Once dispatched, require
+        // explicit HA review instead of allowing an automatic retry.
         Err(_) => terminal(PairingStatus::Failed, Some(UNKNOWN)),
     };
     if terminal.status == PairingStatus::Complete {
@@ -477,12 +470,21 @@ async fn checked_device(
     id: &str,
     identity: &str,
 ) -> Result<(HaMatterClient, MatterDevice)> {
+    checked_device_with_client(state, id, identity, client()).await
+}
+
+async fn checked_device_with_client(
+    state: &SharedState,
+    id: &str,
+    identity: &str,
+    connect: impl std::future::Future<Output = Result<HaMatterClient>>,
+) -> Result<(HaMatterClient, MatterDevice)> {
     anyhow::ensure!(
         identity.len() == 64 && identity.bytes().all(|b| b.is_ascii_hexdigit()),
         "Invalid identity"
     );
     let (_, scope) = context(state)?;
-    let mut client = client().await?;
+    let mut client = connect.await?;
     let device = client
         .catalog(&scope)
         .await?
@@ -515,6 +517,8 @@ pub async fn setup_code(
 }
 pub async fn save_code(
     State(state): State<SharedState>,
+    Extension(access): Extension<Arc<MobileAccess>>,
+    Extension(mutation): Extension<MutationGuard>,
     Path(id): Path<String>,
     Json(request): Json<SaveCode>,
 ) -> Response {
@@ -526,12 +530,21 @@ pub async fn save_code(
             "Only an original physical label code can be saved",
         );
     }
+    mutation.release();
+    let _operation = access.matter_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
     let Ok((_, device)) = checked_device(&state, &id, &request.identity).await else {
         return error(
             StatusCode::CONFLICT,
             "HA device identity changed or is unavailable",
         );
     };
+    let _guard = access.mutation_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
     match context(&state).and_then(|(dir, scope)| {
         matter_store::save_original(&dir, &scope, &device, &request.setup_code)
     }) {
@@ -543,9 +556,16 @@ pub async fn save_code(
 }
 pub async fn bind_device(
     State(state): State<SharedState>,
+    Extension(access): Extension<Arc<MobileAccess>>,
+    Extension(mutation): Extension<MutationGuard>,
     Path(session): Path<String>,
     Json(request): Json<BindDevice>,
 ) -> Response {
+    mutation.release();
+    let _operation = access.matter_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
     let Ok((_, device)) = checked_device(&state, &request.device_id, &request.identity).await
     else {
         return error(
@@ -553,6 +573,10 @@ pub async fn bind_device(
             "HA device identity changed or is unavailable",
         );
     };
+    let _guard = access.mutation_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
     if context(&state)
         .and_then(|(dir, scope)| matter_store::bind_session(&dir, &scope, &session, &device))
         .is_err()
@@ -569,23 +593,48 @@ pub async fn bind_device(
 }
 pub async fn share(
     State(state): State<SharedState>,
+    Extension(access): Extension<Arc<MobileAccess>>,
+    Extension(mutation): Extension<MutationGuard>,
     Path(id): Path<String>,
     Json(proof): Json<Identity>,
 ) -> Response {
-    let Ok((mut client, _)) = checked_device(&state, &id, &proof.identity).await else {
+    share_with_client(&state, &access, &mutation, &id, &proof.identity, client()).await
+}
+
+pub(super) async fn share_with_client(
+    state: &SharedState,
+    access: &MobileAccess,
+    mutation: &MutationGuard,
+    id: &str,
+    identity: &str,
+    connect: impl std::future::Future<Output = Result<HaMatterClient>>,
+) -> Response {
+    mutation.release();
+    let _operation = access.matter_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
+    let Ok((mut client, _)) = checked_device_with_client(state, id, identity, connect).await else {
         return error(
             StatusCode::CONFLICT,
             "HA device identity changed or is unavailable",
         );
     };
-    match client
+    if access.is_resetting() {
+        return unavailable();
+    }
+    let result = client
         .command(
             "matter/open_commissioning_window",
             json!({"device_id":id}),
             Duration::from_secs(30),
         )
-        .await
-    {
+        .await;
+    let _guard = access.mutation_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
+    match result {
         Ok(value) => {
             let code = value["setup_qr_code"].as_str();
             if !code.is_some_and(|c| validate_setup_code(c).is_ok()) {
@@ -598,15 +647,37 @@ pub async fn share(
 }
 pub async fn remove(
     State(state): State<SharedState>,
+    Extension(access): Extension<Arc<MobileAccess>>,
+    Extension(mutation): Extension<MutationGuard>,
     Path(id): Path<String>,
     Json(proof): Json<Identity>,
 ) -> Response {
-    let Ok((mut client, device)) = checked_device(&state, &id, &proof.identity).await else {
+    remove_with_client(&state, &access, &mutation, &id, &proof.identity, client()).await
+}
+
+pub(super) async fn remove_with_client(
+    state: &SharedState,
+    access: &MobileAccess,
+    mutation: &MutationGuard,
+    id: &str,
+    identity: &str,
+    connect: impl std::future::Future<Output = Result<HaMatterClient>>,
+) -> Response {
+    mutation.release();
+    let _operation = access.matter_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
+    let Ok((mut client, device)) = checked_device_with_client(state, id, identity, connect).await
+    else {
         return error(
             StatusCode::CONFLICT,
             "HA device identity changed or is unavailable",
         );
     };
+    if access.is_resetting() {
+        return unavailable();
+    }
     let outcome = client
         .command(
             "config/device_registry/remove_config_entry",
@@ -622,6 +693,10 @@ pub async fn remove(
         .catalog(&scope)
         .await
         .is_ok_and(|c| c.confirms_removal(&device));
+    let _guard = access.mutation_gate.lock().await;
+    if access.is_resetting() {
+        return unavailable();
+    }
     if !removed {
         return error(
             StatusCode::CONFLICT,
