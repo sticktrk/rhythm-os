@@ -40,6 +40,7 @@ class _CachedNodeState {
   final bool transitioning;
   final bool pendingDispatch;
   final RhythmMode? mode;
+  final RhythmMode? resolvedMode;
   final bool? powerFresh;
   final String? powerSource;
   final bool? lightsOn;
@@ -62,6 +63,7 @@ class _CachedNodeState {
     this.transitioning = false,
     this.pendingDispatch = false,
     this.mode,
+    this.resolvedMode,
     this.powerFresh,
     this.powerSource,
     this.lightsOn,
@@ -631,6 +633,7 @@ class RhythmConnection {
           state: node.state,
           transitioning: node.transitioning,
           pendingDispatch: node.pendingDispatch,
+          resolvedMode: node.profileSettings?.resolvedMode,
           powerFresh: node.powerFresh,
           powerSource: node.powerSource,
           lightsOn: node.lightsOn,
@@ -827,6 +830,7 @@ class RhythmConnection {
             cached.state != nodeState.state ||
             cached.transitioning != nodeState.transitioning ||
             cached.pendingDispatch != nodeState.pendingDispatch ||
+            cached.resolvedMode != nodeState.profileSettings?.resolvedMode ||
             cached.lightsOn != nodeState.lightsOn ||
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
@@ -851,6 +855,7 @@ class RhythmConnection {
             transitioning: nodeState.transitioning,
             pendingDispatch: nodeState.pendingDispatch,
             mode: nodeState.mode,
+            resolvedMode: nodeState.profileSettings?.resolvedMode,
             powerFresh: nextPowerFresh,
             powerSource: nextPowerSource,
             lightsOn: nodeState.lightsOn,
@@ -909,6 +914,7 @@ class RhythmConnection {
             transitioning: entry.value.transitioning,
             pendingDispatch: entry.value.pendingDispatch,
             mode: entry.value.mode,
+            resolvedMode: entry.value.resolvedMode,
             powerFresh: entry.value.powerFresh,
             powerSource: entry.value.powerSource,
             lightsOn: entry.value.lightsOn,
@@ -1136,6 +1142,11 @@ class RhythmConnection {
               transitioning: nodeState.transitioning,
               pendingDispatch: nodeState.pendingDispatch,
               mode: nodeState.mode,
+              // SSE may omit unchanged settings. An explicit settings object
+              // without this optional metadata clears the older cached value.
+              resolvedMode: nodeState.profileSettings == null
+                  ? existing?.resolvedMode
+                  : nodeState.profileSettings?.resolvedMode,
               powerFresh: nodeState.powerFresh ?? existing?.powerFresh,
               powerSource: nodeState.powerSource ?? existing?.powerSource,
               lightsOn: nodeState.lightsOn ?? existing?.lightsOn,
@@ -1192,6 +1203,7 @@ class RhythmConnection {
                 transitioning: cached.transitioning,
                 pendingDispatch: cached.pendingDispatch,
                 mode: cached.mode,
+                resolvedMode: cached.resolvedMode,
                 powerFresh: cached.powerFresh,
                 powerSource: cached.powerSource,
                 lightsOn: cached.lightsOn,
@@ -1230,6 +1242,7 @@ class RhythmConnection {
                 transitioning: entry.value.transitioning,
                 pendingDispatch: entry.value.pendingDispatch,
                 mode: entry.value.mode,
+                resolvedMode: entry.value.resolvedMode,
                 lightsOn: entry.value.lightsOn,
                 brightness: entry.value.brightness,
                 kelvin: entry.value.kelvin,
@@ -1504,6 +1517,9 @@ class RhythmConnection {
         pendingDispatch:
             (existing?.pendingDispatch ?? false) && state.pendingDispatch,
         mode: state.mode ?? existing?.mode,
+        resolvedMode: state.profileSettings == null
+            ? existing?.resolvedMode
+            : state.profileSettings?.resolvedMode,
         powerFresh: state.powerFresh ?? existing?.powerFresh,
         powerSource: state.powerSource ?? existing?.powerSource,
         lightsOn: state.lightsOn ?? existing?.lightsOn,

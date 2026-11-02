@@ -37,6 +37,10 @@ pub struct ObservedPowerDto {
 /// API representation of room profile settings with legacy mood fields resolved.
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomProfileSettingsDto {
+    /// Read-only schedule mode resolved by the appliance, including legacy
+    /// wall-clock schedules. Never persisted as a node preference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_mode: Option<RhythmMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
     pub mood_enabled: bool,
@@ -60,8 +64,19 @@ pub struct RoomProfileSettingsDto {
 }
 
 impl RoomProfileSettingsDto {
+    pub fn with_resolved_mode(
+        mut self,
+        settings: &RoomProfileSettings,
+        global_mode: RhythmMode,
+        local_hour: f32,
+    ) -> Self {
+        self.resolved_mode = Some(settings.schedule_mode(global_mode, local_hour));
+        self
+    }
+
     pub fn from_settings(settings: &RoomProfileSettings, mood_enabled: bool) -> Self {
         Self {
+            resolved_mode: None,
             profile_id: settings.profile_id.clone(),
             mood_enabled,
             mood_profile_id: settings.mood_profile_id.clone(),

@@ -75,6 +75,23 @@ The app and appliance release independently. Contract-changing work should cover
 
 Prefer additive fields with tolerant readers. Preserve unknown enum values when feasible. Gate new behavior on advertised capabilities or schema versions rather than version-string guesses.
 
+## Schedule-mode readback
+
+Node responses and node-state events include optional
+`profile_settings.resolved_mode` (`day` or `sleep`). The appliance derives it
+from effective inherited settings, named/unscheduled assignments, legacy
+wall-clock schedules and global mode using the same precedence as lighting.
+It is read-only metadata; `room_profile`, persisted settings and backups do not
+store it. The SDK exposes `RhythmNodeProfileSettings.resolvedMode` and excludes
+it from writable settings serialization.
+
+The app uses this readback to select the active curve for color-control
+availability, including fixed Sleep profiles under legacy schedules. Brightness
+remains independently adjustable. Missing or unknown readback retains the
+previous named/global-mode inference and unknown legacy-schedule fallback;
+clients must not infer appliance schedule mode from the phone clock. Older
+clients ignore the additive field. No migration or command semantics change.
+
 ## Journey correlation
 
 Reuse one external journey ID across app actions, HTTP `X-Request-Id`, BLE requests, OTA attempts, integration calls, activity records, and debug-bundle summaries when those layers participate in one user operation. Subsystems may keep native IDs, but record their relationship to the journey ID.
