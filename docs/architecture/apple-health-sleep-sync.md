@@ -41,10 +41,16 @@ the app never fabricates a missing bedtime or wake time.
 
 The source merges the existing authenticated `/api/history` (up to 2,000
 retained events) with owner/home/server/target-filtered Supabase activity.
+It snapshots the local upload buffer first, then reads cloud history, so an
+acknowledged upload cannot remove a Sleep/Wake event from both snapshots.
 Cloud reads paginate in stable timestamp/event order with a cutoff and a
 50,000-event bound. A failed/truncated cloud read contributes no partial pages;
-a successful local fallback is visibly partial. Failure differs from an empty
-history. Repeated full reads pick up delayed uploads without a fragile local
+a successful local fallback is visibly partial. Partial snapshots defer all
+Health writes until history recovers, so an omitted original Sleep cannot
+export a repeated press under a second sample identity. A local-only session
+without an expected cloud source can still export a successful local snapshot.
+Failure differs from an empty history. Repeated full reads pick up delayed
+uploads without a fragile local
 watermark. The existing database, RLS and retention policy are unchanged.
 
 ## Native and privacy contract
@@ -56,9 +62,12 @@ from completion of the permission request. It saves `inBed` samples in batches
 of at most 100 and acknowledges only the HealthKit save result.
 
 Each sample has a deterministic SHA-256 sync identifier derived from account,
-home, server, scope and starting event, and uses the completed interval's end
-epoch as its sync version. Replaying a successful or uncertain write uses the
-same identifier/version. HealthKit compares these keys when saving matching
+home, server, scope and starting event. Its sync version is the positive
+signed-64-bit complement of the interval's end epoch (`Int64.max - endEpochMs`).
+An earlier Wake discovered in delayed history therefore replaces a previously
+exported longer interval; later repeated Wakes cannot lengthen it. Replaying a
+successful or uncertain write uses the same identifier/version. HealthKit
+compares these keys when saving matching
 objects ([Apple sync identifier documentation](https://developer.apple.com/documentation/healthkit/hkmetadatakeysyncidentifier)).
 
 No Health samples are read into Rhythm. Analytics and support logs include

@@ -10,6 +10,22 @@ struct AppleHealthIntervalTests {
     let interval = try AppleHealthInterval.decode([row], now: now).first!
     precondition(interval.startEpochMs == start)
     precondition(interval.endEpochMs == start + 8 * 3600000)
+    var correctedRow = row
+    correctedRow["end_epoch_ms"] = start + 6 * 3600000
+    let corrected = try AppleHealthInterval.decode([correctedRow], now: now).first!
+    precondition(corrected.syncID == interval.syncID)
+    precondition(corrected.syncVersion > interval.syncVersion,
+      "An earlier retained Wake must replace the previously exported longer interval")
+    precondition(NSNumber(value: corrected.syncVersion).compare(
+      NSNumber(value: interval.syncVersion)) == .orderedDescending)
+    let retried = try AppleHealthInterval.decode([correctedRow], now: now).first!
+    precondition(retried.syncVersion == corrected.syncVersion)
+    var adjacentRow = correctedRow
+    adjacentRow["end_epoch_ms"] = corrected.endEpochMs - 1
+    let adjacent = try AppleHealthInterval.decode([adjacentRow], now: now).first!
+    precondition(NSNumber(value: adjacent.syncVersion).compare(
+      NSNumber(value: corrected.syncVersion)) == .orderedDescending,
+      "NSNumber must preserve adjacent-millisecond correction ordering")
     let invalidFields: [(String, Any)] = [("sync_id", "private-source"),
       ("start_epoch_ms", true), ("start_epoch_ms", 1.5),
       ("start_epoch_ms", start + 9 * 3600000), ("end_epoch_ms", start + 25 * 3600000),

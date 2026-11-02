@@ -2,11 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/apple_health_service.dart';
+import 'package:rhythm_app/services/apple_health_history_source.dart';
 import 'package:rhythm_app/services/apple_health_sync_controller.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/fake_apple_health_writer.dart';
+import '../helpers/capturing_analytics_backend.dart';
 
 const scope = AppleHealthScope(
     accountId: 'owner', homeId: 'home', serverId: 'box', nodeId: 'bedroom');
@@ -81,6 +85,161 @@ void main() {
     expect(writer.calls.last.single['sync_id'], isNot(contains('owner')));
   });
 
+  test(
+      'a Wake crossing cloud and local reads corrects Health after lost acknowledgement and restart',
+      () async {
+    var firstWakeUploaded = false;
+    final firstWake = RhythmActivityEvent(
+        id: 'first-wake',
+        nodeId: 'bedroom',
+        actionId: 'sleep_off',
+        epochMs: start + 6 * 3600000,
+        source: events.last.source);
+    Map<String, dynamic> cloudRow(RhythmActivityEvent event) => {
+          'event_id': event.id,
+          'node_id': event.nodeId,
+          'action_id': event.actionId,
+          'epoch_ms': event.epochMs,
+          'source_kind': event.source.kind,
+        };
+    final source = AppleHealthHistorySource(
+      // The first Wake uploads after this cloud read and is drained before
+      // the following local read. The repeated Wake remains local.
+      cloudPage: (_, __, ___) async => [
+        cloudRow(events.first),
+        if (firstWakeUploaded) cloudRow(firstWake),
+      ],
+      localHistory: (_) async => RhythmHistory(activities: [events.last]),
+    );
+    load = () => source.load(scope, start + 10 * 3600000);
+    await controller.enable(scope);
+    final id = writer.samples.keys.single;
+    expect(writer.samples[id]!['end_epoch_ms'], start + 8 * 3600000);
+
+    firstWakeUploaded = true;
+    writer.failAfterSave = true;
+    await controller.sync();
+    expect(controller.status, AppleHealthSyncStatus.failed);
+    expect(writer.samples.keys.single, id);
+    expect(writer.samples[id]!['end_epoch_ms'], firstWake.epochMs);
+
+    controller.dispose();
+    controller = create();
+    writer.failAfterSave = false;
+    await controller.sync();
+    await controller.sync();
+    expect(controller.status, AppleHealthSyncStatus.synced);
+    expect(writer.samples, hasLength(1));
+    expect(writer.samples[id]!['end_epoch_ms'], firstWake.epochMs);
+    expect(writer.calls[1].single, writer.calls[2].single);
+
+    // A later incomplete snapshot cannot lengthen the corrected interval.
+    firstWakeUploaded = false;
+    await controller.sync();
+    expect(writer.samples[id]!['end_epoch_ms'], firstWake.epochMs);
+  });
+
+  test('upload during history reads preserves the original Sleep identity',
+      () async {
+    final firstSleep = events.first;
+    final repeatedSleep = RhythmActivityEvent(
+        id: 'repeat-sleep',
+        nodeId: 'bedroom',
+        actionId: 'sleep_on',
+        epochMs: start + 3600000,
+        source: firstSleep.source);
+    final cloud = <RhythmActivityEvent>[];
+    final local = [firstSleep, repeatedSleep, events.last];
+    final source = AppleHealthHistorySource(
+      cloudPage: (_, __, ___) async {
+        final snapshot = [
+          for (final event in cloud)
+            {
+              'event_id': event.id,
+              'node_id': event.nodeId,
+              'action_id': event.actionId,
+              'epoch_ms': event.epochMs,
+              'source_kind': event.source.kind,
+            }
+        ];
+        // Server upload acknowledgement drains this event between reads.
+        if (local.remove(firstSleep)) cloud.add(firstSleep);
+        return snapshot;
+      },
+      localHistory: (_) async => RhythmHistory(activities: [...local]),
+    );
+    load = () => source.load(scope, start + 10 * 3600000);
+    await controller.enable(scope);
+    expect(writer.samples.values.single['start_epoch_ms'], firstSleep.epochMs);
+    final identifier = writer.samples.keys.single;
+    await controller.sync();
+    expect(writer.samples, hasLength(1));
+    expect(writer.samples.keys.single, identifier);
+  });
+
+  test('partial local fallback cannot export a provisional repeated Sleep',
+      () async {
+    final backend = CapturingAnalyticsBackend();
+    await backend.initialize();
+    BackendProvider.setInstanceForTesting(
+        auth: OfflineAuthBackend(), analytics: backend);
+    final analytics = AnalyticsService()..resetForTesting();
+    await analytics.initialize();
+    addTearDown(() {
+      analytics.resetForTesting();
+      BackendProvider.resetForTesting();
+    });
+    var cloudAvailable = false;
+    final repeatedSleep = RhythmActivityEvent(
+        id: 'repeat-sleep',
+        nodeId: 'bedroom',
+        actionId: 'sleep_on',
+        epochMs: start + 3600000,
+        source: events.first.source);
+    final source = AppleHealthHistorySource(
+      cloudPage: (_, __, ___) async {
+        if (!cloudAvailable) throw StateError('cloud unavailable');
+        return [
+          {
+            'event_id': events.first.id,
+            'node_id': events.first.nodeId,
+            'action_id': events.first.actionId,
+            'epoch_ms': events.first.epochMs,
+            'source_kind': events.first.source.kind,
+          }
+        ];
+      },
+      localHistory: (_) async =>
+          RhythmHistory(activities: [repeatedSleep, events.last]),
+    );
+    load = () => source.load(scope, start + 10 * 3600000);
+    await controller.enable(scope);
+    expect(controller.status, AppleHealthSyncStatus.partial);
+    expect(writer.samples, isEmpty);
+    expect(backend.events.last.properties['outcome'], 'partial');
+    expect(backend.events.last.properties['failure_stage'], 'history');
+    cloudAvailable = true;
+    await controller.sync();
+    expect(controller.status, AppleHealthSyncStatus.synced);
+    expect(writer.samples, hasLength(1));
+    expect(writer.samples.values.single['start_epoch_ms'], start);
+  });
+
+  test('successful local-only history still exports without a cloud source',
+      () async {
+    const localScope = AppleHealthScope(
+        accountId: 'local', homeId: 'home', serverId: 'box', nodeId: 'bedroom');
+    environment = localScope;
+    final source = AppleHealthHistorySource(
+        cloudPage: (_, __, ___) async =>
+            throw StateError('Local session must not query cloud'),
+        localHistory: (_) async => RhythmHistory(activities: events));
+    load = () => source.load(localScope, start + 10 * 3600000);
+    await controller.enable(localScope);
+    expect(controller.status, AppleHealthSyncStatus.synced);
+    expect(writer.samples, hasLength(1));
+  });
+
   test('permission denial does not enable; later revocation never writes',
       () async {
     writer.state = AppleHealthAuthorization.denied;
@@ -109,6 +268,10 @@ void main() {
         () async => AppleHealthHistorySnapshot(events: events, partial: true);
     await controller.sync();
     expect(controller.status, AppleHealthSyncStatus.partial);
+    expect(writer.samples, isEmpty);
+    load = () async => AppleHealthHistorySnapshot(events: events);
+    await controller.sync();
+    expect(controller.status, AppleHealthSyncStatus.synced);
     expect(writer.samples, hasLength(1));
   });
 

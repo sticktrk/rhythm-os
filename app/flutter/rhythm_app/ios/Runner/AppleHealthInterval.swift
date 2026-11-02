@@ -6,6 +6,12 @@ struct AppleHealthInterval {
   let startEpochMs: Int64
   let endEpochMs: Int64
 
+  // For one Sleep-event identity, the first valid Wake is authoritative.
+  // Late history may shorten an exported interval. HealthKit only replaces
+  // matching samples with a greater version, so invert the positive timestamp.
+  // Int64/NSNumber preserves millisecond precision and identical retries.
+  var syncVersion: Int64 { Int64.max - endEpochMs }
+
   static func decode(_ value: Any?, now: Date = Date()) throws -> [AppleHealthInterval] {
     guard let rows = value as? [[String: Any]], !rows.isEmpty, rows.count <= 100 else {
       throw InvalidInterval.invalid

@@ -298,6 +298,14 @@ class AppleHealthSyncController extends ChangeNotifier
       final cutoff = now().millisecondsSinceEpoch;
       final snapshot = await loadHistory(selected, cutoff);
       if (!_canComplete(generation, selected, journey)) return;
+      if (snapshot.partial) {
+        // A missing earlier Sleep could make a repeated press look like the
+        // start and permanently export a different sample identity. Retry a
+        // complete snapshot before sending any provisional interval to Health.
+        _setStatus(AppleHealthSyncStatus.partial);
+        _outcome(journey, 'partial', 'history');
+        return;
+      }
       final intervals = RhythmSleepInterval.fromActivity(snapshot.events,
           nodeId: selected.nodeId, nowEpochMs: cutoff);
       stage = 'health_write';
@@ -322,13 +330,10 @@ class AppleHealthSyncController extends ChangeNotifier
         await writer.saveIntervals(batch).timeout(const Duration(seconds: 30));
       }
       if (!_canComplete(generation, selected, journey)) return;
-      _setStatus(snapshot.partial
-          ? AppleHealthSyncStatus.partial
-          : intervals.isEmpty
-              ? AppleHealthSyncStatus.empty
-              : AppleHealthSyncStatus.synced);
-      _outcome(journey, snapshot.partial ? 'partial' : 'succeeded',
-          snapshot.partial ? 'history' : 'none');
+      _setStatus(intervals.isEmpty
+          ? AppleHealthSyncStatus.empty
+          : AppleHealthSyncStatus.synced);
+      _outcome(journey, 'succeeded', 'none');
     } catch (_) {
       if (!_canComplete(generation, selected, journey)) return;
       _setStatus(stage == 'history'

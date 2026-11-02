@@ -8,6 +8,11 @@ class FakeAppleHealthWriter implements AppleHealthWriter {
   final calls = <List<Map<String, Object>>>[];
   final samples = <String, Map<String, Object>>{};
 
+  // HealthKit replaces an existing sync identifier only for a greater version.
+  // Keep the native version projection covered by AppleHealthIntervalTests.swift.
+  int version(Map<String, Object> interval) =>
+      0x7fffffffffffffff - (interval['end_epoch_ms'] as int);
+
   @override
   Future<AppleHealthAuthorization> authorization() async => state;
   @override
@@ -20,7 +25,11 @@ class FakeAppleHealthWriter implements AppleHealthWriter {
   Future<void> saveIntervals(List<Map<String, Object>> intervals) async {
     calls.add(intervals);
     for (final interval in intervals) {
-      samples[interval['sync_id'] as String] = interval;
+      final id = interval['sync_id'] as String;
+      final previous = samples[id];
+      if (previous == null || version(interval) > version(previous)) {
+        samples[id] = interval;
+      }
     }
     if (failAfterSave) throw StateError('simulated lost acknowledgement');
   }

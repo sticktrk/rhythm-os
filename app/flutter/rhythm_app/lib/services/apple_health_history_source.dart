@@ -41,6 +41,19 @@ class AppleHealthHistorySource {
     final events = <RhythmActivityEvent>[];
     var succeeded = false;
     var partial = false;
+    // Snapshot the local upload buffer before cloud history. An upload may
+    // drain local events after its acknowledgement; this order retains them
+    // even when that upload becomes visible after the cloud query begins.
+    if (localHistory != null) {
+      try {
+        events.addAll(
+            (await localHistory!(scope).timeout(const Duration(seconds: 15)))
+                .activities);
+        succeeded = true;
+      } catch (_) {
+        partial = true;
+      }
+    }
     if (cloudPage != null && scope.accountId != 'local') {
       final retained = <RhythmActivityEvent>[];
       try {
@@ -65,16 +78,6 @@ class AppleHealthHistorySource {
         }
       } catch (_) {
         // Do not project partially loaded cloud pages across missing boundaries.
-        partial = true;
-      }
-    }
-    if (localHistory != null) {
-      try {
-        events.addAll(
-            (await localHistory!(scope).timeout(const Duration(seconds: 15)))
-                .activities);
-        succeeded = true;
-      } catch (_) {
         partial = true;
       }
     }

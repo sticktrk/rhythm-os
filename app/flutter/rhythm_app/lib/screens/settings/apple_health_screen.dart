@@ -154,7 +154,7 @@ class _AppleHealthControlsState extends State<AppleHealthControls> {
       AppleHealthSyncStatus.offline =>
         'Button history is unavailable. Reconnect and try again.',
       AppleHealthSyncStatus.partial =>
-        'Available history synced. Some history could not be loaded; reconnect and sync again.',
+        'Some history could not be loaded. Sync is waiting for complete history; reconnect and try again.',
       AppleHealthSyncStatus.failed =>
         'Sync could not complete. Unlock your iPhone and try again.',
     };

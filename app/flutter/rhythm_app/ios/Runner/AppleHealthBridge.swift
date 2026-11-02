@@ -44,7 +44,7 @@ final class AppleHealthBridge {
           start: Date(timeIntervalSince1970: Double(interval.startEpochMs) / 1000),
           end: Date(timeIntervalSince1970: Double(interval.endEpochMs) / 1000),
           metadata: [HKMetadataKeySyncIdentifier: interval.syncID,
-            HKMetadataKeySyncVersion: NSNumber(value: interval.endEpochMs),
+            HKMetadataKeySyncVersion: NSNumber(value: interval.syncVersion),
             HKMetadataKeyTimeZone: "UTC"])
       }
       inFlight = true
