@@ -567,6 +567,9 @@ fn worker_apply_node_command_updates_cached_power() {
             command: LightingCommand::with_transition(77, 3600, 250),
             dispatch_spacing: Duration::ZERO,
             dispatch_generation: generation,
+            provenance: rhythm_os::state::NodeOutputProvenance::Mode {
+                preserve_home_scene: false,
+            },
         },
     );
 

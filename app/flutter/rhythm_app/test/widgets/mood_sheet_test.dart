@@ -173,6 +173,46 @@ void main() {
     expect(selectedBrightness, 43);
   });
 
+  testWidgets(
+      'reapplying a scene enables its previously unavailable brightness',
+      (tester) async {
+    final scene = _scene('evening-glow');
+    const guidance = 'Reapply the scene to enable brightness adjustment.';
+    String? unavailableReason = guidance;
+    int? committedBrightness;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MoodSheet(
+          initialTab: MoodTab.scenes,
+          initialSceneId: scene.id,
+          initialBrightness: 64,
+          initialScenes: [scene],
+          scenesLoader: () async => [scene],
+          brightnessUnavailableReason: () => unavailableReason,
+          onBrightnessChanged: (brightness) => committedBrightness = brightness,
+          onColorChanged: (_, __) {},
+          onSceneSelected: (_, __) async {
+            unavailableReason = null;
+            return true;
+          },
+        ),
+      ),
+    ));
+    await tester.pump(const Duration(milliseconds: 700));
+    final sliderFinder = find.byKey(const Key('mood_brightness_slider'));
+    expect(tester.widget<Slider>(sliderFinder).onChanged, isNull);
+    expect(find.text(guidance), findsOneWidget);
+    expect(committedBrightness, isNull);
+
+    await tester.tap(find.byKey(const Key('mood_scene_evening-glow')));
+    await tester.pump();
+    expect(find.text(guidance), findsNothing);
+    tester.widget<Slider>(sliderFinder).onChanged!(43);
+    await tester.pump();
+    tester.widget<Slider>(sliderFinder).onChangeEnd!(43);
+    expect(committedBrightness, 43);
+  });
+
   testWidgets('choosing a color clears the active scene selection',
       (tester) async {
     final scene = _scene('evening-glow');

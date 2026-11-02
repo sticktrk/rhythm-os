@@ -105,6 +105,11 @@ pub trait RuntimeHandle: Send + Sync {
     /// Update the solar time parameters.
     fn set_solar(&self, solar: SolarTime) -> Result<()>;
 
+    /// Update the local clock used by action-driven lighting calculations.
+    fn set_timezone(&self, _timezone_name: Option<&str>, _utc_offset_hours: f32) -> Result<()> {
+        Ok(())
+    }
+
     /// Update the current day's sunrise/sunset times.
     fn set_sun_times(&self, _sun_times: SunTimes) -> Result<()> {
         Ok(())
@@ -604,6 +609,11 @@ where
     fn set_solar(&self, solar: SolarTime) -> Result<()> {
         // Inherent sync method — same name is fine, inherent takes priority.
         Ok(RhythmRuntime::set_solar(self, solar)?)
+    }
+
+    fn set_timezone(&self, timezone_name: Option<&str>, utc_offset_hours: f32) -> Result<()> {
+        RhythmRuntime::set_timezone(self, timezone_name, utc_offset_hours);
+        Ok(())
     }
 
     fn set_sun_times(&self, sun_times: SunTimes) -> Result<()> {

@@ -1248,6 +1248,49 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.homeSceneApply) == true;
 
+  bool get supportsSceneBrightness =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.sceneBrightness) == true;
+
+  /// Provider scenes have no editable Rhythm definition. Recalling them again
+  /// cannot enable the stored-scene brightness contract.
+  bool sceneBrightnessUnsupported(String nodeId) =>
+      moodSceneIdForRoom(sceneBrightnessOwnerForNode(nodeId))
+          ?.startsWith('native-') ==
+      true;
+
+  /// An active whole-home parent owns brightness even when a child has its
+  /// own saved scene or mode override. Older appliances keep their old routes.
+  String sceneBrightnessOwnerForNode(String nodeId) {
+    final parentId =
+        nodeById(nodeId)?.parentId ?? topologyNodeById(nodeId)?.parentId;
+    return parentId != null && _hasActiveWholeHomeBinding(parentId)
+        ? parentId
+        : nodeId;
+  }
+
+  bool _hasActiveWholeHomeBinding(String id) {
+    final node = nodeById(id);
+    final settings = node?.profileSettings;
+    return supportsSceneBrightness &&
+        !_optimisticMoodSceneIds.containsKey(id) &&
+        settings?.moodSceneId != null &&
+        settings!.raw['mood_scene_palette_span'] != null &&
+        (_roomProvider.getDisplayRoomState(id) == RoomModeState.mood ||
+            node?.moodActive == true);
+  }
+
+  /// Old whole-home bindings cannot say whether colors were grouped or per
+  /// light. A fresh apply on the supporting server establishes that authority.
+  bool sceneBrightnessNeedsReapply(String nodeId) {
+    final ownerId = sceneBrightnessOwnerForNode(nodeId);
+    if (_optimisticMoodSceneIds.containsKey(ownerId)) return false;
+    final settings = nodeById(ownerId)?.profileSettings;
+    return settings?.moodSceneId != null &&
+        settings!.raw['mood_scene_palette_span'] != null &&
+        settings.raw['mood_scene_device_mode'] == null;
+  }
+
   /// Device-health review is additive and must fail closed for older
   /// appliances so the app never probes routes they do not own.
   bool get matterUnreachableDeviceTriageSupported =>
@@ -1624,6 +1667,12 @@ class ServerSyncProvider extends ChangeNotifier {
         _capabilities?.supportsFeature(RhythmFeature.sceneMotionSuppression) ==
             true;
     if (!supported) return false;
+    // A child's custom Mood binding can mask the parent's whole-home metadata.
+    // The parent still owns scene output until it leaves that scene.
+    final parentId =
+        nodeById(nodeId)?.parentId ?? topologyNodeById(nodeId)?.parentId;
+    if (parentId != null && _hasActiveWholeHomeBinding(parentId)) return true;
+    if (_hasActiveWholeHomeBinding(nodeId)) return true;
     if (moodSceneIdForRoom(nodeId) == null) return false;
     return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
         nodeById(nodeId)?.moodActive == true;
@@ -2539,12 +2588,21 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Raw physical input events forwarded by the server.
   Stream<RhythmInputEvent> get inputEvents => _connection.inputEvents;
 
-  /// The server API client (available after connect).
-  CloudBackedServerApi get api => CloudBackedServerApi(
-        delegate: HueServiceLocator.isDemoMode
-            ? DemoServerApi.instance
-            : _connection.api,
-      );
+  RhythmServerApi? _apiDelegate;
+  CloudBackedServerApi? _apiWrapper;
+
+  /// Keep one wrapper per SDK client so rebuilds do not restart device reads.
+  /// Resolve the delegate first: disconnects must still throw, and reconnects
+  /// or demo transitions must never reuse the previous client's wrapper.
+  CloudBackedServerApi get api {
+    final delegate =
+        HueServiceLocator.isDemoMode ? DemoServerApi.instance : _connection.api;
+    if (!identical(_apiDelegate, delegate)) {
+      _apiDelegate = delegate;
+      _apiWrapper = CloudBackedServerApi(delegate: delegate);
+    }
+    return _apiWrapper!;
+  }
 
   ServerSyncProvider({
     required RhythmConnection connection,
@@ -4481,7 +4539,8 @@ class ServerSyncProvider extends ChangeNotifier {
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeCurveBrightness(roomId, brightness);
 
-  /// Apply curve brightness modifiers to several nodes in one batch.
+  /// Set brightness on several nodes in one batch. Supporting servers preserve
+  /// bound Mood scenes; adaptive states continue to use curve modifiers.
   ///
   /// Returns the server's dispatch metadata and states, or null when the
   /// request cannot be sent. Demo mode preserves the single-node simulation

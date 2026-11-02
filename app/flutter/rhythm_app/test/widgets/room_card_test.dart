@@ -1038,6 +1038,7 @@ void main() {
     Map<String, dynamic> helloNode({
       required bool sceneActive,
       String sceneId = 'evening-glow',
+      bool wholeHomeBinding = false,
     }) =>
         {
           'id': 'room-1',
@@ -1058,6 +1059,7 @@ void main() {
           'profile_settings': {
             'motion_activation_enabled': true,
             'mood_scene_id': sceneId,
+            if (wholeHomeBinding) 'mood_scene_palette_span': 3,
           },
         };
 
@@ -1184,6 +1186,119 @@ void main() {
             .hasAction(SemanticsAction.tap),
         isTrue,
       );
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [
+              RhythmFeature.sceneMotionSuppression,
+              RhythmFeature.sceneBrightness,
+            ],
+            'hubs': <dynamic>[],
+          },
+          'nodes': [
+            helloNode(
+              sceneActive: true,
+              sceneId: generatedSceneId,
+              wholeHomeBinding: true,
+            ),
+          ],
+        }),
+      );
+      await tester.pump();
+      expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+      expect(serverSync.motionSuppressedByActiveSceneForNode('room-1'), isTrue);
+      expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
+      expect(tester.getSemantics(motion).label,
+          'Motion paused while a Scene is active in Kitchen');
+      final screenshotPath =
+          Platform.environment['RHYTHM_HOME_SCENE_MOTION_SCREENSHOT'];
+      if (screenshotPath != null && screenshotPath.isNotEmpty) {
+        await expectLater(
+          find.byType(RoomCard),
+          matchesGoldenFile(Uri.file(screenshotPath)),
+        );
+      }
+    }
+
+    for (final fixture in [
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'mood',
+        expected: true
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'off',
+        expected: true
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: true,
+        childState: 'active',
+        expected: true
+      ),
+      (
+        parentActive: false,
+        wholeHome: true,
+        supported: true,
+        childState: 'mood',
+        expected: false
+      ),
+      (
+        parentActive: true,
+        wholeHome: false,
+        supported: true,
+        childState: 'mood',
+        expected: false
+      ),
+      (
+        parentActive: true,
+        wholeHome: true,
+        supported: false,
+        childState: 'mood',
+        expected: false
+      ),
+    ]) {
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [
+            RhythmFeature.sceneMotionSuppression,
+            if (fixture.supported) RhythmFeature.sceneBrightness,
+          ],
+          'hubs': <dynamic>[],
+        },
+        'nodes': [
+          helloNode(
+            sceneActive: fixture.parentActive,
+            sceneId: 'node-mood-scene-room-1',
+            wholeHomeBinding: fixture.wholeHome,
+          ),
+          {
+            ...helloNode(
+                sceneActive: fixture.childState == 'mood',
+                sceneId: 'node-mood-scene-light-1'),
+            'id': 'light-1',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': fixture.childState,
+            'device_ids': ['light-1'],
+            'devices': <dynamic>[],
+          },
+        ],
+      }));
+      await tester.pump();
+      expect(serverSync.motionActivationEnabledForNode('light-1'), isTrue);
+      expect(serverSync.motionSuppressedByActiveSceneForNode('light-1'),
+          fixture.expected,
+          reason:
+              'parent whole-home ownership must survive child state: $fixture');
     }
 
     connection.emitHello(
@@ -3890,6 +4005,209 @@ void main() {
     expect(call.brightness, 6);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
   });
+
+  for (final kind in ['room', 'light_device']) {
+    testWidgets('$kind scene brightness explains unavailable bindings',
+        (tester) async {
+      final screenshotPath =
+          Platform.environment['RHYTHM_SCENE_BRIGHTNESS_GUARD_SCREENSHOT'];
+      if (screenshotPath != null && kind == 'room') {
+        await tester.binding.setSurfaceSize(const Size(390, 844));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+      }
+      final roomProvider = RoomProvider();
+      final connection = _TestRhythmConnection();
+      final serverSync = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _FakeHomeProvider(),
+      );
+      addTearDown(roomProvider.dispose);
+      addTearDown(serverSync.dispose);
+      addTearDown(connection.dispose);
+
+      void emitBinding({
+        bool supported = true,
+        bool legacy = true,
+        String sceneId = 'halloween',
+        String nodeState = 'mood',
+        bool? parentLegacy,
+        bool parentActive = true,
+      }) {
+        connection.emitHello(RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [if (supported) RhythmFeature.sceneBrightness],
+            'hubs': <dynamic>[],
+          },
+          'nodes': [
+            if (parentLegacy != null)
+              {
+                'id': 'party-room',
+                'name': 'Party Room',
+                'kind': 'room',
+                'hub_types': ['hue'],
+                'state': parentActive ? 'mood' : 'active',
+                'mood_active': parentActive,
+                'rhythm_enabled': true,
+                'lights_on': true,
+                'brightness': 70,
+                'profile_settings': {
+                  'mood_scene_id': 'halloween',
+                  'mood_scene_palette_span': 3,
+                  if (!parentLegacy) 'mood_scene_device_mode': true,
+                },
+              },
+            {
+              'id': 'room-1',
+              'name': 'Party Light',
+              'kind': kind,
+              if (parentLegacy != null) 'parent_id': 'party-room',
+              'hub_types': ['hue'],
+              'state': nodeState,
+              'mood_active': nodeState == 'mood',
+              'rhythm_enabled': true,
+              'lights_on': true,
+              'brightness': 70,
+              'profile_settings': {
+                'mood_scene_id': sceneId,
+                'mood_scene_palette_span': 3,
+                if (!legacy) 'mood_scene_device_mode': true,
+              },
+            },
+          ],
+        }));
+      }
+
+      emitBinding();
+      await tester.pump();
+      await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(roomId: 'room-1', globalConfig: defaultCurveConfig),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      const reapply = 'Reapply the scene to enable brightness adjustment.';
+      expect(find.text(reapply), findsOneWidget);
+      var slider = tester.widget<Slider>(_sceneBrightnessSlider());
+      expect(slider.onChanged, isNull);
+      expect(slider.onChangeEnd, isNull);
+      expect(slider.value, 70);
+      expect(connection.api.nodeBrightnessCalls, isEmpty);
+      if (screenshotPath != null && kind == 'room') {
+        await expectLater(
+          find.byType(RoomCard),
+          matchesGoldenFile(Uri.file(screenshotPath)),
+        );
+      }
+
+      await _tapRoomSegment(tester, 'Scenes');
+      await tester.pump();
+      final pickerSlider = tester
+          .widget<Slider>(find.byKey(const Key('mood_brightness_slider')));
+      expect(pickerSlider.onChanged, isNull);
+      expect(pickerSlider.onChangeEnd, isNull);
+      expect(find.text(reapply), findsWidgets);
+      Navigator.of(tester.element(find.byType(MoodSheet))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      emitBinding(legacy: false);
+      await tester.pump();
+      expect(find.text(reapply), findsNothing);
+      slider = tester.widget<Slider>(_sceneBrightnessSlider());
+      expect(slider.onChanged, isNotNull);
+      expect(slider.onChangeEnd, isNotNull);
+      expect(connection.api.nodeBrightnessCalls, isEmpty);
+
+      emitBinding(sceneId: 'native-hue-party', legacy: false);
+      await tester.pump();
+      expect(find.text('To adjust brightness here, choose a Rhythm scene.'),
+          findsOneWidget);
+      expect(tester.widget<Slider>(_sceneBrightnessSlider()).onChanged, isNull);
+
+      emitBinding(supported: false);
+      await tester.pump();
+      expect(find.text(reapply), findsNothing);
+      expect(
+          tester.widget<Slider>(_sceneBrightnessSlider()).onChanged, isNotNull,
+          reason: 'older appliances retain their existing brightness route');
+
+      emitBinding(sceneId: 'native-hue-party', nodeState: 'active');
+      await tester.pump();
+      expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+      if (_brightnessSlider().evaluate().isEmpty) {
+        await _tapRoomSegment(tester, 'Brightness');
+      }
+      expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull,
+          reason: 'inactive saved scenes do not restrict Active brightness');
+      expect(find.text(reapply), findsNothing);
+      expect(find.text('To adjust brightness here, choose a Rhythm scene.'),
+          findsNothing);
+
+      if (kind == 'light_device') {
+        const parentReapply =
+            'Reapply the whole-home scene from All Rooms to adjust this light.';
+        for (final childScene in [
+          'node-mood-scene-room-1',
+          'native-hue-party'
+        ]) {
+          for (final childState in ['mood', 'active']) {
+            emitBinding(
+                sceneId: childScene, nodeState: childState, parentLegacy: true);
+            await tester.pump();
+            final sliderFinder = childState == 'mood'
+                ? _sceneBrightnessSlider()
+                : _brightnessSlider();
+            if (sliderFinder.evaluate().isEmpty) {
+              await _tapRoomSegment(tester, 'Brightness');
+            }
+            expect(
+                serverSync.sceneBrightnessOwnerForNode('room-1'), 'party-room');
+            expect(serverSync.sceneBrightnessNeedsReapply('room-1'), isTrue);
+            expect(serverSync.sceneBrightnessUnsupported('room-1'), isFalse);
+            expect(find.text(parentReapply), findsOneWidget);
+            expect(tester.widget<Slider>(sliderFinder).onChanged, isNull);
+
+            emitBinding(
+                sceneId: childScene,
+                nodeState: childState,
+                parentLegacy: false);
+            await tester.pump();
+            expect(serverSync.sceneBrightnessNeedsReapply('room-1'), isFalse);
+            expect(serverSync.sceneBrightnessUnsupported('room-1'), isFalse);
+            expect(find.text(parentReapply), findsNothing);
+            expect(tester.widget<Slider>(sliderFinder).onChanged, isNotNull);
+          }
+        }
+
+        // Resetting the parent releases its ownership. An ordinary Active
+        // child stays adjustable despite inactive saved scene metadata.
+        emitBinding(
+            sceneId: 'native-hue-party',
+            nodeState: 'active',
+            parentLegacy: true,
+            parentActive: false);
+        await tester.pump();
+        expect(serverSync.sceneBrightnessOwnerForNode('room-1'), 'room-1');
+        expect(find.text(parentReapply), findsNothing);
+        final activeSlider = tester.widget<Slider>(_brightnessSlider());
+        activeSlider.onChanged!(38);
+        await tester.pump();
+        tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(38);
+        await tester.pump();
+        expect(connection.api.nodeCurveBrightnessCalls,
+            [(nodeId: 'room-1', brightness: 38)]);
+      }
+    });
+  }
 
   testWidgets('active Scenes reset restores the configured mode default',
       (tester) async {

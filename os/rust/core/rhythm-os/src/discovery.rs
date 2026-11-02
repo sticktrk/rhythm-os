@@ -92,6 +92,13 @@ pub trait HubDiscovery: Send + Sync {
         true
     }
 
+    /// Whether passive rediscovery may reactivate a retained device archive.
+    /// Commissioning-owned integrations can require explicit pairing instead,
+    /// so a transport inventory cannot restore discarded application settings.
+    fn restores_archived_devices(&self) -> bool {
+        true
+    }
+
     /// Discover all rooms from the hub.
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>>;
 

@@ -810,6 +810,15 @@ fn sync_with_discovery(
                 }
 
                 for identity in &identities {
+                    // Check current canonical state under the same lock as
+                    // resolution: discovery may overlap pairing finalization.
+                    if !discovery.restores_archived_devices()
+                        && s.canonical_registry
+                            .find_by_native_id(&canonical_hub_key, &identity.native_id)
+                            .is_some_and(|device| device.is_removed())
+                    {
+                        continue;
+                    }
                     if identity.device_type == DeviceType::Light {
                         if let Some(hub_room_id) = identity.room_id.as_ref() {
                             room_light_device_ids

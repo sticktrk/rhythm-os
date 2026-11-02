@@ -523,6 +523,7 @@ class AnalyticsService {
     required int attemptedCount,
     required int completedCount,
     required String outcome,
+    int? sceneRoomCount,
   }) async {
     await logEvent('global_room_action_completed', {
       'journey_id': journeyId,
@@ -531,6 +532,7 @@ class AnalyticsService {
       'attempted_count': attemptedCount,
       'completed_count': completedCount,
       'outcome': outcome,
+      if (sceneRoomCount != null) 'scene_room_count': sceneRoomCount,
     });
   }
 
@@ -1413,6 +1415,26 @@ class AnalyticsService {
       'attempt_number': attemptNumber,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Measure local Monster removal without device identity or raw failures.
+  Future<void> logMonsterDeviceRemoval({
+    required String journeyId,
+    required String stage,
+    String? outcome,
+  }) async {
+    if (!const {'confirmation', 'attempt', 'completed'}.contains(stage)) {
+      return;
+    }
+    if (stage == 'completed' &&
+        !const {'succeeded', 'failed', 'cancelled'}.contains(outcome)) {
+      return;
+    }
+    await logEvent('monster_device_removal', {
+      'journey_id': journeyId,
+      'stage': stage,
+      if (stage == 'completed') 'outcome': outcome!,
     });
   }
 

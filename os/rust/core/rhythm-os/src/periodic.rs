@@ -82,6 +82,8 @@ pub fn classify_tick_latency(elapsed: Duration) -> TickLatencyOutcome {
 enum PeriodicTimeCheckResult {
     Seeded,
     Continuous {
+        /// Previous observation expressed using the current UTC offset, so
+        /// crossing checks compare both samples in the same local clock.
         last_hour: f32,
     },
     Discontinuous {
@@ -1043,12 +1045,37 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         };
         if let Some(runtime) = runtime {
             for (idx, node) in periodic_nodes.iter().enumerate() {
+                let arbitration = match state.lock() {
+                    Ok(s) => s.motion_scene_transaction_lock.clone(),
+                    Err(_) => return update_interval,
+                };
+                let Ok(guard) = arbitration.read() else {
+                    return update_interval;
+                };
+                let scene_held = state.lock().ok().is_some_and(|s| {
+                    crate::commands::active_whole_home_scene_owner(
+                        &s,
+                        runtime.as_ref(),
+                        &node.settings_node_id,
+                    )
+                    .is_some()
+                        || crate::commands::active_whole_home_scene_owner(
+                            &s,
+                            runtime.as_ref(),
+                            &node.emit_node_id,
+                        )
+                        .is_some()
+                });
+                if scene_held || !light_dispatch_generation_current(&state, dispatch_generation) {
+                    continue;
+                }
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let started = Instant::now();
-                if crate::commands::reconcile_room_schedule_before_tick(
+                if crate::commands::reconcile_room_schedule_before_tick_inner(
                     &state,
                     &node.emit_node_id,
                     room_hour,
+                    true,
                 )
                 .is_err()
                 {
@@ -1096,6 +1123,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                     post_tick_node(&state, &runtime, &node.emit_node_id);
                 }
                 if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
+                    drop(guard);
                     thread::sleep(phase_gap);
                 }
             }
@@ -1126,12 +1154,17 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             light_breaker_enabled,
         );
         if light_breaker_enabled {
+            crate::commands::apply_pending_mode_outputs_if_ready(&state);
             match time_check {
-                PeriodicTimeCheckResult::Continuous { last_hour } => {
-                    check_mode_transitions(&state, last_hour, current_hour);
+                PeriodicTimeCheckResult::Continuous { .. } => {
                     if let Some(previous_observed_at) = previous_observed_at {
                         let elapsed = observed_at.saturating_duration_since(previous_observed_at);
                         if let Ok(elapsed) = chrono::Duration::from_std(elapsed) {
+                            check_mode_transitions_between(
+                                &state,
+                                current_utc - elapsed,
+                                current_utc,
+                            );
                             check_light_schedule_transitions_between(
                                 &state,
                                 current_utc - elapsed,
@@ -1278,7 +1311,13 @@ fn advance_periodic_time_check(
         };
     }
 
-    PeriodicTimeCheckResult::Continuous { last_hour }
+    // Solar midnight uses the current offset. Rebase the prior
+    // observation into that same clock before checking a crossing; a DST
+    // backward adjustment alone must not look like an overnight wrap.
+    PeriodicTimeCheckResult::Continuous {
+        last_hour: (last_hour + (current_utc_offset_hours - last_utc_offset_hours))
+            .rem_euclid(24.0),
+    }
 }
 
 fn maybe_reset_on_solar_midnight(state: &SharedState, last_hour: f32, current_hour: f32) {
@@ -1846,7 +1885,55 @@ fn replay_missed_mode_transitions(state: &SharedState) {
     }
 }
 
-/// Trigger configured scheduled mode transitions when their event time is crossed.
+/// Trigger global mode changes whose exact occurrence is in the UTC interval.
+///
+/// Wall-clock schedules keep their configured local time across offset changes;
+/// comparing their UTC occurrences also distinguishes repeated fall-back hours
+/// and excludes nonexistent spring-forward times.
+pub fn check_mode_transitions_between(
+    state: &SharedState,
+    start_utc: chrono::NaiveDateTime,
+    end_utc: chrono::NaiveDateTime,
+) {
+    let candidate = {
+        let Ok(s) = state.lock() else { return };
+        let configs = s.mode_transition_configs();
+        resolved_replayed_mode_transition(
+            s.active_mode,
+            start_utc,
+            end_utc,
+            ReplayTransitionContext {
+                solar: SolarTriggerContext {
+                    solar_noon: s.solar_noon_hour(),
+                    latitude: s.latitude,
+                    longitude: s.longitude,
+                    timezone_name: s.timezone_name.as_deref(),
+                },
+                utc_offset: s.utc_offset_hours,
+                configs: &configs,
+            },
+        )
+        .map(|transition| (s.active_mode, transition))
+    };
+
+    let Some((from_mode, transition)) = candidate else {
+        return;
+    };
+    info!(
+        "Mode transition {:?} -> {:?} on {:?} in UTC interval ({} -> {})",
+        from_mode, transition.to_mode, transition.trigger, start_utc, end_utc
+    );
+    if let Err(e) = crate::commands::do_set_active_mode_with_trigger(
+        state,
+        transition.to_mode,
+        transition.trigger,
+    ) {
+        warn!("Failed to apply mode transition: {}", e);
+    }
+}
+
+/// Legacy local-hour entry point retained for callers without UTC observations.
+/// The periodic loop uses [`check_mode_transitions_between`] to handle DST.
 pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
     let candidate = {
         let Ok(s) = state.lock() else { return };
@@ -2584,13 +2671,36 @@ pub fn refresh_dst_offset(
     doy: u32,
     timezone_name: Option<&str>,
 ) -> (f32, f32, u32) {
+    refresh_dst_offset_at_utc(
+        state,
+        current_offset,
+        current_solar_noon,
+        lat,
+        lon,
+        doy,
+        timezone_name,
+        chrono::Utc::now().naive_utc(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_dst_offset_at_utc(
+    state: &SharedState,
+    current_offset: f32,
+    current_solar_noon: f32,
+    lat: f32,
+    lon: f32,
+    doy: u32,
+    timezone_name: Option<&str>,
+    now_utc: chrono::NaiveDateTime,
+) -> (f32, f32, u32) {
     let Some(tz_name) = timezone_name else {
         return (current_offset, current_solar_noon, doy);
     };
 
     let tz = rhythm_core::Timezone::new(tz_name);
-    let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-    let fresh_offset = tz.utc_offset(year, month, day, hour);
+    let (year, month, day, _) = tz.local_date_hour_from_utc(now_utc);
+    let fresh_offset = tz.utc_offset_at_utc(now_utc);
 
     if (fresh_offset - current_offset).abs() < 0.01 {
         return (current_offset, current_solar_noon, doy);
@@ -3796,8 +3906,7 @@ mod tests {
         let state = make_state();
         let tz_name = "America/New_York";
         let tz = rhythm_core::Timezone::new(tz_name);
-        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-        let current_offset = tz.utc_offset(year, month, day, hour);
+        let current_offset = tz.utc_offset_at_utc(chrono::Utc::now().naive_utc());
 
         let (offset, noon, doy) = refresh_dst_offset(
             &state,
@@ -3823,8 +3932,7 @@ mod tests {
         let state = make_state();
         let tz_name = "America/New_York";
         let tz = rhythm_core::Timezone::new(tz_name);
-        let (year, month, day, hour) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-        let current_offset = tz.utc_offset(year, month, day, hour);
+        let current_offset = tz.utc_offset_at_utc(chrono::Utc::now().naive_utc());
 
         // Deliberately pass a wrong offset (off by 1 hour, simulating a DST miss)
         let stale_offset = current_offset + 1.0;
@@ -3888,6 +3996,97 @@ mod tests {
 
         assert_eq!(before, -4.0, "Before fall back should be EDT (-4)");
         assert_eq!(after, -5.0, "After fall back should be EST (-5)");
+    }
+
+    #[test]
+    fn dst_refresh_waits_for_the_second_repeated_hour_and_persists_the_new_offset() {
+        use crate::storage::{FileStorage, Storage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FileStorage::new(directory.path().to_str().unwrap()).unwrap());
+        storage
+            .save_location(&StoredLocation {
+                latitude: Some(40.0),
+                longitude: Some(-74.0),
+                utc_offset_hours: -4.0,
+                timezone_name: Some("America/New_York".into()),
+            })
+            .unwrap();
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.utc_offset_hours = -4.0;
+            s.storage = Some(storage.clone());
+        }
+        let date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let (offset, noon, doy) = refresh_dst_offset_at_utc(
+            &state,
+            -4.0,
+            13.0,
+            40.0,
+            -74.0,
+            305,
+            Some("America/New_York"),
+            date.and_hms_opt(5, 30, 0).unwrap(),
+        );
+        assert_eq!((offset, noon, doy), (-4.0, 13.0, 305));
+        assert_eq!(state.lock().unwrap().utc_offset_hours, -4.0);
+        assert_eq!(storage.load_location().unwrap().utc_offset_hours, -4.0);
+
+        let (offset, noon, doy) = refresh_dst_offset_at_utc(
+            &state,
+            offset,
+            noon,
+            40.0,
+            -74.0,
+            doy,
+            Some("America/New_York"),
+            date.and_hms_opt(6, 0, 0).unwrap(),
+        );
+        assert_eq!(offset, -5.0);
+        assert_eq!(state.lock().unwrap().utc_offset_hours, -5.0);
+        assert_eq!(storage.load_location().unwrap().utc_offset_hours, -5.0);
+        let expected_noon = rhythm_core::calculate_solar_noon(
+            -74.0,
+            2026,
+            11,
+            1,
+            &rhythm_core::Timezone::new("America/New_York"),
+        );
+        assert!((noon - expected_noon).abs() < 0.001);
+
+        let unchanged = refresh_dst_offset_at_utc(
+            &state,
+            offset,
+            noon,
+            40.0,
+            -74.0,
+            doy,
+            Some("America/New_York"),
+            date.and_hms_opt(6, 30, 0).unwrap(),
+        );
+        assert_eq!(unchanged, (offset, noon, doy));
+    }
+
+    #[test]
+    fn dst_refresh_handles_the_exact_spring_forward_instant() {
+        let state = make_state();
+        state.lock().unwrap().utc_offset_hours = -5.0;
+        let date = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        for (hour, minute, second, expected_offset) in [(6, 59, 59, -5.0), (7, 0, 0, -4.0)] {
+            let (offset, _, _) = refresh_dst_offset_at_utc(
+                &state,
+                -5.0,
+                12.0,
+                40.0,
+                -74.0,
+                67,
+                Some("America/New_York"),
+                date.and_hms_opt(hour, minute, second).unwrap(),
+            );
+            assert_eq!(offset, expected_offset);
+            assert_eq!(state.lock().unwrap().utc_offset_hours, expected_offset);
+        }
     }
 
     // ========================================================================
@@ -4277,9 +4476,162 @@ mod tests {
         }
 
         let result = check_solar_midnight_at(&state, 1.1, -5.0, observed_at);
+        let PeriodicTimeCheckResult::Continuous { last_hour } = result else {
+            panic!("DST fall-back should remain continuous: {result:?}");
+        };
+        assert!((last_hour - 0.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn solar_midnight_fall_back_preserves_offsets_until_the_next_real_crossing() {
+        for (last_hour, current_hour, old_offset, new_offset, solar_midnight) in [
+            (1.0, 0.02, -4.0, -5.0, 23.98),
+            (1.99, 1.01, -4.0, -5.0, 0.5),
+            (0.25, 23.27, 0.0, -1.0, 23.2),
+        ] {
+            let state = make_state();
+            let runtime = runtime_with_rooms(&["room1"]);
+            install_runtime(&state, runtime.clone());
+            let snapshot = runtime.engine_node_snapshot("room1").unwrap();
+            let mut restored = RestoredNodeState::from(&snapshot);
+            restored.time_offset_minutes = 30.0;
+            restored.brightness_offset = 10.0;
+            runtime.restore_node_state("room1", restored);
+
+            let observed_at = Instant::now();
+            {
+                let mut s = state.lock().unwrap();
+                s.runtime_config.solar_noon_hour = (solar_midnight + 12.0_f32).rem_euclid(24.0);
+                s.last_check_hour = Some(last_hour);
+                s.last_check_instant = Some(observed_at - Duration::from_secs(72));
+                s.last_check_utc_offset_hours = Some(old_offset);
+            }
+
+            let result = check_solar_midnight_at(&state, current_hour, new_offset, observed_at);
+            let PeriodicTimeCheckResult::Continuous { last_hour: rebased } = result else {
+                panic!("DST fall-back should remain continuous: {result:?}");
+            };
+            assert!(
+                (rebased - (last_hour + new_offset - old_offset).rem_euclid(24.0)).abs() < 0.001
+            );
+            let snapshot = runtime.engine_effective_node_snapshot("room1").unwrap();
+            assert_eq!(
+                snapshot.time_offset_minutes, 30.0,
+                "fall-back {last_hour} -> {current_hour} must preserve the time offset"
+            );
+            assert_eq!(
+                snapshot.brightness_offset, 10.0,
+                "fall-back {last_hour} -> {current_hour} must preserve the brightness offset"
+            );
+
+            let next_hour = (solar_midnight + 0.01).rem_euclid(24.0);
+            let elapsed_hours = (next_hour - current_hour).rem_euclid(24.0);
+            let _ = check_solar_midnight_at(
+                &state,
+                next_hour,
+                new_offset,
+                observed_at + Duration::from_secs_f32(elapsed_hours * 3600.0),
+            );
+            let snapshot = runtime.engine_effective_node_snapshot("room1").unwrap();
+            assert_eq!(snapshot.time_offset_minutes, 0.0);
+            assert_eq!(snapshot.brightness_offset, 0.0);
+        }
+    }
+
+    #[test]
+    fn solar_midnight_dst_checks_use_one_offset_for_both_observations() {
+        for (
+            last_hour,
+            current_hour,
+            old_offset,
+            new_offset,
+            elapsed_secs,
+            solar_midnight,
+            crossed,
+        ) in [
+            // A fall-back near civil midnight still crosses the real solar boundary.
+            (0.9, 0.1, 0.0, -1.0, 720, 0.0, true),
+            // Spring-forward must preserve a real crossing in elapsed time.
+            (1.99, 3.01, -5.0, -4.0, 72, 3.0, true),
+            // This boundary was already passed before spring-forward rebased the clock.
+            (1.99, 3.01, -5.0, -4.0, 72, 2.5, false),
+        ] {
+            let state = make_state();
+            let runtime = runtime_with_rooms(&["room1"]);
+            install_runtime(&state, runtime.clone());
+            let snapshot = runtime.engine_node_snapshot("room1").unwrap();
+            let mut restored = RestoredNodeState::from(&snapshot);
+            restored.time_offset_minutes = 30.0;
+            restored.brightness_offset = 10.0;
+            runtime.restore_node_state("room1", restored);
+
+            let observed_at = Instant::now();
+            {
+                let mut s = state.lock().unwrap();
+                s.runtime_config.solar_noon_hour = (solar_midnight + 12.0_f32).rem_euclid(24.0);
+                s.last_check_hour = Some(last_hour);
+                s.last_check_instant = Some(observed_at - Duration::from_secs(elapsed_secs));
+                s.last_check_utc_offset_hours = Some(old_offset);
+            }
+
+            let result = check_solar_midnight_at(&state, current_hour, new_offset, observed_at);
+            let PeriodicTimeCheckResult::Continuous { last_hour: rebased } = result else {
+                panic!("DST offset change should remain continuous: {result:?}");
+            };
+            assert!(
+                (rebased - (last_hour + new_offset - old_offset).rem_euclid(24.0)).abs() < 0.001
+            );
+            let snapshot = runtime.engine_effective_node_snapshot("room1").unwrap();
+            assert_eq!(
+                snapshot.time_offset_minutes,
+                if crossed { 0.0 } else { 30.0 },
+                "unexpected time offset after {last_hour} -> {current_hour} at {solar_midnight}"
+            );
+            assert_eq!(snapshot.brightness_offset, if crossed { 0.0 } else { 10.0 });
+        }
+    }
+
+    #[test]
+    fn legacy_mode_transition_fall_back_waits_for_the_real_sunrise() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Sleep,
+                rhythm_core::RhythmMode::Day,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::Sunrise)]);
+        }
+        let observed_at = Instant::now();
         assert_eq!(
-            result,
-            PeriodicTimeCheckResult::Continuous { last_hour: 1.9 }
+            advance_periodic_time_check(&state, 1.99, -4.0, observed_at),
+            PeriodicTimeCheckResult::Seeded
+        );
+        let after_fall_back = observed_at + Duration::from_secs(72);
+        let result = advance_periodic_time_check(&state, 1.01, -5.0, after_fall_back);
+        let PeriodicTimeCheckResult::Continuous { last_hour } = result else {
+            panic!("DST fall-back should remain continuous: {result:?}");
+        };
+        check_mode_transitions(&state, last_hour, 1.01);
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+        assert_eq!(state.lock().unwrap().last_check_hour, Some(1.01));
+
+        let after_sunrise = rhythm_core::config::FALLBACK_SUNRISE_HOUR + 0.01;
+        let elapsed = Duration::from_secs_f32((after_sunrise - 1.01) * 3600.0);
+        let result =
+            advance_periodic_time_check(&state, after_sunrise, -5.0, after_fall_back + elapsed);
+        let PeriodicTimeCheckResult::Continuous { last_hour } = result else {
+            panic!("normal sunrise should remain continuous: {result:?}");
+        };
+        check_mode_transitions(&state, last_hour, after_sunrise);
+        assert_eq!(
+            state.lock().unwrap().active_mode,
+            rhythm_core::RhythmMode::Day
         );
     }
 

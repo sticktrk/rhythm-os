@@ -59,8 +59,12 @@ The transfer excludes appliance credentials, Matter fabrics, hub connections,
 tunnel identity, active output state and managed-light ownership. Home Assistant
 remains responsible for devices, areas and inputs. Integration-native scenes and
 opaque scene extensions are excluded; recreate their equivalents and input
-bindings in the destination as needed. Re-pairing or adding a Matter device to
-another controller remains a separate device setup step.
+bindings in the destination as needed. Matter device ownership remains a separate
+setup step. For a fresh destination, the [offline whole-fabric migration
+tool](../tools/matter-fabric-migration/README.md) can prepare native matter.js
+storage from a full-secret backup without re-pairing. It is pinned to a specific
+OHF Matter Server version and requires live cutover verification; the portable
+settings transfer itself never copies fabric keys.
 
 The account retains portable lighting settings separately from its appliance
 rollback bundle. Subsequent add-on backups can update lighting settings without
