@@ -56,6 +56,42 @@ void main() {
   });
 
   group('history', () {
+    test(
+        'strict history preserves failed/unsupported versus successful empty reads',
+        () async {
+      when(() => dio.get('api/history')).thenThrow(DioException(
+          requestOptions: RequestOptions(path: 'api/history'),
+          response: Response(
+              requestOptions: RequestOptions(path: 'api/history'),
+              statusCode: 404)));
+      await expectLater(api.getHistoryOrThrow(), throwsA(isA<DioException>()));
+      when(() => dio.get('api/history')).thenAnswer((_) async => Response(
+          requestOptions: RequestOptions(path: 'api/history'),
+          data: {'activities': []}));
+      expect((await api.getHistoryOrThrow()).activities, isEmpty);
+      when(() => dio.get('api/history')).thenAnswer((_) async =>
+          Response(requestOptions: RequestOptions(path: 'api/history'), data: {
+            'activities': [null]
+          }));
+      await expectLater(api.getHistoryOrThrow(), throwsFormatException);
+    });
+
+    test('strict history retains existing source and target filter contract',
+        () async {
+      when(() => dio.get('api/history',
+              queryParameters: any(named: 'queryParameters')))
+          .thenAnswer((_) async => Response(
+              requestOptions: RequestOptions(path: 'api/history'),
+              data: {'activities': []}));
+      await api.getHistoryOrThrow(
+          limit: 2000, area: 'global', source: 'switch');
+      verify(() => dio.get('api/history', queryParameters: {
+            'limit': 2000,
+            'area': 'global',
+            'source': 'switch',
+          })).called(1);
+    });
+
     test('getHistory parses activity wrapper', () async {
       when(() => dio.get('api/history')).thenAnswer(
         (_) async => Response(

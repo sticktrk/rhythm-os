@@ -67,6 +67,19 @@ class AnalyticsService {
   // Core Methods
   // ===========================================================================
 
+  Future<void> logAppleHealthAction(String action, String journeyId) async {
+    if (!const {'enable', 'disable', 'sync'}.contains(action)) return;
+    await logEvent('apple_health_sync_action', {'action': action, 'journey_id': journeyId});
+  }
+
+  Future<void> logAppleHealthOutcome(String outcome, String stage, String journeyId) async {
+    if (!const {'succeeded', 'failed', 'partial', 'cancelled'}.contains(outcome)) return;
+    await logEvent('apple_health_sync_outcome', {'outcome': outcome,
+      if (const {'authorization', 'preference', 'history', 'health_write', 'none'}.contains(stage))
+        'failure_stage': stage,
+      'journey_id': journeyId});
+  }
+
   /// Log a custom event with optional parameters.
   Future<void> logEvent(String name, [Map<String, Object>? params]) async {
     if (!_initialized || _analytics == null) return;

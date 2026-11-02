@@ -8,6 +8,8 @@
 /// - OTA firmware updates (check, download, upload, verify)
 library;
 
+export 'src/models/rhythm_sleep_interval.dart';
+
 // Models
 export 'src/models/rhythm_commissioning_wifi.dart';
 export 'src/models/rhythm_assistant.dart';

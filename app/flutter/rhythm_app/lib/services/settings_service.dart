@@ -723,6 +723,25 @@ class SettingsService {
     await _save();
   }
 
+  static const appleHealthPreferenceKey = 'apple_health_sync_v1';
+
+  /// Device-local consent; intentionally excluded from portable AppSettings.
+  Object? get appleHealthPreference => _localDataSource?.isInitialized == true
+      ? _localDataSource!.getSettingsValue(appleHealthPreferenceKey) : null;
+
+  Future<void> setAppleHealthPreference(Map<String, Object>? value) async {
+    if (_localDataSource?.isInitialized != true) {
+      throw StateError('Device settings are unavailable');
+    }
+    await _enqueueSettingsWrite(() async {
+      if (value == null) {
+        await _localDataSource!.deleteSettingsValue(appleHealthPreferenceKey);
+      } else {
+        await _localDataSource!.saveSettingsValue(appleHealthPreferenceKey, value);
+      }
+    });
+  }
+
   /// Device-local Home selection restored on app startup.
   String? get selectedHomeId {
     if (_localDataSource?.isInitialized != true) return null;
@@ -1276,6 +1295,7 @@ class SettingsService {
 
   /// Reset all settings to defaults.
   Future<void> resetToDefaults() async {
+    await setAppleHealthPreference(null);
     _runnerSaveGeneration++;
     _runnerSaveFailed = false;
     _settings = AppSettings.defaults();
