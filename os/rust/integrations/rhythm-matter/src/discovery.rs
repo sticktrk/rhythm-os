@@ -58,6 +58,12 @@ impl MatterDiscovery {
 }
 
 impl HubDiscovery for MatterDiscovery {
+    fn restores_archived_devices(&self) -> bool {
+        // Commissioning exposes transport inventory before finalization. Only
+        // explicit pairing may replace an archive with fresh application state.
+        false
+    }
+
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
         Ok(Vec::new())
     }

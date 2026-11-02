@@ -74,6 +74,7 @@ abstract final class RhythmFeature {
   /// The server can apply one stored scene to every eligible room in a single
   /// call (`POST api/scenes/<id>/apply-home`).
   static const String homeSceneApply = 'home_scene_apply_v1';
+  static const String sceneBrightness = 'scene_brightness_v1';
 }
 
 /// Host capabilities advertised by the Rhythm server.

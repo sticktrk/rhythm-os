@@ -2890,6 +2890,17 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
             after: Some(value.clone()),
         });
         record.payload = Some(json!({"axis": axis, "value": value}));
+        if axis == "brightness" {
+            let scene_brightness = state
+                .lock()
+                .ok()
+                .and_then(|s| s.hub_runtime())
+                .and_then(|runtime| runtime.engine_node_snapshot(node_id))
+                .is_some_and(|snapshot| {
+                    snapshot.mood_active && snapshot.profile_settings.mood_scene_id.is_some()
+                });
+            record.payload.as_mut().unwrap()["scene_brightness"] = json!(scene_brightness);
+        }
         record.correlation_id = correlation_id.clone();
         if batch {
             record.fanout_of = correlation_id.clone();

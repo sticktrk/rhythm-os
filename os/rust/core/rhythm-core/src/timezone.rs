@@ -88,6 +88,15 @@ impl Timezone {
         }
     }
 
+    /// Resolve the offset of an exact UTC instant, including either occurrence
+    /// of a repeated local hour during a daylight-saving transition.
+    pub fn utc_offset_at_utc(&self, utc: NaiveDateTime) -> f32 {
+        self.local_datetime_with_offset_from_utc(utc)
+            .offset()
+            .local_minus_utc() as f32
+            / 3600.0
+    }
+
     /// Convert UTC hour to local hour for a given date.
     pub fn utc_to_local(&self, utc_hour: f32, year: i32, month: u32, day: u32) -> f32 {
         let offset = self.utc_offset(year, month, day, 12); // Use noon as reference
@@ -231,6 +240,52 @@ mod tests {
         // Summer (EDT = UTC-4)
         let offset = tz.utc_offset(2024, 7, 15, 12);
         assert_eq!(offset, -4.0);
+    }
+
+    #[test]
+    fn utc_offset_at_utc_distinguishes_both_occurrences_of_repeated_hour() {
+        let tz = Timezone::new("America/New_York");
+        let date = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        for (hour, minute, second, offset) in [
+            (4, 59, 59, -4.0),
+            (5, 0, 0, -4.0),
+            (5, 59, 59, -4.0),
+            (6, 0, 0, -5.0),
+            (6, 30, 0, -5.0),
+            (7, 0, 0, -5.0),
+        ] {
+            let utc = date.and_hms_opt(hour, minute, second).unwrap();
+            assert_eq!(tz.utc_offset_at_utc(utc), offset, "{utc}");
+        }
+
+        let berlin = Timezone::new("Europe/Berlin");
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        assert_eq!(
+            berlin.utc_offset_at_utc(date.and_hms_opt(0, 30, 0).unwrap()),
+            2.0
+        );
+        assert_eq!(
+            berlin.utc_offset_at_utc(date.and_hms_opt(1, 30, 0).unwrap()),
+            1.0
+        );
+    }
+
+    #[test]
+    fn utc_offset_at_utc_handles_spring_forward_and_fractional_offsets() {
+        let tz = Timezone::new("America/New_York");
+        let date = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        assert_eq!(
+            tz.utc_offset_at_utc(date.and_hms_opt(6, 59, 59).unwrap()),
+            -5.0
+        );
+        assert_eq!(
+            tz.utc_offset_at_utc(date.and_hms_opt(7, 0, 0).unwrap()),
+            -4.0
+        );
+        assert_eq!(
+            Timezone::new("Asia/Kolkata").utc_offset_at_utc(date.and_hms_opt(7, 0, 0).unwrap()),
+            5.5
+        );
     }
 
     #[test]
