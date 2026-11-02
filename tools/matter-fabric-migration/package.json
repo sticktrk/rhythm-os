@@ -1,0 +1,15 @@
+{
+  "name": "rhythm-matter-fabric-migration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": {
+    "@matter-server/custom-clusters": "1.5.5",
+    "@matter/main": "0.18.0",
+    "@matter/nodejs": "0.18.0",
+    "@matter-server/ws-controller": "1.5.5",
+    "matter-server": "1.5.5"
+  }
+}
