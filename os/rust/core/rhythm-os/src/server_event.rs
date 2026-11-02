@@ -316,6 +316,7 @@ pub(crate) struct NodeStateEventParams {
     pub hub_types: Vec<String>,
     pub light_capabilities: Option<LightCapabilitiesDto>,
     pub mode: RhythmMode,
+    pub local_hour: f32,
     pub state: RoomModeState,
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
@@ -339,6 +340,7 @@ impl NodeStateEvent {
             hub_types,
             light_capabilities,
             mode,
+            local_hour,
             state,
             lights_on,
             observed_power,
@@ -379,7 +381,8 @@ impl NodeStateEvent {
             profile_settings: RoomProfileSettingsDto::from_settings(
                 &snap.profile_settings,
                 mood_enabled,
-            ),
+            )
+            .with_resolved_mode(&snap.profile_settings, mode, local_hour),
             room_profile,
         }
     }

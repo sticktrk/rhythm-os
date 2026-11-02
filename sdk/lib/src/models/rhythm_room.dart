@@ -253,6 +253,12 @@ class RhythmNodeProfileSettings {
   bool get isMotionActivationEnabled => motionActivationEnabled ?? true;
   String? get lightScheduleId => lightSchedule?.scheduleId;
   RhythmMode? get lightScheduleMode => lightSchedule?.activeMode;
+
+  /// Appliance-resolved schedule mode, including legacy wall-clock schedules.
+  /// This readback is optional on older servers and is not a writable setting.
+  RhythmMode? get resolvedMode => raw['resolved_mode'] is String
+      ? RhythmMode.fromString(raw['resolved_mode'] as String)
+      : null;
   bool get isExplicitlyUnscheduled => lightSchedule?.isUnscheduled ?? false;
 
   bool get isEmpty =>
@@ -267,7 +273,7 @@ class RhythmNodeProfileSettings {
       lightScheduleOverrides.isEmpty &&
       roomSchedule == null &&
       profileOverrides.isEmpty &&
-      raw.isEmpty;
+      raw.keys.every((key) => key == 'resolved_mode');
 
   factory RhythmNodeProfileSettings.fromJson(Map<String, dynamic> json) {
     final raw = Map<String, dynamic>.from(json)
@@ -314,7 +320,8 @@ class RhythmNodeProfileSettings {
   }
 
   Map<String, dynamic> toJson() => {
-        ...raw,
+        for (final entry in raw.entries)
+          if (entry.key != 'resolved_mode') entry.key: entry.value,
         if (profileId != null) 'profile_id': profileId,
         if (moodEnabled != null) 'mood_enabled': moodEnabled,
         if (moodProfileId != null) 'mood_profile_id': moodProfileId,
