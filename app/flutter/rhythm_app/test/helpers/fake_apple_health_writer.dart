@@ -11,7 +11,7 @@ class FakeAppleHealthWriter implements AppleHealthWriter {
   // HealthKit replaces an existing sync identifier only for a greater version.
   // Keep the native version projection covered by AppleHealthIntervalTests.swift.
   int version(Map<String, Object> interval) =>
-      0x7fffffffffffffff - (interval['end_epoch_ms'] as int);
+      0x7fffffffffffffff - (interval['end_epoch_ms'] as int) + 1;
 
   @override
   Future<AppleHealthAuthorization> authorization() async => state;

@@ -85,6 +85,7 @@ class AppleHealthSyncController extends ChangeNotifier
     with WidgetsBindingObserver {
   final AppleHealthWriter writer;
   final AppleHealthScope? Function() currentEnvironment;
+  final String? Function()? currentTimeZone;
   final Object? Function() readPreference;
   final Future<void> Function(Map<String, Object>? value) writePreference;
   final Future<AppleHealthHistorySnapshot> Function(
@@ -107,6 +108,7 @@ class AppleHealthSyncController extends ChangeNotifier
   AppleHealthSyncController(
       {required this.writer,
       required this.currentEnvironment,
+      this.currentTimeZone,
       required this.readPreference,
       required this.writePreference,
       required this.loadHistory,
@@ -308,6 +310,7 @@ class AppleHealthSyncController extends ChangeNotifier
       }
       final intervals = RhythmSleepInterval.fromActivity(snapshot.events,
           nodeId: selected.nodeId, nowEpochMs: cutoff);
+      final timeZoneIdentifier = currentTimeZone?.call();
       stage = 'health_write';
       for (var offset = 0; offset < intervals.length; offset += 100) {
         if (!_canComplete(generation, selected, journey) || !_enabled) return;
@@ -324,7 +327,8 @@ class AppleHealthSyncController extends ChangeNotifier
           return <String, Object>{
             'sync_id': 'rhythm-in-bed-$identifier',
             'start_epoch_ms': interval.startEpochMs,
-            'end_epoch_ms': interval.endEpochMs
+            'end_epoch_ms': interval.endEpochMs,
+            if (timeZoneIdentifier != null) 'time_zone': timeZoneIdentifier,
           };
         }).toList();
         await writer.saveIntervals(batch).timeout(const Duration(seconds: 30));

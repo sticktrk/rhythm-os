@@ -39,13 +39,9 @@ final class AppleHealthBridge {
       let intervals: [AppleHealthInterval]
       do { intervals = try AppleHealthInterval.decode(call.arguments) }
       catch { result(failure("invalid_intervals")); return }
-      let samples = intervals.map { interval in
-        HKCategorySample(type: sleepType, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
-          start: Date(timeIntervalSince1970: Double(interval.startEpochMs) / 1000),
-          end: Date(timeIntervalSince1970: Double(interval.endEpochMs) / 1000),
-          metadata: [HKMetadataKeySyncIdentifier: interval.syncID,
-            HKMetadataKeySyncVersion: NSNumber(value: interval.syncVersion),
-            HKMetadataKeyTimeZone: "UTC"])
+      let fallbackTimeZone = TimeZone.current
+      let samples = intervals.map {
+        $0.makeSample(type: sleepType, fallbackTimeZone: fallbackTimeZone)
       }
       inFlight = true
       store.save(samples) { [weak self] saved, _ in
