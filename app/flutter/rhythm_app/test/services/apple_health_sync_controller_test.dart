@@ -37,12 +37,18 @@ void main() {
   late FakeAppleHealthWriter writer;
   late AppleHealthScope? environment;
   Object? preference;
+  String? sourceTimeZone;
+  var timeZoneReads = 0;
   late AppleHealthSyncController controller;
   late Future<AppleHealthHistorySnapshot> Function() load;
 
   AppleHealthSyncController create() => AppleHealthSyncController(
       writer: writer,
       currentEnvironment: () => environment,
+      currentTimeZone: () {
+        timeZoneReads++;
+        return sourceTimeZone;
+      },
       readPreference: () => preference,
       writePreference: (value) async {
         preference = value;
@@ -54,10 +60,61 @@ void main() {
     writer = FakeAppleHealthWriter();
     environment = scope;
     preference = null;
+    sourceTimeZone = null;
+    timeZoneReads = 0;
     load = () async => AppleHealthHistorySnapshot(events: events);
     controller = create();
   });
   tearDown(() => controller.dispose());
+
+  test(
+      'home time zone is display context without changing consent or sample identity',
+      () async {
+    sourceTimeZone = 'America/New_York';
+    await controller.enable(scope);
+    final exported = writer.calls.single.single;
+    expect(exported['time_zone'], 'America/New_York');
+    expect(exported['start_epoch_ms'], events.first.epochMs);
+    expect(exported['end_epoch_ms'], events.last.epochMs);
+    expect((preference as Map)['scope'], scope.toJson());
+    expect(scope.toJson().containsKey('time_zone'), isFalse);
+    final identifier = exported['sync_id'];
+    controller.dispose();
+    // Older/absent home metadata uses the native device fallback, without a
+    // new consent or sample identity after restart.
+    sourceTimeZone = null;
+    controller = create();
+    await controller.sync();
+    expect(writer.calls.last.single.containsKey('time_zone'), isFalse);
+    expect(writer.calls.last.single['sync_id'], identifier);
+    expect(writer.samples, hasLength(1));
+  });
+
+  test('home time zone resolves after history once for every native batch',
+      () async {
+    final activity = <RhythmActivityEvent>[];
+    for (var index = 0; index < 101; index++) {
+      for (final wake in [false, true]) {
+        activity.add(RhythmActivityEvent(
+            id: '${wake ? 'wake' : 'sleep'}-$index',
+            nodeId: 'bedroom',
+            actionId: wake ? 'sleep_off' : 'sleep_on',
+            epochMs: start + index * 60000 + (wake ? 30000 : 0),
+            source: events.first.source));
+      }
+    }
+    load = () async {
+      // Home/server metadata can become available while retained history loads.
+      sourceTimeZone = 'America/New_York';
+      return AppleHealthHistorySnapshot(events: activity);
+    };
+    await controller.enable(scope);
+    expect(timeZoneReads, 1);
+    expect(writer.calls.map((batch) => batch.length), [100, 1]);
+    expect(writer.calls.expand((batch) => batch).map((row) => row['time_zone']),
+        everyElement('America/New_York'));
+    expect(writer.samples, hasLength(101));
+  });
 
   test(
       'defaults off, consent persists and uncertain/repeated saves remain idempotent after restart',

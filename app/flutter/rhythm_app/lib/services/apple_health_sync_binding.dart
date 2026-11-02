@@ -29,6 +29,7 @@ AppleHealthSyncController createAppleHealthSyncController(
     isConnected: () => server.connection.connected,
     writer: AppleHealthService(),
     currentEnvironment: environment,
+    currentTimeZone: () => homes.currentHome?.timezone,
     readPreference: () => SettingsService.instance.appleHealthPreference,
     writePreference: SettingsService.instance.setAppleHealthPreference,
     loadHistory: (scope, cutoff) async {

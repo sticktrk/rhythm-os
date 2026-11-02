@@ -61,6 +61,13 @@ jobs:
         timeout-minutes: 25
         working-directory: app/flutter/rhythm_app
         run: flutter test --no-pub
+  healthkit:
+    name: Apple Health native contracts
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: tools/app/scripts/tests/apple-health-ios-test.sh
   rust:
     name: Rust tests
     runs-on: ubuntu-latest
@@ -143,7 +150,7 @@ jobs:
   required:
     name: Public contributor checks
     if: always()
-    needs: [changes, source, flutter, rust, dart, admin-ui, matter-migration]
+    needs: [changes, source, flutter, healthkit, rust, dart, admin-ui, matter-migration]
     runs-on: ubuntu-latest
     steps:
       - name: Require all contributor checks to pass
