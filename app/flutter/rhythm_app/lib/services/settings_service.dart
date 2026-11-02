@@ -405,6 +405,30 @@ class SettingsService {
   Future<void> _settingsWriteTail = Future.value();
   Future<void> _pendingLocalBleMutationTail = Future.value();
 
+  static const _deviceOwnerKeyPrefix = 'device_owner_v1::';
+
+  Map<String, bool> get knownDeviceOwners {
+    final source = _localDataSource;
+    if (source?.isInitialized != true) return const {};
+    return {
+      for (final key
+          in source!.getSettingsKeysWithPrefix(_deviceOwnerKeyPrefix))
+        if (source.getSettingsValue(key) is bool)
+          key.substring(_deviceOwnerKeyPrefix.length):
+              source.getSettingsValue(key) as bool,
+    };
+  }
+
+  Future<void> saveDeviceOwner(String key, bool ownedByHa) async {
+    final source = _localDataSource;
+    if (source?.isInitialized != true) return;
+    try {
+      await source!.saveSettingsValue('$_deviceOwnerKeyPrefix$key', ownedByHa);
+    } catch (error) {
+      debugPrint('SettingsService: Could not persist device ownership: $error');
+    }
+  }
+
   /// Whether the service has been initialized.
   bool get isInitialized => _initialized;
 
@@ -1227,7 +1251,8 @@ class SettingsService {
     final source = _localDataSource;
     if (source == null) return;
     await _enqueueSettingsWrite(() async {
-      if (runnerGeneration != null && runnerGeneration != _runnerSaveGeneration) {
+      if (runnerGeneration != null &&
+          runnerGeneration != _runnerSaveGeneration) {
         return;
       }
       // Compare only after earlier writes finish: an in-flight snapshot may

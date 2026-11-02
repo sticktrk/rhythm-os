@@ -11,6 +11,8 @@ class CloudBackedServerApi {
 
   final RhythmServerApi _delegate;
 
+  RhythmHaMatterApi get haMatter => _delegate.haMatter;
+
   Future<RhythmRoomState?> roomAction({
     required String roomId,
     required String action,

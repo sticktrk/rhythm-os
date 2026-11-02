@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'light_provider.dart';
+import 'direct_hub_access.dart';
 
 /// Home Assistant light provider.
 ///
@@ -26,7 +27,7 @@ class HomeAssistantProvider implements LightProvider {
   String get name => 'Home Assistant (${config.host})';
 
   HomeAssistantProvider(this.config, {http.Client? client})
-      : _client = client ?? http.Client();
+      : _client = DirectHubHttpClient(client ?? http.Client());
 
   Map<String, String> get _headers => {
         'Authorization': 'Bearer ${config.token}',
@@ -195,11 +196,7 @@ class HomeAssistantProvider implements LightProvider {
     Map<String, dynamic> data,
   ) async {
     final uri = Uri.parse('${config.baseUrl}/api/services/$domain/$service');
-    return await _client.post(
-      uri,
-      headers: _headers,
-      body: jsonEncode(data),
-    );
+    return await _client.post(uri, headers: _headers, body: jsonEncode(data));
   }
 
   /// Get the current state of a light entity.

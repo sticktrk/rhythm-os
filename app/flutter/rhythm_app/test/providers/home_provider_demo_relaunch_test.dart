@@ -79,6 +79,21 @@ void main() {
     expect(provider.removedStaleDemoEnvironment, isFalse);
     expect(provider.currentHome?.id, home.id);
     expect(provider.activeServerHub?.endpoint.host, '127.0.0.1');
+    expect(DirectHubAccess.allowed, isFalse);
+
+    final hue = await provider.addHueHub(
+      name: 'Demo Hue',
+      bridgeIp: 'demo-hue.local',
+      appKey: 'demo-key',
+    );
+    expect(hue, isNotNull);
+    expect(
+      await provider.updateHub(hue!.copyWith(token: 'replacement-demo-key')),
+      isTrue,
+    );
+    expect(
+        provider.getFirstHubOfType(HubType.hue)?.token, 'replacement-demo-key');
+    expect(DirectHubAccess.allowed, isFalse);
   });
 
   test('relaunch outside demo mode drops the persisted demo Home', () async {

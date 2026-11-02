@@ -6,6 +6,7 @@ library;
 
 import 'package:multicast_dns/multicast_dns.dart';
 import '../models/hub.dart' show HubType;
+import 'direct_hub_access.dart';
 
 /// A discovered hub on the local network.
 class DiscoveredHub {
@@ -57,12 +58,16 @@ class HubDiscoveryService {
   static Future<List<DiscoveredHub>> discoverHomeAssistant({
     Duration timeout = const Duration(seconds: 5),
   }) async {
+    if (!DirectHubAccess.allowed) return const [];
+    final lease = DirectHubAccess.capture();
     final hubs = <DiscoveredHub>[];
     final seen = <String>{};
 
+    final client = MDnsClient();
+    final stopWatching = lease.cancelOnChange(client.stop);
     try {
-      final client = MDnsClient();
       await client.start();
+      lease.check();
 
       // Look for Home Assistant service via PTR record
       await for (final ptr in client
@@ -71,10 +76,12 @@ class HubDiscoveryService {
           )
           .timeout(timeout, onTimeout: (sink) => sink.close())) {
         // Get SRV record for this service
+        lease.check();
         await for (final srv in client.lookup<SrvResourceRecord>(
           ResourceRecordQuery.service(ptr.domainName),
         )) {
           // Get A record for the IP address
+          lease.check();
           await for (final ip in client.lookup<IPAddressResourceRecord>(
             ResourceRecordQuery.addressIPv4(srv.target),
           )) {
@@ -90,13 +97,15 @@ class HubDiscoveryService {
                 name = parts[0];
               }
 
-              hubs.add(DiscoveredHub(
-                host: srv.target,
-                port: srv.port,
-                address: ip.address.address,
-                name: name,
-                type: HubType.homeAssistant,
-              ));
+              hubs.add(
+                DiscoveredHub(
+                  host: srv.target,
+                  port: srv.port,
+                  address: ip.address.address,
+                  name: name,
+                  type: HubType.homeAssistant,
+                ),
+              );
             }
           }
         }
@@ -108,7 +117,9 @@ class HubDiscoveryService {
       // Return whatever we found so far
     }
 
-    return hubs;
+    stopWatching();
+    client.stop();
+    return lease.isCurrent ? hubs : const [];
   }
 
   /// Discover Philips Hue bridges on the local network.
@@ -117,12 +128,16 @@ class HubDiscoveryService {
   static Future<List<DiscoveredHub>> discoverHue({
     Duration timeout = const Duration(seconds: 5),
   }) async {
+    if (!DirectHubAccess.allowed) return const [];
+    final lease = DirectHubAccess.capture();
     final hubs = <DiscoveredHub>[];
     final seen = <String>{};
 
+    final client = MDnsClient();
+    final stopWatching = lease.cancelOnChange(client.stop);
     try {
-      final client = MDnsClient();
       await client.start();
+      lease.check();
 
       // Look for Hue bridge via PTR record
       await for (final ptr in client
@@ -130,9 +145,11 @@ class HubDiscoveryService {
             ResourceRecordQuery.serverPointer('_hue._tcp.local'),
           )
           .timeout(timeout, onTimeout: (sink) => sink.close())) {
+        lease.check();
         await for (final srv in client.lookup<SrvResourceRecord>(
           ResourceRecordQuery.service(ptr.domainName),
         )) {
+          lease.check();
           await for (final ip in client.lookup<IPAddressResourceRecord>(
             ResourceRecordQuery.addressIPv4(srv.target),
           )) {
@@ -146,13 +163,15 @@ class HubDiscoveryService {
                 name = parts[0];
               }
 
-              hubs.add(DiscoveredHub(
-                host: srv.target,
-                port: 80, // Hue uses port 80
-                address: ip.address.address,
-                name: name,
-                type: HubType.hue,
-              ));
+              hubs.add(
+                DiscoveredHub(
+                  host: srv.target,
+                  port: 80, // Hue uses port 80
+                  address: ip.address.address,
+                  name: name,
+                  type: HubType.hue,
+                ),
+              );
             }
           }
         }
@@ -163,7 +182,9 @@ class HubDiscoveryService {
       // mDNS discovery failed
     }
 
-    return hubs;
+    stopWatching();
+    client.stop();
+    return lease.isCurrent ? hubs : const [];
   }
 
   /// Discover all supported hubs on the local network.
