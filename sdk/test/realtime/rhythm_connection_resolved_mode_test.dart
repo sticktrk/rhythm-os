@@ -66,8 +66,20 @@ class _Fixture {
   bool includeNode = true;
   bool motion = false;
   int polls = 0;
+  int appliedPolls = 0;
   HttpResponse? sse;
   Map<String, dynamic>? actionResponse;
+
+  // A separate control node changes on every poll, including polls that must
+  // emit no event for room-1. Its event proves the client applied the response;
+  // the server finishing a write does not establish that boundary.
+  Map<String, dynamic> get pollBarrier => {
+        'id': 'poll-barrier',
+        'kind': 'room',
+        'state': 'active',
+        'rhythm_enabled': true,
+        'brightness_offset': polls.toDouble(),
+      };
 
   Map<String, dynamic> get node => {
         'id': 'room-1',
@@ -98,7 +110,13 @@ class _Fixture {
     final connection = RhythmConnection();
     late _Fixture fixture;
     final subscription = connection.rhythmStateEvents.listen(
-      (event) => fixture.events.add(event),
+      (event) {
+        if (event.nodeId == 'poll-barrier') {
+          fixture.appliedPolls = event.brightnessOffset.toInt();
+        } else {
+          fixture.events.add(event);
+        }
+      },
     );
     fixture = _Fixture(server, clock, connection, subscription);
     server.listen((request) async {
@@ -108,16 +126,19 @@ class _Fixture {
           request.response.write(jsonEncode({
             'platform': 'desktop',
             'server_instance_id': 'synthetic-schedule-server',
-            'nodes': [fixture.node],
+            'nodes': [fixture.node, fixture.pollBarrier],
           }));
           await request.response.close();
         case '/api/nodes/state':
+          fixture.polls++;
           request.response.headers.contentType = ContentType.json;
           request.response.write(jsonEncode({
-            'nodes': [if (fixture.includeNode) fixture.node],
+            'nodes': [
+              if (fixture.includeNode) fixture.node,
+              fixture.pollBarrier,
+            ],
           }));
           await request.response.close();
-          fixture.polls++;
         case '/api/nodes/action':
           request.response.headers.contentType = ContentType.json;
           request.response
@@ -149,10 +170,7 @@ class _Fixture {
   Future<void> poll() async {
     final previous = polls;
     clock.fire();
-    await _waitFor(() => polls > previous);
-    // Let the real HTTP response decode and broadcast its diff before checking
-    // the absence of an event, as well as the event-producing cases.
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await _waitFor(() => appliedPolls > previous);
   }
 
   Future<void> send(String type, Map<String, dynamic> payload) async {
