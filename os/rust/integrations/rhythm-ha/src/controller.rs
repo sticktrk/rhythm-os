@@ -73,6 +73,16 @@ impl<H: HaTransport> HaLightController<H> {
         data: &serde_json::Value,
         admission: Option<&HaDispatchAdmission>,
     ) -> anyhow::Result<()> {
+        self.call_admitted_service(service, data, admission, None)
+    }
+
+    fn call_admitted_service(
+        &self,
+        service: &str,
+        data: &serde_json::Value,
+        admission: Option<&HaDispatchAdmission>,
+        identify: Option<(&str, &crate::light::HaIdentifyAction)>,
+    ) -> anyhow::Result<()> {
         let cache = if let Some(shared) = self.capability_state.as_ref() {
             let state = shared.lock().map_err(|_| anyhow::anyhow!("State lock"))?;
             let cache = self
@@ -88,6 +98,17 @@ impl<H: HaTransport> HaLightController<H> {
                 let mut cache = cache
                     .lock()
                     .map_err(|_| anyhow::anyhow!("HA context lock"))?;
+                if let Some((entity, action)) = identify {
+                    anyhow::ensure!(
+                        cache.lights_ready
+                            && cache
+                                .lights
+                                .get(entity)
+                                .and_then(|light| light.identify.as_ref())
+                                == Some(action),
+                        "HA identification route changed before dispatch admission"
+                    );
+                }
                 if self.managed_addon {
                     let admission = admission
                         .ok_or_else(|| anyhow::anyhow!("HA dispatch admission missing"))?;
@@ -151,7 +172,18 @@ impl<H: HaTransport> HaLightController<H> {
         } else {
             None
         };
-        let result = self.client.call_service_contexts("light", service, data);
+        // Admission and observation tracking remain scoped to the reviewed
+        // light even when its native identification control is a button.
+        let result = match identify {
+            Some((_, crate::light::HaIdentifyAction::Button { entity_id, .. })) => {
+                self.client.call_service_contexts(
+                    "button",
+                    "press",
+                    &serde_json::json!({"entity_id":[entity_id]}),
+                )
+            }
+            _ => self.client.call_service_contexts("light", service, data),
+        };
         if let Some(cache) = cache {
             if let Ok(mut cache) = cache.lock() {
                 if let Ok(contexts) = &result {
@@ -753,54 +785,98 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
-        // Use Home Assistant's native `flash` parameter on `light.turn_on`.
-        // HA documents `flash: "short"` / `flash: "long"` as the canonical
-        // identification effect across light platforms — unlike the default
-        // on/off cycling, it does not perturb persisted on/brightness state
-        // and works for any HA-managed light backend.
-        let (mut data, admission) = if self.managed_addon {
-            let ids = match target {
-                HubDispatchTarget::Devices { native_ids } => native_ids.clone(),
-                HubDispatchTarget::Group { room_id, .. } => self
-                    .registry
+        let ids = match target {
+            HubDispatchTarget::Devices { native_ids } => native_ids.clone(),
+            HubDispatchTarget::Group { room_id, .. } => self
+                .registry
+                .lock()
+                .map_err(|_| LightControlError::Internal("HA registry lock".into()))?
+                .get_light_entities(room_id),
+        };
+        let (selected, admission) = self.selected_devices(&ids)?;
+        if self.managed_addon && selected.is_empty() {
+            return Err(LightControlError::CommandFailed(
+                "No reviewed HA light selected for identification".into(),
+            ));
+        }
+        let cache = self
+            .capability_state
+            .as_ref()
+            .and_then(|state| state.lock().ok())
+            .and_then(|state| {
+                self.capability_hub_key
+                    .as_ref()
+                    .and_then(|key| state.hubs.get(key))
+                    .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+                    .map(|ha| ha.event_routing_cache.clone())
+            });
+        if let Some(cache) = cache {
+            let actions = {
+                let cache = cache
                     .lock()
-                    .map_err(|_| LightControlError::Internal("HA registry lock".into()))?
-                    .get_light_entities(room_id),
+                    .map_err(|_| LightControlError::Internal("HA context lock".into()))?;
+                selected
+                    .iter()
+                    .map(|id| {
+                        cache
+                            .lights
+                            .get(id)
+                            .and_then(|entry| entry.identify.clone())
+                            .map(|action| (id, action))
+                            .ok_or_else(|| {
+                                let message = format!(
+                                    "Home Assistant exposes no supported identification control for {id}"
+                                );
+                                LightControlError::CommandFailed(message)
+                            })
+                    })
+                    .collect::<LightControlResult<Vec<_>>>()?
             };
-            let (selected, admission) = self.selected_devices(&ids)?;
-            if selected.is_empty() {
+            if actions.is_empty() {
                 return Err(LightControlError::CommandFailed(
-                    "No reviewed HA light selected for identification".into(),
+                    "No HA lights available for identification".into(),
                 ));
             }
-            (serde_json::json!({"entity_id":selected}), admission)
-        } else {
-            (
-                match target {
-                    HubDispatchTarget::Devices { native_ids } => {
-                        if native_ids.is_empty() {
-                            return Err(LightControlError::CommandFailed(
-                                "HA flash: no entity_ids supplied".to_string(),
-                            ));
-                        }
-                        serde_json::json!({ "entity_id": native_ids })
-                    }
-                    HubDispatchTarget::Group {
-                        room_id: _,
-                        control_id,
-                    } => serde_json::json!({ "area_id": control_id }),
-                },
-                None,
-            )
+            for (id, action) in actions {
+                let data = serde_json::json!({"entity_id":[id], "flash":"short"});
+                self.call_admitted_service(
+                    "turn_on",
+                    &data,
+                    admission.as_ref(),
+                    Some((id, &action)),
+                )
+                .map_err(|e| {
+                    LightControlError::CommandFailed(format!("HA identify failed: {e}"))
+                })?;
+            }
+            return Ok(());
+        }
+        if self.managed_addon {
+            return Err(LightControlError::CommandFailed(
+                "HA identification inventory unavailable".into(),
+            ));
+        }
+        // Legacy standalone controllers without inventory retain their existing
+        // native flash behavior. Never emulate identification with on/off writes.
+        let mut data = match target {
+            HubDispatchTarget::Devices { native_ids } if !native_ids.is_empty() => {
+                serde_json::json!({"entity_id":native_ids})
+            }
+            HubDispatchTarget::Group { control_id, .. } => {
+                serde_json::json!({"area_id":control_id})
+            }
+            _ => {
+                return Err(LightControlError::CommandFailed(
+                    "HA flash: no entity_ids supplied".into(),
+                ))
+            }
         };
         data["flash"] = serde_json::json!("short");
-
-        self.call_light_service("turn_on", &data, admission.as_ref())
+        self.call_light_service("turn_on", &data, None)
             .map_err(|e| {
                 LightControlError::CommandFailed(format!(
-                    "HA flash for target {} failed: {}",
-                    target.label(),
-                    e
+                    "HA flash for target {} failed: {e}",
+                    target.label()
                 ))
             })
     }
@@ -948,6 +1024,7 @@ mod tests {
             cache.lights.insert(
                 "light.selected".into(),
                 crate::light::HaLightCatalogEntry {
+                    identify: None,
                     identity: Some(identity),
                     name: "selected".into(),
                     area_id: Some("living_room".into()),

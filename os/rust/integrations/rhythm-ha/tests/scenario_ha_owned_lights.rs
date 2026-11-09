@@ -39,6 +39,7 @@ fn proof(id: &str) -> HaLightIdentity {
 }
 fn entry(id: &str) -> HaLightCatalogEntry {
     HaLightCatalogEntry {
+        identify: None,
         identity: Some(proof(id)),
         name: id.into(),
         area_id: Some("room".into()),
@@ -49,6 +50,161 @@ fn entry(id: &str) -> HaLightCatalogEntry {
             &json!({"state":"on", "attributes":{"brightness":128}, "last_updated":"2026-10-03T12:00:00+00:00"}),
         ),
     }
+}
+
+#[test]
+fn identify_uses_native_button_without_changing_light_output_and_rechecks_ownership() {
+    use futures_util::FutureExt;
+    use rhythm_core::controller::{HubDispatchTarget, HubLightController};
+    use rhythm_ha::light::HaIdentifyAction;
+
+    let f = Fixture::new();
+    f.cache
+        .lock()
+        .unwrap()
+        .lights
+        .get_mut("light.reviewed")
+        .unwrap()
+        .identify = Some(HaIdentifyAction::Button {
+        entity_id: "button.locate_lamp".into(),
+        registry_id: "identify-entry".into(),
+        unique_id: "identify-unique".into(),
+    });
+    let controller = HaLightController::new(f.spy.clone(), f.registry.clone())
+        .with_capability_source(f.state.clone(), f.key.clone());
+    let target = HubDispatchTarget::Group {
+        room_id: "room".into(),
+        control_id: "room".into(),
+    };
+    let before = f.spy.calls().len();
+    controller
+        .flash_target(&target)
+        .now_or_never()
+        .unwrap()
+        .unwrap();
+    let calls = f.spy.calls();
+    assert_eq!(calls.len(), before + 1);
+    assert_eq!(calls[before].domain, "button");
+    assert_eq!(calls[before].service, "press");
+    assert_eq!(
+        calls[before].data,
+        json!({"entity_id":["button.locate_lamp"]})
+    );
+    f.state.lock().unwrap().managed_ha_lights = Some(Default::default());
+    assert!(controller
+        .flash_target(&target)
+        .now_or_never()
+        .unwrap()
+        .is_err());
+    assert_eq!(f.spy.calls().len(), before + 1);
+}
+
+#[test]
+fn identify_rejects_unsupported_light_without_turning_it_on() {
+    use futures_util::FutureExt;
+    use rhythm_core::controller::{HubDispatchTarget, HubLightController};
+    let f = Fixture::new();
+    let controller = HaLightController::new(f.spy.clone(), f.registry.clone())
+        .with_capability_source(f.state.clone(), f.key.clone());
+    let target = HubDispatchTarget::Devices {
+        native_ids: vec!["light.reviewed".into()],
+    };
+    let before = f.spy.calls().len();
+    assert!(controller
+        .flash_target(&target)
+        .now_or_never()
+        .unwrap()
+        .is_err());
+    assert_eq!(f.spy.calls().len(), before);
+}
+
+#[test]
+fn identify_follows_live_flash_capability_changes() {
+    use futures_util::FutureExt;
+    use rhythm_core::controller::{HubDispatchTarget, HubLightController};
+    let f = Fixture::new();
+    let controller = HaLightController::new(f.spy.clone(), f.registry.clone())
+        .with_capability_source(f.state.clone(), f.key.clone());
+    let target = HubDispatchTarget::Devices {
+        native_ids: vec!["light.reviewed".into()],
+    };
+    let before = f.spy.calls().len();
+    for (i, features) in [8, 0, 8].into_iter().enumerate() {
+        let event = json!({"entity_id":"light.reviewed","new_state":{"state":"on",
+            "attributes":{"brightness":128,"supported_features":features},
+            "last_updated":format!("2026-10-03T12:00:0{}+00:00",i+1)}});
+        translate_ws_event("state_changed", &event, &f.registry, &f.cache);
+        assert_eq!(
+            controller
+                .flash_target(&target)
+                .now_or_never()
+                .unwrap()
+                .is_ok(),
+            features == 8
+        );
+    }
+    assert_eq!(f.spy.calls().len(), before + 2);
+}
+
+#[test]
+fn identify_supports_native_flash_and_stops_a_group_after_inventory_invalidation() {
+    use futures_util::FutureExt;
+    use rhythm_core::controller::{HubDispatchTarget, HubLightController};
+    use rhythm_ha::light::HaIdentifyAction;
+    let f = Fixture::new();
+    {
+        let mut cache = f.cache.lock().unwrap();
+        for id in ["light.reviewed", "light.unreviewed"] {
+            cache.lights.get_mut(id).unwrap().identify = Some(HaIdentifyAction::Flash);
+        }
+        cache
+            .reviewed
+            .insert("light.unreviewed".into(), proof("entry-2"));
+    }
+    f.state
+        .lock()
+        .unwrap()
+        .managed_ha_lights
+        .as_mut()
+        .unwrap()
+        .insert("light.unreviewed".into());
+    let cache = f.cache.clone();
+    *f.hook.lock().unwrap() = Some(Box::new(move || cache.lock().unwrap().invalidate()));
+    let controller = HaLightController::new(
+        ContextTransport {
+            spy: f.spy.clone(),
+            hook: f.hook.clone(),
+        },
+        f.registry.clone(),
+    )
+    .with_capability_source(f.state.clone(), f.key.clone());
+    let target = HubDispatchTarget::Group {
+        room_id: "room".into(),
+        control_id: "room".into(),
+    };
+    let before = f.spy.calls().len();
+    assert!(controller
+        .flash_target(&target)
+        .now_or_never()
+        .unwrap()
+        .is_err());
+    let calls = f.spy.calls();
+    assert_eq!(calls.len(), before + 1);
+    assert_eq!(calls[before].domain, "light");
+    assert_eq!(calls[before].service, "turn_on");
+    assert_eq!(
+        calls[before].data,
+        json!({"entity_id":["light.reviewed"],"flash":"short"})
+    );
+    // A completed refresh restores native Identify without replaying the failed call.
+    *f.hook.lock().unwrap() = None;
+    f.cache.lock().unwrap().lights_ready = true;
+    controller
+        .flash_target(&target)
+        .now_or_never()
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.spy.calls().len(), before + 3);
 }
 type CommandHook = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
 struct ContextTransport {

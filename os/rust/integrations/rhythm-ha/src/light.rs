@@ -176,6 +176,19 @@ pub struct HaLightCatalogEntry {
     pub area_id: Option<String>,
     pub capabilities: LightCapabilities,
     pub observation: HaLightObservation,
+    pub identify: Option<HaIdentifyAction>,
+}
+
+/// Identification is separate from normal light output. In particular Matter
+/// exposes an Identify button and does not implement light.turn_on's flash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HaIdentifyAction {
+    Flash,
+    Button {
+        entity_id: String,
+        registry_id: String,
+        unique_id: String,
+    },
 }
 
 pub const SELECTION_FILE: &str = "managed-ha-lights-v2.json";

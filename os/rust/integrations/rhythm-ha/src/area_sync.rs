@@ -621,6 +621,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
                     area_id: light_entity_areas.get(&entity.entity_id).cloned(),
                     capabilities: crate::light::capabilities(&state["attributes"]),
                     observation: crate::light::HaLightObservation::parse(&state),
+                    identify: identify_action(entity, &entities, &states),
                 },
             )
         })
@@ -1572,6 +1573,65 @@ struct EntityEntry {
     platform: Option<String>,
 }
 
+fn identify_action(
+    light: &EntityEntry,
+    entities: &[EntityEntry],
+    states: &[Value],
+) -> Option<crate::light::HaIdentifyAction> {
+    use crate::light::HaIdentifyAction;
+    // A name or entity-id suffix is not proof of a control's purpose. Join the
+    // explicit Identify device class to the same device and integration entry.
+    let candidates: Vec<_> = entities
+        .iter()
+        .filter(|button| {
+            button.entity_id.starts_with("button.")
+                && button.disabled_by.is_none()
+                && light.device_id.as_ref().is_some_and(|id| !id.is_empty())
+                && light
+                    .config_entry_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty())
+                && button.device_id == light.device_id
+                && button.config_entry_id == light.config_entry_id
+                && light
+                    .platform
+                    .as_ref()
+                    .is_some_and(|platform| !platform.is_empty())
+                && button.platform == light.platform
+                && button.id.as_ref().is_some_and(|id| !id.is_empty())
+                && button.unique_id.as_ref().is_some_and(|id| !id.is_empty())
+                && states.iter().any(|state| {
+                    state["entity_id"].as_str() == Some(button.entity_id.as_str())
+                        && state["state"].as_str() != Some("unavailable")
+                        && button
+                            .original_device_class
+                            .as_deref()
+                            .or_else(|| state["attributes"]["device_class"].as_str())
+                            == Some("identify")
+                })
+        })
+        .collect();
+    if let [button] = candidates.as_slice() {
+        return Some(HaIdentifyAction::Button {
+            entity_id: button.entity_id.clone(),
+            registry_id: button.id.clone().expect("checked registry identity"),
+            unique_id: button.unique_id.clone().expect("checked unique identity"),
+        });
+    }
+    // HA LightEntityFeature.FLASH = 8. Matter lights do not advertise it.
+    states
+        .iter()
+        .find(|state| state["entity_id"].as_str() == Some(light.entity_id.as_str()))
+        .filter(|state| {
+            state["attributes"]["supported_features"]
+                .as_u64()
+                .unwrap_or(0)
+                & 8
+                != 0
+        })
+        .map(|_| HaIdentifyAction::Flash)
+}
+
 #[derive(Deserialize)]
 struct DeviceEntry {
     id: String,
@@ -1613,6 +1673,69 @@ impl DeviceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identify_binding_requires_one_enabled_control_with_matching_device_and_entry() {
+        let light: EntityEntry = serde_json::from_value(serde_json::json!({
+            "entity_id":"light.lamp", "device_id":"device", "config_entry_id":"integration", "platform":"matter"
+        })).unwrap();
+        let button = serde_json::json!({"entity_id":"button.any_name", "id":"registry", "unique_id":"resource",
+            "device_id":"device", "config_entry_id":"integration", "platform":"matter"});
+        let mut states = vec![
+            serde_json::json!({"entity_id":"light.lamp", "state":"off", "attributes":{"supported_features":32}}),
+            serde_json::json!({"entity_id":"button.any_name", "state":"unknown", "attributes":{"device_class":"identify"}}),
+        ];
+        let native = identify_action(
+            &light,
+            &[serde_json::from_value(button.clone()).unwrap()],
+            &states,
+        );
+        assert!(matches!(
+            native,
+            Some(crate::light::HaIdentifyAction::Button { .. })
+        ));
+        for (field, value) in [
+            ("device_id", "different"),
+            ("config_entry_id", "different"),
+            ("platform", "different"),
+            ("disabled_by", "user"),
+            ("id", ""),
+            ("unique_id", ""),
+        ] {
+            let mut invalid = button.clone();
+            invalid[field] = serde_json::json!(value);
+            assert_eq!(
+                identify_action(&light, &[serde_json::from_value(invalid).unwrap()], &states),
+                None,
+                "{field}"
+            );
+        }
+        let mut other = button.clone();
+        other["entity_id"] = serde_json::json!("button.second");
+        other["id"] = serde_json::json!("second");
+        states.push(serde_json::json!({"entity_id":"button.second","state":"unknown","attributes":{"device_class":"identify"}}));
+        assert_eq!(
+            identify_action(
+                &light,
+                &[
+                    serde_json::from_value(button.clone()).unwrap(),
+                    serde_json::from_value(other).unwrap()
+                ],
+                &states
+            ),
+            None
+        );
+        states[1]["attributes"]["device_class"] = serde_json::json!("restart");
+        assert_eq!(
+            identify_action(&light, &[serde_json::from_value(button).unwrap()], &states),
+            None
+        );
+        states[0]["attributes"]["supported_features"] = serde_json::json!(8);
+        assert_eq!(
+            identify_action(&light, &[], &states),
+            Some(crate::light::HaIdentifyAction::Flash)
+        );
+    }
     use futures_util::{SinkExt, StreamExt};
     use rhythm_os::discovery::HubDiscovery;
     use tokio::net::TcpListener;
@@ -1674,7 +1797,8 @@ mod tests {
             ws.send(Message::Text(response(
                 "config/entity_registry/list",
                 serde_json::json!([
-                    {"entity_id": "light.kitchen_ceiling", "device_id": "dev-light"},
+                    {"entity_id": "light.kitchen_ceiling", "device_id": "dev-light", "platform":"hue", "config_entry_id":"bridge"},
+                    {"entity_id":"button.locate_ceiling", "id":"identify-entry", "unique_id":"identify-resource", "device_id":"dev-light", "platform":"hue", "config_entry_id":"bridge"},
                     {"id":"unassigned-entry","unique_id":"endpoint-2","platform":"test","entity_id":"light.unassigned"},
                     {"id":"exported-entry","unique_id":"exported","platform":"rhythm","entity_id":"light.rhythm_export","area_id":"kitchen"},
                     {"id":"disabled-entry","unique_id":"disabled","platform":"test","entity_id":"light.disabled","area_id":"kitchen","disabled_by":"user"},
@@ -1771,6 +1895,8 @@ mod tests {
             ws.send(Message::Text(response(
                 "get_states",
                 serde_json::json!([
+                    {"entity_id":"light.kitchen_ceiling", "state":"on", "attributes":{"supported_features":32}},
+                    {"entity_id":"button.locate_ceiling", "state":"unknown", "attributes":{"device_class":"identify"}},
                     {
                         "entity_id": "binary_sensor.kitchen_motion",
                         "state": "on",
@@ -1901,6 +2027,14 @@ mod tests {
         assert_eq!(rooms[1].id, "office");
 
         let full = discovery.get_or_fetch().unwrap();
+        assert_eq!(
+            full.lights["light.kitchen_ceiling"].identify,
+            Some(crate::light::HaIdentifyAction::Button {
+                entity_id: "button.locate_ceiling".into(),
+                registry_id: "identify-entry".into(),
+                unique_id: "identify-resource".into(),
+            })
+        );
         assert!(full
             .result
             .event_entity_areas
