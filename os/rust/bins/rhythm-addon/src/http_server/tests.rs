@@ -396,6 +396,40 @@ async fn revocation_drops_events_that_wake_an_already_waiting_stream() {
 }
 
 #[tokio::test]
+async fn identify_reaches_canonical_dispatch_through_authenticated_addon_listeners() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let token = phone["token"].as_str().unwrap();
+    let support = auth::issue_local_support_token(&f.state, Some("fixture".into())).unwrap();
+    let path = "/api/devices/canonical/missing-light/flash";
+    for (router, credential) in [
+        (f.admin(), ADMIN),
+        (f.mobile(), token),
+        (f.mobile(), support.token.as_str()),
+    ] {
+        let response = router
+            .oneshot(request(Method::POST, path, Some(credential), json!({})))
+            .await
+            .unwrap();
+        // The real canonical dispatcher must resolve the selected identity;
+        // the deployment route policy must not reject this lighting operation.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Device not found"));
+    }
+    for router in [f.admin(), f.mobile()] {
+        assert_eq!(
+            json_request(router, Method::POST, path, None, json!({}))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
 async fn support_scope_and_unavailable_appliance_operations_remain_closed() {
     let f = Fixture::new();
     let support = auth::issue_local_support_token(&f.state, Some("fixture".into())).unwrap();

@@ -72,6 +72,7 @@ const WRITE_PATHS: &[(&str, &str)] = &[
     ("DELETE", "/api/remote-access/config"),
     ("POST", "/api/cloud/join-proof"),
     ("PUT", "/api/addon/lights"),
+    ("POST", "/api/devices/canonical/:id/flash"),
     ("PUT", "/api/share-bundle"),
     ("POST", "/api/share-bundle/reset"),
     ("PUT", "/api/topology/nodes/:id/controls/:kind"),
@@ -211,11 +212,16 @@ mod tests {
             (Method::PUT, "/api/location"),
             (Method::POST, "/api/scenes/%2e%2e/apply"),
             (Method::PUT, "/api/light-runtimes/adaptive/arbitrary"),
+            (Method::PUT, "/api/devices/canonical/light/flash"),
+            (Method::POST, "/api/devices/canonical/a%2fb/flash"),
+            (Method::POST, "/api/devices/canonical/%252e%252e/flash"),
+            (Method::PUT, "/api/devices/canonical/light/preferred"),
         ] {
             assert!(!allows(&method, path), "{method} {path}");
         }
         assert!(allows(&Method::GET, "/api/state"));
         assert!(allows(&Method::POST, "/api/scenes/evening/apply"));
+        assert!(allows(&Method::POST, "/api/devices/canonical/light/flash"));
         assert!(allows(&Method::PUT, "/api/config"));
         assert!(!allows(&Method::DELETE, "/api/config"));
         assert!(allows(
