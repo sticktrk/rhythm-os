@@ -872,6 +872,21 @@ fn translate_catalog_event(
     {
         entry.capabilities = crate::light::capabilities(&data["new_state"]["attributes"]);
     }
+    if data["new_state"]["attributes"]
+        .get("supported_features")
+        .is_some()
+        && !matches!(
+            entry.identify,
+            Some(crate::light::HaIdentifyAction::Button { .. })
+        )
+    {
+        entry.identify = (data["new_state"]["attributes"]["supported_features"]
+            .as_u64()
+            .unwrap_or(0)
+            & 8
+            != 0)
+            .then_some(crate::light::HaIdentifyAction::Flash);
+    }
     entry.observation = observation.clone();
     if in_flight && external_candidate {
         cache.pending_manual.insert(
