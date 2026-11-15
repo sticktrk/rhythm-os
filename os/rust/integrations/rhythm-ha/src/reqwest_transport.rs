@@ -4,7 +4,7 @@
 //! without platform-specific code.
 
 use std::mem::ManuallyDrop;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +16,7 @@ use crate::transport::{EntityState, HaConnectionConfig, HaTransport};
 
 const HA_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HA_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const HA_SERVICE_LIVENESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 type ServiceSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -23,9 +24,13 @@ type ServiceSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 /// exact HA context. The REST changed-state list also includes unrelated
 /// concurrent actions, so it cannot establish ownership of those contexts.
 struct ServiceSession {
-    runtime: tokio::runtime::Runtime,
-    socket: Option<ServiceSocket>,
+    socket: ServiceSocket,
     next_id: u64,
+}
+
+struct ServiceCall {
+    command: Value,
+    reply: mpsc::Sender<Result<Vec<String>>>,
 }
 
 async fn receive_service_message(socket: &mut ServiceSocket) -> Result<Value> {
@@ -44,80 +49,123 @@ async fn receive_service_message(socket: &mut ServiceSocket) -> Result<Value> {
 }
 
 impl ServiceSession {
-    fn call(
-        &mut self,
-        config: &HaConnectionConfig,
-        domain: &str,
-        service: &str,
-        data: &Value,
-    ) -> Result<Vec<String>> {
-        let Self {
-            runtime,
-            socket,
-            next_id,
-        } = self;
-        let result = runtime.block_on(async {
-            tokio::time::timeout(HA_HTTP_REQUEST_TIMEOUT, async {
-                if socket.is_none() {
-                    let (mut connected, _) =
-                        tokio_tungstenite::connect_async(config.ws_url()).await?;
-                    let greeting = receive_service_message(&mut connected).await?;
-                    anyhow::ensure!(
-                        greeting["type"] == "auth_required",
-                        "HA service authentication expected"
-                    );
-                    connected
-                        .send(Message::Text(
-                            json!({"type":"auth", "access_token":config.token}).to_string(),
-                        ))
-                        .await?;
-                    let authenticated = receive_service_message(&mut connected).await?;
-                    anyhow::ensure!(
-                        authenticated["type"] == "auth_ok",
-                        "HA service authentication rejected"
-                    );
-                    *socket = Some(connected);
-                    *next_id = 1;
-                }
-                let id = *next_id;
-                *next_id += 1;
-                let connected = socket.as_mut().expect("authenticated service socket");
-                connected
-                    .send(Message::Text(
-                        json!({
-                            "id":id, "type":"call_service", "domain":domain,
-                            "service":service, "service_data":data,
-                        })
-                        .to_string(),
-                    ))
-                    .await?;
-                loop {
-                    let message = receive_service_message(connected).await?;
-                    if message["type"] != "result" || message["id"].as_u64() != Some(id) {
-                        continue;
+    async fn connect(config: &HaConnectionConfig) -> Result<Self> {
+        let (mut socket, _) = tokio_tungstenite::connect_async(config.ws_url()).await?;
+        let greeting = receive_service_message(&mut socket).await?;
+        anyhow::ensure!(
+            greeting["type"] == "auth_required",
+            "HA service authentication expected"
+        );
+        socket
+            .send(Message::Text(
+                json!({"type":"auth", "access_token":config.token}).to_string(),
+            ))
+            .await?;
+        let authenticated = receive_service_message(&mut socket).await?;
+        anyhow::ensure!(
+            authenticated["type"] == "auth_ok",
+            "HA service authentication rejected"
+        );
+        Ok(Self { socket, next_id: 1 })
+    }
+
+    async fn exchange(&mut self, mut request: Value, response_type: &str) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        request["id"] = id.into();
+        self.socket.send(Message::Text(request.to_string())).await?;
+        loop {
+            let message = receive_service_message(&mut self.socket).await?;
+            if message["type"] == response_type && message["id"].as_u64() == Some(id) {
+                return Ok(message);
+            }
+        }
+    }
+
+    async fn call(&mut self, command: Value) -> Result<Vec<String>> {
+        let message = self.exchange(command, "result").await?;
+        anyhow::ensure!(
+            message["success"] == true,
+            "HA service call rejected: {}",
+            message["error"]
+        );
+        let context = message["result"]["context"]["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("HA service result missing command context")?;
+        Ok(vec![context.to_owned()])
+    }
+}
+
+async fn run_service_session(
+    config: HaConnectionConfig,
+    mut requests: tokio::sync::mpsc::Receiver<ServiceCall>,
+) {
+    let mut session: Option<ServiceSession> = None;
+    loop {
+        let request = if let Some(current) = session.as_mut() {
+            tokio::select! {
+                message = receive_service_message(&mut current.socket) => {
+                    if message.is_err() {
+                        log::debug!("HA command WebSocket closed while idle");
+                        session = None;
                     }
-                    anyhow::ensure!(
-                        message["success"] == true,
-                        "HA service call rejected: {}",
-                        message["error"]
-                    );
-                    let context = message["result"]["context"]["id"]
-                        .as_str()
-                        .filter(|id| !id.is_empty())
-                        .context("HA service result missing command context")?;
-                    return Ok(vec![context.to_owned()]);
+                    continue;
                 }
-            })
-            .await
-            .context("HA service deadline exceeded")?
-        });
+                request = requests.recv() => request,
+            }
+        } else {
+            requests.recv().await
+        };
+        let Some(ServiceCall { command, reply }) = request else {
+            break;
+        };
+
+        let result = tokio::time::timeout(HA_HTTP_REQUEST_TIMEOUT, async {
+            // An HA API ping checks the full path through Supervisor to Core.
+            // Reconnecting here is safe because no service frame has been sent.
+            if let Some(current) = session.as_mut() {
+                let ping = current.exchange(json!({"type":"ping"}), "pong");
+                if !matches!(
+                    tokio::time::timeout(HA_SERVICE_LIVENESS_TIMEOUT, ping).await,
+                    Ok(Ok(_))
+                ) {
+                    log::debug!("HA command WebSocket liveness check failed; reconnecting");
+                    session = None;
+                }
+            }
+            if session.is_none() {
+                session = Some(ServiceSession::connect(&config).await?);
+            }
+            session
+                .as_mut()
+                .expect("authenticated service session")
+                .call(command)
+                .await
+        })
+        .await
+        .context("HA service deadline exceeded")
+        .and_then(|result| result);
         if result.is_err() {
             // A timeout/disconnect may follow a committed side effect. Clear the
             // connection for the next action, but never retry this command.
-            *socket = None;
+            session = None;
         }
-        result
+        let _ = reply.send(result);
     }
+}
+
+fn start_service_worker(
+    config: HaConnectionConfig,
+) -> Result<tokio::sync::mpsc::Sender<ServiceCall>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    std::thread::Builder::new()
+        .name("ha-service-websocket".into())
+        .spawn(move || runtime.block_on(run_service_session(config, receiver)))?;
+    Ok(sender)
 }
 
 /// HA transport with blocking REST reads and an authenticated service WebSocket.
@@ -127,20 +175,16 @@ impl ServiceSession {
 /// contains an internal tokio runtime that cannot be dropped in an async context).
 pub struct ReqwestHaTransport {
     client: ManuallyDrop<reqwest::blocking::Client>,
-    service_session: ManuallyDrop<Mutex<ServiceSession>>,
+    service_worker: Mutex<Option<tokio::sync::mpsc::Sender<ServiceCall>>>,
     config: HaConnectionConfig,
 }
 
 impl Drop for ReqwestHaTransport {
     fn drop(&mut self) {
         let client = unsafe { ManuallyDrop::take(&mut self.client) };
-        let service_session = unsafe { ManuallyDrop::take(&mut self.service_session) };
         std::thread::Builder::new()
             .name("reqwest-drop".to_string())
-            .spawn(move || {
-                drop(service_session);
-                drop(client);
-            })
+            .spawn(move || drop(client))
             .ok();
     }
 }
@@ -154,17 +198,9 @@ impl ReqwestHaTransport {
             .connect_timeout(HA_HTTP_CONNECT_TIMEOUT)
             .timeout(HA_HTTP_REQUEST_TIMEOUT)
             .build()?;
-        let service_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-
         Ok(Self {
             client: ManuallyDrop::new(client),
-            service_session: ManuallyDrop::new(Mutex::new(ServiceSession {
-                runtime: service_runtime,
-                socket: None,
-                next_id: 1,
-            })),
+            service_worker: Mutex::new(None),
             config,
         })
     }
@@ -182,10 +218,28 @@ impl HaTransport for ReqwestHaTransport {
         service: &str,
         data: &serde_json::Value,
     ) -> Result<Vec<String>> {
-        self.service_session
+        // Keep synchronous callers serialized across request and reply. The
+        // worker owns the socket and keeps reading even between calls.
+        let mut worker = self
+            .service_worker
             .lock()
-            .map_err(|_| anyhow::anyhow!("HA service connection lock"))?
-            .call(&self.config, domain, service, data)
+            .map_err(|_| anyhow::anyhow!("HA service connection lock"))?;
+        if worker.as_ref().is_none_or(|sender| sender.is_closed()) {
+            *worker = Some(start_service_worker(self.config.clone())?);
+        }
+        let (reply, result) = mpsc::channel();
+        worker
+            .as_ref()
+            .expect("HA service worker started")
+            .try_send(ServiceCall {
+                command: json!({
+                    "type":"call_service", "domain":domain,
+                    "service":service, "service_data":data,
+                }),
+                reply,
+            })
+            .context("HA service worker unavailable")?;
+        result.recv().context("HA service worker stopped")?
     }
 
     fn get_states(&self) -> Result<Vec<EntityState>> {
