@@ -4,7 +4,7 @@ use super::{
     OperationTier,
 };
 use crate::commands::{self, ReviewCheck};
-use crate::scenes::SceneDefinition;
+use crate::scenes::{HomeSceneApplyResponse, SceneDefinition};
 use crate::state::{AppState, SharedState, UpdateChannel};
 use crate::topology::InputBinding;
 use rhythm_core::{
@@ -214,8 +214,26 @@ impl Edit {
                 let mut definition: Option<SceneDefinition> = parse(&args["definition"])?;
                 if let Some(scene) = &mut definition {
                     scene.normalize();
-                    if scene.id != id || scene.light.is_none() {
-                        return Err(invalid("Choose a matching scene ID and light layer."));
+                    let layer = scene
+                        .light
+                        .as_ref()
+                        .ok_or_else(|| invalid("Choose a scene with a light layer."))?;
+                    if scene.id != id {
+                        return Err(invalid("Choose a matching scene ID."));
+                    }
+                    let mut outputs = layer
+                        .default_output
+                        .iter()
+                        .chain(&layer.palette)
+                        .chain(layer.entries.iter().map(|entry| &entry.output))
+                        .peekable();
+                    if outputs.peek().is_none() {
+                        return Err(invalid("A light scene needs at least one output."));
+                    }
+                    for output in outputs {
+                        output
+                            .to_command(layer.default_transition_ms)
+                            .map_err(invalid)?;
                     }
                 } else if !app.scenes.contains_key(&id) {
                     return Err(invalid("This scene does not exist."));
@@ -439,7 +457,7 @@ impl Edit {
                         if node.kind.is_light_addressable()
                             && !crate::topology::is_internal_light_node_id(&node.id) =>
                     {
-                        bindings.insert(node.id.clone(),json!({"parent_id":node.parent_id,"disabled":node.disabled,"managed":app.rhythm_automation_allowed_for_node(&node.id),"previous_scene":node.profile_settings.mood_scene_id,"mood_active":node.mood_active}));
+                        bindings.insert(node.id.clone(),json!({"parent_id":node.parent_id,"disabled":node.disabled,"managed":app.rhythm_automation_allowed_for_node(&node.id) && app.canonical_registry.get(&node.id).is_none_or(|light|app.ha_selection_allows_light(light)),"previous_scene":node.profile_settings.mood_scene_id,"mood_active":node.mood_active}));
                     }
                     Self::Scene { id, .. }
                         if node.profile_settings.mood_scene_id.as_ref() == Some(id) =>
@@ -477,7 +495,7 @@ impl Edit {
         state: &SharedState,
         check: ReviewCheck<'_>,
         token: &str,
-    ) -> anyhow::Result<Option<Value>> {
+    ) -> anyhow::Result<Option<HomeSceneApplyResponse>> {
         match self {
             Self::KeepScene { preview_id, .. } => {
                 commands::do_scene_preview_commit_reviewed(state, preview_id, check)?
@@ -492,11 +510,9 @@ impl Edit {
                     id,
                     request,
                     commands::default_http_batch_dispatch_spacing(),
-                    check,
+                    Some(check),
                 )?;
-                return Ok(Some(
-                    json!({"queued":result.queued,"targets":result.targets.iter().map(|t|json!({"target_id":t.target_id,"applied":t.error.is_none(),"unresolved_node_ids":t.unresolved_node_ids})).collect::<Vec<_>>(),"applied_target_count":result.applied_target_count,"skipped_target_count":result.skipped_target_count}),
-                ));
+                return Ok(Some(result));
             }
             Self::Scene { id, definition } => match definition {
                 Some(scene) => commands::do_scene_upsert_reviewed(state, scene.clone(), check)?,
@@ -734,7 +750,25 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
         crate::activity::LightActivityRecord::app(plan.edit.node().unwrap_or("global"), id);
     record.correlation_id = Some(token.clone());
     crate::activity::record_light_activity(state, record);
+    let mut status = "applied";
+    let dispatch = outcome.map(|result| {
+        let failed = result.targets.iter().filter(|t| t.error.is_some()).count();
+        let unresolved = result.targets.iter().any(|t| !t.unresolved_node_ids.is_empty());
+        if failed > 0 || unresolved {
+            status = "partially_applied";
+        } else if result.queued {
+            status = "queued";
+        }
+        let targets = result.targets.iter().map(|t| json!({
+            "target_id":t.target_id,
+            "applied":t.error.is_none(),
+            "affected_node_ids":t.affected_node_ids,
+            "unresolved_node_ids":t.unresolved_node_ids
+        })).collect::<Vec<_>>();
+        json!({"queued":result.queued,"targets":targets,"applied_target_count":result.applied_target_count,
+            "failed_target_count":failed,"skipped_target_count":result.skipped_target_count})
+    });
     Ok(
-        json!({"status":"applied","plan_id":token,"operation":id,"server_instance_id":plan.server,"after":after,"dispatch":outcome,"physical_verification":"not_observed"}),
+        json!({"status":status,"plan_id":token,"operation":id,"server_instance_id":plan.server,"after":after,"dispatch":dispatch,"physical_verification":"not_observed"}),
     )
 }

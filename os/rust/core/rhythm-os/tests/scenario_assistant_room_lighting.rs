@@ -273,3 +273,146 @@ async fn plan_tokens_are_scoped_by_operation_and_hub() {
     );
     assert_ne!(h.state.lock().unwrap().light_breaker_enabled, before);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_room_with_direct_and_ha_lights_reports_each_source_independently() {
+    let (mut h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+    h = h.with_discovery(rooms, devices);
+    h.sync();
+    let den = h.resolve("den");
+    let ha = h.add_hub("homeassistant", "integration.test");
+    let (rooms, devices) = rooms_with_lights(&[("study", "Study")]);
+    h.set_hub_discovery(&ha, rooms, devices);
+    h.sync_hub(&ha);
+    let (direct, imported) = {
+        let s = h.state.lock().unwrap();
+        let registry = &s.canonical_registry;
+        (
+            registry
+                .find_by_native_id(&h.hub_key, "light-den")
+                .unwrap()
+                .id
+                .clone(),
+            registry
+                .find_by_native_id(&ha, "light-study")
+                .unwrap()
+                .id
+                .clone(),
+        )
+    };
+    rhythm_os::commands::do_canonical_assign_room(&h.state, &imported, Some(&den)).unwrap();
+    {
+        let mut s = h.state.lock().unwrap();
+        s.platform_context = "rpiz";
+        s.hub_connection_status.insert(ha.clone(), false);
+        s.light_observations.insert(
+            direct.clone(),
+            rhythm_os::hub::LightObservation {
+                availability: "available".into(),
+                lights_on: Some(true),
+                brightness: Some(63),
+                kelvin: Some(3300),
+                xy: None,
+                rgb: None,
+                context_id: None,
+                source_at_epoch_ms: None,
+                received_at_epoch_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            },
+        );
+    }
+    let (status, view) = operation(&h, "explain_room_output", json!({"room_id":den})).await;
+    assert_eq!(status, 200, "{view}");
+    let reports = view["light_readback"].as_array().unwrap();
+    let lamp = |id: &str| reports.iter().find(|r| r["light_id"] == id).unwrap();
+    assert_eq!(lamp(&direct)["verification"], "fresh_device_readback");
+    assert_eq!(lamp(&direct)["observed"]["brightness"], 63);
+    assert_eq!(lamp(&imported)["availability"], "unavailable");
+    assert!(lamp(&imported)["observed"].is_null());
+    spy.reset();
+    let (status, receipt) = operation(
+        &h,
+        "control_room_power",
+        json!({"room_id":den,"power":"hard_off"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{receipt}");
+    assert!(
+        !spy.turn_off_calls().is_empty(),
+        "the standalone controller should receive the reviewed power command"
+    );
+    assert_eq!(receipt["server_acknowledged"], true);
+    assert!(receipt["light_readback"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["verification"] == "no_fresh_readback"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_factory_profile_reset_returns_the_installed_configuration() {
+    let (h, _, _) = installation();
+    let (status, plan) = operation(&h, "plan_profile_reset", json!({"profile_id":"rhythm"})).await;
+    assert_eq!(status, 200, "{plan}");
+    assert_eq!(plan["review"]["after"]["id"], "rhythm");
+    let (status, receipt) = operation(
+        &h,
+        "apply_profile_reset",
+        json!({"plan_id":plan["plan_id"],"confirmed":true}),
+    )
+    .await;
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["canonical_readback"], plan["review"]["after"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whole_home_receipt_distinguishes_queued_output_and_partial_scene_coverage() {
+    let (h, _, _) = installation();
+    let (tx, _rx) = std::sync::mpsc::sync_channel(32);
+    let lamp = {
+        let mut s = h.state.lock().unwrap();
+        s.light_breaker_enabled = true;
+        s.work_tx = Some(tx);
+        s.canonical_registry
+            .find_by_native_id(&h.hub_key, "light-kitchen")
+            .unwrap()
+            .id
+            .clone()
+    };
+    let scene = json!({"id":"single-lamp","name":"Single lamp","light":{"entries":[{
+        "target":{"kind":"node","node_id":lamp},"output":{"brightness":33,"color":{"kind":"kelvin","kelvin":3000}}
+    }]}});
+    let (status, plan) = operation(
+        &h,
+        "plan_scene_edit",
+        json!({"scene_id":"single-lamp","definition":scene}),
+    )
+    .await;
+    assert_eq!(status, 200, "{plan}");
+    let confirm = |plan: &Value| json!({"plan_id":plan["plan_id"],"confirmed":true});
+    assert_eq!(
+        operation(&h, "apply_scene_edit", confirm(&plan)).await.0,
+        200
+    );
+    for (scene, expected, failed) in [
+        ("halloween", "queued", 0),
+        ("single-lamp", "partially_applied", 1),
+    ] {
+        let (status, plan) = operation(
+            &h,
+            "plan_home_scene_edit",
+            json!({"scene_id":scene,"target_mode":"devices"}),
+        )
+        .await;
+        assert_eq!(status, 200, "{plan}");
+        let (status, result) = operation(&h, "apply_home_scene_edit", confirm(&plan)).await;
+        assert_eq!(status, 200, "{scene}: {result}");
+        assert_eq!(result["status"], expected, "{result}");
+        assert_eq!(result["dispatch"]["queued"], true);
+        assert_eq!(result["dispatch"]["failed_target_count"], failed);
+        assert_eq!(result["physical_verification"], "not_observed");
+    }
+}

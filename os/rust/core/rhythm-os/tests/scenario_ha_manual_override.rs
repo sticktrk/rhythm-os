@@ -602,3 +602,86 @@ fn one_reviewed_light_stays_manual_across_two_changed_periodic_cycles() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assistant_room_command_excludes_unreviewed_ha_siblings_from_output_and_verification() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    async fn call(f: &Fixture, id: &str, args: serde_json::Value) -> (u16, serde_json::Value) {
+        let response = rhythm_os::axum_router::api_routes()
+            .with_state(f.state.clone())
+            .oneshot(
+                Request::post(format!("/api/assistant/operations/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(args.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        (status, body)
+    }
+    for kind in [HA_HUB_TYPE, HubType::HA] {
+        let f = Fixture::with_selection(&LIGHTS[..1], kind);
+        let (status, body) = call(
+            &f,
+            "control_room_power",
+            json!({"room_id":f.room,"power":"hard_off"}),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        f.settle();
+        let commands = f.spy.calls_for_service("turn_off");
+        assert!(
+            !commands.is_empty(),
+            "the selected light must receive the command"
+        );
+        assert!(commands
+            .iter()
+            .all(|c| c.data["entity_id"] == json!([LIGHTS[0]])));
+        let reports = body["light_readback"].as_array().unwrap();
+        let report = |id: &str| reports.iter().find(|r| r["light_id"] == id).unwrap();
+        assert_eq!(report(&f.nodes[0])["control_scope"], "ha_selected");
+        assert_eq!(report(&f.nodes[0])["verification"], "no_fresh_readback");
+        assert_eq!(report(&f.nodes[1])["control_scope"], "outside_ha_selection");
+        assert_eq!(report(&f.nodes[1])["verification"], "outside_control_scope");
+        for mode in ["rooms", "devices"] {
+            let (status, plan) = call(
+                &f,
+                "plan_home_scene_edit",
+                json!({"scene_id":"halloween","target_mode":mode}),
+            )
+            .await;
+            assert_eq!(status, 200, "{plan}");
+            let (status, result) = call(
+                &f,
+                "apply_home_scene_edit",
+                json!({"plan_id":plan["plan_id"],"confirmed":true}),
+            )
+            .await;
+            assert_eq!(status, 200, "{mode}: {result}");
+            assert_eq!(result["dispatch"]["applied_target_count"], 1);
+            assert_eq!(result["dispatch"]["failed_target_count"], 0);
+            let target = &result["dispatch"]["targets"][0];
+            assert_eq!(
+                target["affected_node_ids"],
+                json!([f.nodes[0]]),
+                "{mode}: {target}"
+            );
+            f.settle();
+            let scene_calls = f.spy.calls_for_service("turn_on");
+            assert!(!scene_calls.is_empty());
+            assert!(
+                scene_calls
+                    .iter()
+                    .all(|c| c.data["entity_id"] == json!([LIGHTS[0]])),
+                "{scene_calls:?}"
+            );
+        }
+    }
+}

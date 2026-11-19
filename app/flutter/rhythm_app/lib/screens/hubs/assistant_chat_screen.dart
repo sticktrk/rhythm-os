@@ -444,10 +444,25 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     if (entries.isEmpty) _say('No fresh device readback is available.');
     for (final entry in entries) {
       final observed = entry['observed'];
-      final fresh =
-          entry['verification'] == 'fresh_device_readback' && observed is Map;
-      _say(
-          '${_name(entry['light_id'] as String?)} · ${fresh ? 'reported ${observed['on']}, brightness ${observed['brightness']}%' : 'no fresh device readback'}');
+      final name = _name(entry['light_id'] as String?);
+      if (entry['control_scope'] == 'outside_ha_selection') {
+        _say('$name · controlled by Home Assistant');
+      } else if (entry['verification'] == 'fresh_device_readback' &&
+          observed is Map) {
+        final details = [
+          if (observed['on'] is bool) observed['on'] ? 'on' : 'off',
+          if (observed['brightness'] is num)
+            "${observed['brightness']}% brightness",
+          if (observed['kelvin'] is num) "${observed['kelvin']} K",
+          if (observed['rgb'] is List) "RGB ${observed['rgb'].join(', ')}",
+          if (observed['xy'] is List && observed['rgb'] == null)
+            "xy ${observed['xy'].join(', ')}",
+        ];
+        _say(
+            '$name · ${details.isEmpty ? 'no fresh device readback' : details.join(', ')}');
+      } else {
+        _say('$name · no fresh device readback');
+      }
     }
   }
 

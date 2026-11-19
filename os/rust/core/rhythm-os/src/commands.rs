@@ -4887,15 +4887,20 @@ fn serialize_light_profile_config_resource(config: &LightProfileConfig) -> Resul
     serde_json::to_string(config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
 }
 
-/// Hash the same numeric JSON representation clients review through
+/// Return the same numeric JSON representation clients review through
 /// `GET /api/config`. Serializing an `f32` directly produces its shortest
 /// round-trippable decimal; converting it straight to a generic JSON `Value`
 /// first widens it to `f64` and can expose irrelevant binary float digits.
-fn light_profile_config_resource_sha256(config: &LightProfileConfig) -> Result<String> {
+pub(crate) fn light_profile_config_resource(config: &LightProfileConfig) -> Result<Value> {
     let serialized = serialize_light_profile_config_resource(config)?;
-    let resource: Value = serde_json::from_str(&serialized)
-        .map_err(|e| anyhow::anyhow!("parse serialized config resource: {}", e))?;
-    Ok(canonical_json_sha256(&resource))
+    serde_json::from_str(&serialized)
+        .map_err(|e| anyhow::anyhow!("parse serialized config resource: {}", e))
+}
+
+fn light_profile_config_resource_sha256(config: &LightProfileConfig) -> Result<String> {
+    Ok(canonical_json_sha256(&light_profile_config_resource(
+        config,
+    )?))
 }
 
 // ============================================================================
@@ -5091,11 +5096,11 @@ fn light_scene_target_scope_node_ids(
             let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
                 continue;
             };
-            if device.device_type == DeviceType::Light {
+            if device.device_type == DeviceType::Light && s.ha_selection_allows_light(device) {
                 node_ids.insert(node.id.clone());
             }
         }
-        if !node_ids.is_empty() {
+        if !node_ids.is_empty() || s.platform_context == "ha_addon" {
             return node_ids;
         }
     }
@@ -5103,13 +5108,18 @@ fn light_scene_target_scope_node_ids(
     if let Some(node) = s.topology.get_device_node(target_id) {
         if s.canonical_registry
             .get(&node.canonical_device_id)
-            .is_some_and(|device| device.device_type == DeviceType::Light)
+            .is_some_and(|device| {
+                device.device_type == DeviceType::Light && s.ha_selection_allows_light(device)
+            })
         {
             node_ids.insert(node.id.clone());
             return node_ids;
         }
     }
 
+    if s.platform_context == "ha_addon" {
+        return node_ids;
+    }
     let Some(target) = runtime.engine_effective_node_snapshot(target_id) else {
         return node_ids;
     };
@@ -6568,15 +6578,17 @@ pub fn do_home_scene_apply(
     request: HomeSceneApplyRequest,
     dispatch_spacing: Duration,
 ) -> Result<HomeSceneApplyResponse> {
-    do_home_scene_apply_reviewed(state, scene_id, request, dispatch_spacing, &|_| Ok(()))
+    do_home_scene_apply_reviewed(state, scene_id, request, dispatch_spacing, None)
 }
 
+/// A managed review limits this operation to rooms where Rhythm owns automation.
+/// Manual whole-home scene requests retain their explicit house-wide scope.
 pub(crate) fn do_home_scene_apply_reviewed(
     state: &SharedState,
     scene_id: &str,
     request: HomeSceneApplyRequest,
     dispatch_spacing: Duration,
-    check: ReviewCheck<'_>,
+    managed_review: Option<ReviewCheck<'_>>,
 ) -> Result<HomeSceneApplyResponse> {
     if is_native_scene_id(scene_id) {
         anyhow::bail!(
@@ -6612,7 +6624,14 @@ pub(crate) fn do_home_scene_apply_reviewed(
 
     let seed = fresh_scene_apply_seed(&scene);
     if request.target_mode == HomeSceneTargetMode::Devices {
-        return home_scene_apply_to_devices(state, scene, &request, dispatch_spacing, seed, check);
+        return home_scene_apply_to_devices(
+            state,
+            scene,
+            &request,
+            dispatch_spacing,
+            seed,
+            managed_review,
+        );
     }
 
     let transaction_lock = {
@@ -6628,11 +6647,20 @@ pub(crate) fn do_home_scene_apply_reviewed(
     // house.
     let (runtime, targets, planned) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+        if let Some(check) = managed_review {
+            check(&s)?;
+        }
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let targets = home_scene_targets_locked(&s, &runtime);
+        let mut targets = home_scene_targets_locked(&s, &runtime);
+        if managed_review.is_some() {
+            let before = targets.eligible.len();
+            targets
+                .eligible
+                .retain(|id| s.rhythm_automation_allowed_for_node(id));
+            targets.skipped += before - targets.eligible.len();
+        }
         // A spread palette places every slot on the colour path relative to
         // the whole house, so count the slots first, then plan each target
         // with the house-wide span and its own starting slot.
@@ -6958,7 +6986,7 @@ fn home_scene_device_targets_locked(
             if scope.len() != 1 || !scope.contains(&snap.id) {
                 continue;
             }
-            if snap.disabled {
+            if snap.disabled || s.platform_context == "ha_addon" {
                 skipped += 1;
                 continue;
             }
@@ -6984,6 +7012,10 @@ fn home_scene_device_targets_locked(
             if device.device_type != DeviceType::Light {
                 continue;
             }
+            if !s.ha_selection_allows_light(device) {
+                skipped += 1;
+                continue;
+            }
             let Some(endpoint) = device.preferred_endpoint() else {
                 skipped += 1;
                 continue;
@@ -6999,7 +7031,7 @@ fn home_scene_device_targets_locked(
                 room_id: node.parent_id.clone(),
                 hub: endpoint.hub_key.to_string(),
             }
-        } else if s.composite_controller.is_none() {
+        } else if s.composite_controller.is_none() && s.platform_context != "ha_addon" {
             HomeSceneDeviceTarget {
                 node_id: snap.id.clone(),
                 dispatch_node_id: snap.id.clone(),
@@ -7107,7 +7139,7 @@ fn home_scene_apply_to_devices(
     request: &HomeSceneApplyRequest,
     dispatch_spacing: Duration,
     seed: Option<u32>,
-    check: ReviewCheck<'_>,
+    managed_review: Option<ReviewCheck<'_>>,
 ) -> Result<HomeSceneApplyResponse> {
     // Enumerate and plan from one serialized topology snapshot so the palette
     // order cannot observe a half-applied house.
@@ -7120,11 +7152,20 @@ fn home_scene_apply_to_devices(
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+        if let Some(check) = managed_review {
+            check(&s)?;
+        }
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let targets = home_scene_device_targets_locked(&s, &runtime);
+        let mut targets = home_scene_device_targets_locked(&s, &runtime);
+        if managed_review.is_some() {
+            let before = targets.eligible.len();
+            targets
+                .eligible
+                .retain(|target| s.rhythm_automation_allowed_for_node(&target.node_id));
+            targets.skipped += before - targets.eligible.len();
+        }
         // Every light without an explicit entry takes one palette slot; the
         // house-wide span lets a spread palette give each of them its own
         // colour.
@@ -16864,9 +16905,36 @@ pub fn do_config_set_with_options(
 /// preconditions still match inside the same state lock as the mutation.
 pub fn do_config_set_with_options_if_matches(
     state: &SharedState,
-    mut config: LightProfileConfig,
+    config: LightProfileConfig,
     apply_active_outputs: bool,
     precondition: Option<(&str, &str)>,
+) -> Result<()> {
+    let profile_id = config.id.clone();
+    do_config_set_reviewed(state, config, apply_active_outputs, &|s| {
+        if let Some((expected_server_instance_id, expected_resource_sha256)) = precondition {
+            if s.server_instance_id != expected_server_instance_id {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live server identity changed"
+                ));
+            }
+            let current = s
+                .light_profile_config(&profile_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", profile_id))?;
+            if light_profile_config_resource_sha256(current)? != expected_resource_sha256 {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live config hash changed"
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn do_config_set_reviewed(
+    state: &SharedState,
+    mut config: LightProfileConfig,
+    apply_active_outputs: bool,
+    check: ReviewCheck<'_>,
 ) -> Result<()> {
     rhythm_core::normalize_builtin_state_profile_config(&mut config);
     config.normalize_float_precision();
@@ -16909,21 +16977,7 @@ pub fn do_config_set_with_options_if_matches(
 
     let (runtime, should_apply_outputs, active_mode, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        if let Some((expected_server_instance_id, expected_resource_sha256)) = precondition {
-            if s.server_instance_id != expected_server_instance_id {
-                return Err(anyhow::anyhow!(
-                    "config precondition failed: live server identity changed"
-                ));
-            }
-            let current = s
-                .light_profile_config(&config.id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", config.id))?;
-            if light_profile_config_resource_sha256(current)? != expected_resource_sha256 {
-                return Err(anyhow::anyhow!(
-                    "config precondition failed: live config hash changed"
-                ));
-            }
-        }
+        check(&s)?;
         if !s.light_profile_configs.contains_key(&config.id) {
             return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
         }

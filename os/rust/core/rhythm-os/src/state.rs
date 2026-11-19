@@ -1596,6 +1596,23 @@ impl AppState {
             && !self.external_controller_authority_pending.contains(key)
     }
 
+    /// Whether the add-on's resident-reviewed HA entity selection contains a
+    /// canonical light. The HA controller also checks live identity and readiness
+    /// before sending each service call.
+    pub(crate) fn ha_selection_allows_light(
+        &self,
+        light: &crate::canonical::identity::CanonicalDevice,
+    ) -> bool {
+        self.platform_context != "ha_addon"
+            || light.active_endpoints().any(|ep| {
+                matches!(ep.hub_key.hub_type.as_str(), HubType::HA | "homeassistant")
+                    && self
+                        .managed_ha_lights
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&ep.native_id))
+            })
+    }
+
     /// Effective unattended-output admission combines the durable room choice
     /// with the live controller transition fence. Desired all-Rhythm consent
     /// must not publish effective authority while capture, suppression, or
