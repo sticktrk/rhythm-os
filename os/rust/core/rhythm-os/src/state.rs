@@ -438,7 +438,8 @@ pub struct AppState {
     /// import replace `scenes` but deliberately leave this alone.
     pub seeded_factory_scene_ids: BTreeSet<String>,
     /// Short-lived reviews of scene, schedule and lighting settings changes.
-    pub assistant_automation_plans: std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
+    pub assistant_automation_plans:
+        std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
     /// Hub-local reviewed lighting changes. Plans expire and are consumed on apply.
     pub assistant_move_reviews: std::collections::VecDeque<(String, u64)>,
     pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,
@@ -1593,6 +1594,23 @@ impl AppState {
         !self.authority_state_recovery_required
             && !self.external_controller_initial_sync_pending.contains(key)
             && !self.external_controller_authority_pending.contains(key)
+    }
+
+    /// Whether the add-on's resident-reviewed HA entity selection contains a
+    /// canonical light. The HA controller also checks live identity and readiness
+    /// before sending each service call.
+    pub(crate) fn ha_selection_allows_light(
+        &self,
+        light: &crate::canonical::identity::CanonicalDevice,
+    ) -> bool {
+        self.platform_context != "ha_addon"
+            || light.active_endpoints().any(|ep| {
+                matches!(ep.hub_key.hub_type.as_str(), HubType::HA | "homeassistant")
+                    && self
+                        .managed_ha_lights
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&ep.native_id))
+            })
     }
 
     /// Effective unattended-output admission combines the durable room choice

@@ -194,7 +194,10 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
             )
         }
         "plan_profile_bundle_reset" => {
-            let bundle = json!(commands::build_factory_default_profile_bundle_dto());
+            let bundle: Value = serde_json::from_str(
+                &commands::build_factory_default_profile_bundle().map_err(|_| unavailable())?,
+            )
+            .map_err(|_| unavailable())?;
             (
                 "apply_profile_bundle_reset",
                 Value::Null,
@@ -208,9 +211,11 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
             let default =
                 crate::factory_default_config::factory_default_light_profile_config(profile)
                     .ok_or_else(invalid)?;
+            let default =
+                commands::light_profile_config_resource(&default).map_err(|_| unavailable())?;
             (
                 "apply_profile_reset",
-                json!({"profile":default,"resource":canonical_json_sha256(&current)}),
+                default.clone(),
                 json!({"before":current,"after":default}),
             )
         }
@@ -298,22 +303,9 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
             &check,
         ),
         "apply_profile_reset" => {
-            {
-                let s = state.lock().map_err(|_| unavailable())?;
-                check(&s).map_err(|_| stale())?;
-            }
-            let config =
-                serde_json::from_value(plan.payload["profile"].clone()).map_err(|_| invalid())?;
-            commands::do_config_set_with_options_if_matches(
-                state,
-                config,
-                false,
-                Some((
-                    &plan.installation,
-                    plan.payload["resource"].as_str().ok_or_else(invalid)?,
-                )),
-            )
-            .and_then(|_| commands::build_config(state, plan.payload["profile"]["id"].as_str()))
+            let config = serde_json::from_value(plan.payload.clone()).map_err(|_| invalid())?;
+            commands::do_config_set_reviewed(state, config, false, &check)
+                .and_then(|_| commands::build_config(state, plan.payload["id"].as_str()))
         }
         _ => return Err(invalid()),
     };

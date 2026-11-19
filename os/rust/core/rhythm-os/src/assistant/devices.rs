@@ -247,12 +247,17 @@ fn hue_rooms(s: &AppState, key: &HubKey) -> Vec<Value> {
         .collect()
 }
 fn integrations(s: &AppState) -> Value {
-    let mut configured: Vec<_> = integration_keys(s).iter().map(|k| json!({
-        "bridge_id":bridge_id(k),"integration":k.hub_type.as_str(),"connected":s.hub_is_connected(k),
-        "configured":s.hub_credentials.contains_key(k), "room_automation_owners":hue_rooms(s,k),
-        "topology_sync_enabled":s.topology.external_room_topology_sync_is_enabled(k),
-    })).collect();
-    configured.sort_by_key(|v| v["bridge_id"].as_str().map(str::to_owned));
+    let configured: Vec<_> = integration_keys(s).iter().map(|key| {
+        let mut info = json!({
+            "bridge_id":bridge_id(key),"integration":key.hub_type.as_str(),
+            "connected":s.hub_is_connected(key),"configured":s.hub_credentials.contains_key(key),
+        });
+        if key.hub_type.as_str() == HubType::HUE {
+            info["room_automation_owners"] = json!(hue_rooms(s,key));
+            info["topology_sync_enabled"] = json!(s.topology.external_room_topology_sync_is_enabled(key));
+        }
+        info
+    }).collect();
     let supported:Vec<_>=s.hub_capabilities.iter().map(|c|json!({"integration":c.hub_type,"onboarding":c.device_onboarding_methods,"supports_removal":c.supports_unpairing})).collect();
     json!({"configured":configured,"supported":supported})
 }
@@ -273,7 +278,8 @@ fn setup(s: &AppState, step: &str) -> Result<Value> {
         "pair" if s.platform_context=="ha_addon"=>handoff(s,"home_assistant","resident","Open Add Device on your phone for this hub, scan the code and complete the Home Assistant pairing step."),
         "pair"=>handoff(s,"rhythm_app","resident","Open Add Device on the phone for this hub. Scan the pairing code or use the device's nearby pairing flow, then refresh discovery here."),
         "mobile_enrollment"=>handoff(s,"home_assistant_addon","owner","In the add-on panel, open Connect mobile app and scan the owner-issued enrollment code with the phone."),
-        "bridge_authority"=>handoff(s,"rhythm_app","owner","Review the per-room Hue versus Rhythm automation owner and bridge topology sync in the Hue Bridge settings."),
+        "bridge_authority" if s.platform_context=="ha_addon" => ha_area(s),
+        "bridge_authority"=>json!({"status":"ready","server_instance_id":s.server_instance_id,"next_operation":"read_integrations","instructions":"Select the Hue bridge and review every room owner with plan_hue_authority."}),
         "bridge_credentials"=>handoff(s,"rhythm_app","owner","Open the hub's integration settings to connect or disconnect a bridge and authorize its credentials."),
         "archived_device"=>handoff(s,"rhythm_app","owner","Open Removed Devices and review any permanent deletion on the owner device."),
         _=>return Err(invalid("Unknown device setup step."))

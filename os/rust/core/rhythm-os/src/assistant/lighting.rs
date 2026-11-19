@@ -362,12 +362,28 @@ fn light_reports(app: &AppState, id: &str, since: Option<u64>) -> Vec<Value> {
         } else {
             observation.map_or("unknown", |o| o.availability.as_str())
         };
+        // The HA area can include lights the resident kept under HA control.
+        // Their independently reported state cannot verify a Rhythm command.
+        let scope = if app.platform_context == "ha_addon" {
+            if app.ha_selection_allows_light(light) {
+                "ha_selected"
+            } else {
+                "outside_ha_selection"
+            }
+        } else {
+            "room_member"
+        };
         let readback = observation.filter(|o| {
             let source_ms = o
                 .source_at_epoch_ms
                 .and_then(|ms| u64::try_from(ms).ok())
                 .unwrap_or(o.received_at_epoch_ms);
             availability == "available"
+                && (o.lights_on.is_some()
+                    || o.brightness.is_some()
+                    || o.kelvin.is_some()
+                    || o.rgb.is_some()
+                    || o.xy.is_some())
                 && source_ms <= now
                 && now.saturating_sub(source_ms) <= 60_000
                 && since.is_none_or(|t| source_ms > t && o.received_at_epoch_ms > t)
@@ -375,10 +391,11 @@ fn light_reports(app: &AppState, id: &str, since: Option<u64>) -> Vec<Value> {
         reports.push(json!({
             "light_id": light.id,
             "availability": availability,
-            "verification": if readback.is_some() { "fresh_device_readback" } else { "no_fresh_readback" },
+            "control_scope": scope,
+            "verification": if since.is_some() && scope == "outside_ha_selection" { "outside_control_scope" } else if readback.is_some() { "fresh_device_readback" } else { "no_fresh_readback" },
             "observed": readback.map(|o| json!({
                 "on": o.lights_on, "brightness": o.brightness, "kelvin": o.kelvin,
-                "rgb": o.rgb, "received_at_epoch_ms": o.received_at_epoch_ms,
+                "rgb": o.rgb, "xy":o.xy, "received_at_epoch_ms": o.received_at_epoch_ms,
             })),
         }));
     }
@@ -412,7 +429,8 @@ fn describe(state: &SharedState, room: &NodeStateDto, since: Option<u64>) -> Res
         "legacy_schedule":room.profile_settings.room_schedule,
         "profile_override":room.profile_settings.profile_overrides.get(&ctx.config.id),
         "mood_scene_id":room.profile_settings.mood_scene_id,
-        "adaptation_enabled":room.rhythm_enabled && !room.disabled,
+        "adaptation_enabled":room.rhythm_enabled && !room.disabled && app.light_breaker_enabled && app.rhythm_automation_allowed_for_node(&room.id),
+        "light_breaker_enabled":app.light_breaker_enabled,
         "canonical_power":room.lights_on,
         "canonical_brightness":room.brightness,
         "canonical_kelvin":room.kelvin,

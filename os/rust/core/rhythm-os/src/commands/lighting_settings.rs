@@ -197,10 +197,15 @@ pub fn do_lighting_settings_import(
     state: &SharedState,
     payload: LightingSettingsImportPayload,
 ) -> Result<String> {
-    review_lighting_settings_import(state,payload,false,&|_| Ok(()))
+    review_lighting_settings_import(state, payload, false, &|_| Ok(()))
 }
 
-pub(crate) fn review_lighting_settings_import(state:&SharedState, payload:LightingSettingsImportPayload, preview:bool, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn review_lighting_settings_import(
+    state: &SharedState,
+    payload: LightingSettingsImportPayload,
+    preview: bool,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let mut incoming = portable_settings(payload.settings)?;
     let mut warnings: BTreeSet<String> = incoming.warnings.into_iter().collect();
     let mappings = payload.node_mappings;

@@ -3261,7 +3261,11 @@ pub fn do_input_binding_set(state: &SharedState, binding: InputBinding) -> Resul
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn do_input_binding_set_reviewed(state: &SharedState, mut binding: InputBinding, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_input_binding_set_reviewed(
+    state: &SharedState,
+    mut binding: InputBinding,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     binding.source_node_id = resolve_node_id(state, &binding.source_node_id);
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3318,7 +3322,11 @@ pub fn do_input_binding_delete(state: &SharedState, binding_id: &str) -> Result<
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn do_input_binding_delete_reviewed(state: &SharedState, binding_id: &str, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_input_binding_delete_reviewed(
+    state: &SharedState,
+    binding_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         check(&s)?;
@@ -4879,15 +4887,20 @@ fn serialize_light_profile_config_resource(config: &LightProfileConfig) -> Resul
     serde_json::to_string(config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
 }
 
-/// Hash the same numeric JSON representation clients review through
+/// Return the same numeric JSON representation clients review through
 /// `GET /api/config`. Serializing an `f32` directly produces its shortest
 /// round-trippable decimal; converting it straight to a generic JSON `Value`
 /// first widens it to `f64` and can expose irrelevant binary float digits.
-fn light_profile_config_resource_sha256(config: &LightProfileConfig) -> Result<String> {
+pub(crate) fn light_profile_config_resource(config: &LightProfileConfig) -> Result<Value> {
     let serialized = serialize_light_profile_config_resource(config)?;
-    let resource: Value = serde_json::from_str(&serialized)
-        .map_err(|e| anyhow::anyhow!("parse serialized config resource: {}", e))?;
-    Ok(canonical_json_sha256(&resource))
+    serde_json::from_str(&serialized)
+        .map_err(|e| anyhow::anyhow!("parse serialized config resource: {}", e))
+}
+
+fn light_profile_config_resource_sha256(config: &LightProfileConfig) -> Result<String> {
+    Ok(canonical_json_sha256(&light_profile_config_resource(
+        config,
+    )?))
 }
 
 // ============================================================================
@@ -5083,11 +5096,11 @@ fn light_scene_target_scope_node_ids(
             let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
                 continue;
             };
-            if device.device_type == DeviceType::Light {
+            if device.device_type == DeviceType::Light && s.ha_selection_allows_light(device) {
                 node_ids.insert(node.id.clone());
             }
         }
-        if !node_ids.is_empty() {
+        if !node_ids.is_empty() || s.platform_context == "ha_addon" {
             return node_ids;
         }
     }
@@ -5095,13 +5108,18 @@ fn light_scene_target_scope_node_ids(
     if let Some(node) = s.topology.get_device_node(target_id) {
         if s.canonical_registry
             .get(&node.canonical_device_id)
-            .is_some_and(|device| device.device_type == DeviceType::Light)
+            .is_some_and(|device| {
+                device.device_type == DeviceType::Light && s.ha_selection_allows_light(device)
+            })
         {
             node_ids.insert(node.id.clone());
             return node_ids;
         }
     }
 
+    if s.platform_context == "ha_addon" {
+        return node_ids;
+    }
     let Some(target) = runtime.engine_effective_node_snapshot(target_id) else {
         return node_ids;
     };
@@ -6189,7 +6207,11 @@ pub fn do_scene_upsert(state: &SharedState, scene: SceneDefinition) -> Result<St
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn do_scene_upsert_reviewed(state: &SharedState, mut scene: SceneDefinition, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_scene_upsert_reviewed(
+    state: &SharedState,
+    mut scene: SceneDefinition,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     scene.normalize();
     validate_persisted_scene_id(&scene.id)?;
     let scene_transaction_lock = {
@@ -6225,7 +6247,11 @@ pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn do_scene_delete_reviewed(state: &SharedState, scene_id: &str, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_scene_delete_reviewed(
+    state: &SharedState,
+    scene_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let scene_transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scene_lifecycle_transaction_lock.clone()
@@ -6552,15 +6578,17 @@ pub fn do_home_scene_apply(
     request: HomeSceneApplyRequest,
     dispatch_spacing: Duration,
 ) -> Result<HomeSceneApplyResponse> {
-    do_home_scene_apply_reviewed(state,scene_id,request,dispatch_spacing,&|_|Ok(()))
+    do_home_scene_apply_reviewed(state, scene_id, request, dispatch_spacing, None)
 }
 
+/// A managed review limits this operation to rooms where Rhythm owns automation.
+/// Manual whole-home scene requests retain their explicit house-wide scope.
 pub(crate) fn do_home_scene_apply_reviewed(
     state: &SharedState,
     scene_id: &str,
     request: HomeSceneApplyRequest,
     dispatch_spacing: Duration,
-    check: ReviewCheck<'_>,
+    managed_review: Option<ReviewCheck<'_>>,
 ) -> Result<HomeSceneApplyResponse> {
     if is_native_scene_id(scene_id) {
         anyhow::bail!(
@@ -6596,7 +6624,14 @@ pub(crate) fn do_home_scene_apply_reviewed(
 
     let seed = fresh_scene_apply_seed(&scene);
     if request.target_mode == HomeSceneTargetMode::Devices {
-        return home_scene_apply_to_devices(state, scene, &request, dispatch_spacing, seed, check);
+        return home_scene_apply_to_devices(
+            state,
+            scene,
+            &request,
+            dispatch_spacing,
+            seed,
+            managed_review,
+        );
     }
 
     let transaction_lock = {
@@ -6612,11 +6647,20 @@ pub(crate) fn do_home_scene_apply_reviewed(
     // house.
     let (runtime, targets, planned) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+        if let Some(check) = managed_review {
+            check(&s)?;
+        }
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let targets = home_scene_targets_locked(&s, &runtime);
+        let mut targets = home_scene_targets_locked(&s, &runtime);
+        if managed_review.is_some() {
+            let before = targets.eligible.len();
+            targets
+                .eligible
+                .retain(|id| s.rhythm_automation_allowed_for_node(id));
+            targets.skipped += before - targets.eligible.len();
+        }
         // A spread palette places every slot on the colour path relative to
         // the whole house, so count the slots first, then plan each target
         // with the house-wide span and its own starting slot.
@@ -6942,7 +6986,7 @@ fn home_scene_device_targets_locked(
             if scope.len() != 1 || !scope.contains(&snap.id) {
                 continue;
             }
-            if snap.disabled {
+            if snap.disabled || s.platform_context == "ha_addon" {
                 skipped += 1;
                 continue;
             }
@@ -6968,6 +7012,10 @@ fn home_scene_device_targets_locked(
             if device.device_type != DeviceType::Light {
                 continue;
             }
+            if !s.ha_selection_allows_light(device) {
+                skipped += 1;
+                continue;
+            }
             let Some(endpoint) = device.preferred_endpoint() else {
                 skipped += 1;
                 continue;
@@ -6983,7 +7031,7 @@ fn home_scene_device_targets_locked(
                 room_id: node.parent_id.clone(),
                 hub: endpoint.hub_key.to_string(),
             }
-        } else if s.composite_controller.is_none() {
+        } else if s.composite_controller.is_none() && s.platform_context != "ha_addon" {
             HomeSceneDeviceTarget {
                 node_id: snap.id.clone(),
                 dispatch_node_id: snap.id.clone(),
@@ -7091,7 +7139,7 @@ fn home_scene_apply_to_devices(
     request: &HomeSceneApplyRequest,
     dispatch_spacing: Duration,
     seed: Option<u32>,
-    check: ReviewCheck<'_>,
+    managed_review: Option<ReviewCheck<'_>>,
 ) -> Result<HomeSceneApplyResponse> {
     // Enumerate and plan from one serialized topology snapshot so the palette
     // order cannot observe a half-applied house.
@@ -7104,11 +7152,20 @@ fn home_scene_apply_to_devices(
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+        if let Some(check) = managed_review {
+            check(&s)?;
+        }
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let targets = home_scene_device_targets_locked(&s, &runtime);
+        let mut targets = home_scene_device_targets_locked(&s, &runtime);
+        if managed_review.is_some() {
+            let before = targets.eligible.len();
+            targets
+                .eligible
+                .retain(|target| s.rhythm_automation_allowed_for_node(&target.node_id));
+            targets.skipped += before - targets.eligible.len();
+        }
         // Every light without an explicit entry takes one palette slot; the
         // house-wide span lets a spread palette give each of them its own
         // colour.
@@ -7630,11 +7687,23 @@ pub fn do_scene_preview(
         transition_ms: request.transition_ms,
     };
     let response = if is_native_scene_id(scene_id) {
-        do_native_scene_apply(state, scene_id, apply_request, false, Some(preview_id.clone()))?
+        do_native_scene_apply(
+            state,
+            scene_id,
+            apply_request,
+            false,
+            Some(preview_id.clone()),
+        )?
     } else {
         do_scene_apply_definition_inner(
-            state, SceneApplySource::Stored(scene_id.to_string()), apply_request,
-            false, false, Some(preview_id.clone()), false, PaletteWindow::default(),
+            state,
+            SceneApplySource::Stored(scene_id.to_string()),
+            apply_request,
+            false,
+            false,
+            Some(preview_id.clone()),
+            false,
+            PaletteWindow::default(),
         )?
     };
     record_scene_preview_session(
@@ -7693,37 +7762,70 @@ pub(crate) fn do_scene_preview_commit_reviewed(
     preview_id: &str,
     check: ReviewCheck<'_>,
 ) -> Result<String> {
-    let gate = state.lock().map_err(|_| anyhow::anyhow!("lock"))?.scene_lifecycle_transaction_lock.clone();
-    let transaction = gate.lock().map_err(|_| anyhow::anyhow!("scene transaction"))?;
+    let gate = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .scene_lifecycle_transaction_lock
+        .clone();
+    let transaction = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("scene transaction"))?;
     let preview = {
         let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         check(&app)?;
-        let preview = app.light_scene_previews.get(preview_id).cloned()
-            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found",preview_id))?;
+        let preview = app
+            .light_scene_previews
+            .get(preview_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?;
         if let Some(mut scene) = preview.draft_scene.clone() {
             scene.normalize();
             validate_persisted_scene_id(&scene.id)?;
             let id = scene.id.clone();
-            let previous = app.scenes.insert(id.clone(),scene);
+            let previous = app.scenes.insert(id.clone(), scene);
             if let Err(err) = save_scenes_locked(&app) {
                 match previous {
-                    Some(previous) => { app.scenes.insert(id,previous); }
-                    None => { app.scenes.remove(&id); }
+                    Some(previous) => {
+                        app.scenes.insert(id, previous);
+                    }
+                    None => {
+                        app.scenes.remove(&id);
+                    }
                 }
                 return Err(err);
             }
         }
         preview
     };
-    let request = SceneApplyRequest { target_id: preview.target_node_id, transition_ms: None };
-    let receipt = if is_native_scene_id(&preview.scene_id) {
-        do_native_scene_apply(state,&preview.scene_id,request,true,None)?
-    } else {
-        let seed = state.lock().map_err(|_|anyhow::anyhow!("lock"))?.scenes.get(&preview.scene_id).and_then(fresh_scene_apply_seed);
-        do_scene_apply_definition_in_transaction(state, SceneApplySource::Stored(preview.scene_id),
-            request, true, true, None, false, PaletteWindow {seed,..Default::default()}, &transaction)?
+    let request = SceneApplyRequest {
+        target_id: preview.target_node_id,
+        transition_ms: None,
     };
-    crate::state::emit_server_event(state,crate::server_event::ServerEvent::ConfigChanged);
+    let receipt = if is_native_scene_id(&preview.scene_id) {
+        do_native_scene_apply(state, &preview.scene_id, request, true, None)?
+    } else {
+        let seed = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .scenes
+            .get(&preview.scene_id)
+            .and_then(fresh_scene_apply_seed);
+        do_scene_apply_definition_in_transaction(
+            state,
+            SceneApplySource::Stored(preview.scene_id),
+            request,
+            true,
+            true,
+            None,
+            false,
+            PaletteWindow {
+                seed,
+                ..Default::default()
+            },
+            &transaction,
+        )?
+    };
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
     Ok(serde_json::to_string(&receipt)?)
 }
 
@@ -7737,16 +7839,26 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
 
     // Reconcile to the live room behavior. A dormant saved Mood binding is
     // not necessarily what was running when the audition began.
-    let runtime = state.lock().map_err(|_| anyhow::anyhow!("lock"))?.hub_runtime()
+    let runtime = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hub_runtime()
         .ok_or_else(|| anyhow::anyhow!("Lighting runtime unavailable while ending preview"))?;
-    let room = runtime.engine_effective_node_snapshot(&preview.target_node_id)
+    let room = runtime
+        .engine_effective_node_snapshot(&preview.target_node_id)
         .ok_or_else(|| anyhow::anyhow!("Preview room unavailable"))?;
     if room.hard_off {
         runtime.lights_off_room(&room.id, None)?;
     } else if room.soft_off {
         runtime.soft_off_tick_room(&room.id)?;
     } else if room.mood_active {
-        apply_mood_scene_or_tick(state, &runtime, &room.id, room.profile_settings.mood_scene_id.as_deref(), false)?;
+        apply_mood_scene_or_tick(
+            state,
+            &runtime,
+            &room.id,
+            room.profile_settings.mood_scene_id.as_deref(),
+            false,
+        )?;
     } else {
         runtime.turn_on_room(&room.id)?;
     }
@@ -12322,7 +12434,18 @@ fn do_settings_set_internal(
     auto_update: Option<bool>,
     update_channel: Option<UpdateChannel>,
 ) -> Result<String> {
-    do_settings_set_internal_reviewed(state, power_save, active_mode, mode_configs, mode_transitions, mode_change, force_reapply_outputs, auto_update, update_channel, &|_| Ok(()))
+    do_settings_set_internal_reviewed(
+        state,
+        power_save,
+        active_mode,
+        mode_configs,
+        mode_transitions,
+        mode_change,
+        force_reapply_outputs,
+        auto_update,
+        update_channel,
+        &|_| Ok(()),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12336,7 +12459,8 @@ pub(super) fn do_settings_set_internal_reviewed(
     force_reapply_outputs: bool,
     auto_update: Option<bool>,
     update_channel: Option<UpdateChannel>,
-    check: ReviewCheck<'_>) -> Result<String> {
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let preserve_home_scenes = mode_change
         .as_ref()
         .is_some_and(|change| change.cause == ModeChangeCause::Schedule);
@@ -12658,7 +12782,11 @@ pub fn do_light_breaker_set(state: &SharedState, enabled: bool) -> Result<String
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn do_light_breaker_set_reviewed(state: &SharedState, enabled: bool, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_light_breaker_set_reviewed(
+    state: &SharedState,
+    enabled: bool,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let (dto, changed, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         check(&s)?;
@@ -12706,7 +12834,8 @@ pub fn do_light_runtime_settings_set(
 pub(crate) fn do_light_runtime_settings_set_reviewed(
     state: &SharedState,
     runtime_kind: LightRuntimeKind,
-    check: ReviewCheck<'_>) -> Result<String> {
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let (settings, changed, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         check(&s)?;
@@ -13586,7 +13715,15 @@ fn do_light_schedule_authority_set(
     persist: bool,
     current_utc: chrono::NaiveDateTime,
 ) -> Result<String> {
-    do_light_schedule_authority_set_reviewed(state, node_id, authority, correlation_id, persist, current_utc, &|_| Ok(()))
+    do_light_schedule_authority_set_reviewed(
+        state,
+        node_id,
+        authority,
+        correlation_id,
+        persist,
+        current_utc,
+        &|_| Ok(()),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13597,7 +13734,8 @@ pub(crate) fn do_light_schedule_authority_set_reviewed(
     correlation_id: Option<String>,
     persist: bool,
     current_utc: chrono::NaiveDateTime,
-    check: ReviewCheck<'_>) -> Result<String> {
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let (resolved_named_mode, mode_resolution) = match authority {
         LightScheduleAuthority::Named(schedule_id) => {
             match crate::periodic::resolved_light_schedule_mode_for_target(
@@ -14404,12 +14542,18 @@ fn pause_for_ha_settings_transfer(s: &mut AppState) {
         s.invalidate_queued_light_dispatches();
         persist_settings_locked(s);
         if let Some(events) = &s.event_tx {
-            let _ = events.send(crate::server_event::ServerEvent::LightBreakerChanged { light_breaker: build_light_breaker_dto_inner(s) });
+            let _ = events.send(crate::server_event::ServerEvent::LightBreakerChanged {
+                light_breaker: build_light_breaker_dto_inner(s),
+            });
         }
     }
 }
 
-pub(crate) fn do_profile_bundle_import_reviewed(state: &SharedState, payload: ProfileBundleImportPayload, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_profile_bundle_import_reviewed(
+    state: &SharedState,
+    payload: ProfileBundleImportPayload,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let bundle = payload.into_bundle();
     if bundle.schema_version != PROFILE_BUNDLE_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
@@ -16143,11 +16287,29 @@ fn do_device_remove_with_retention(
     retain_tombstone: bool,
     state_requirement: DeviceRemovalStateRequirement,
 ) -> Result<()> {
-    do_device_remove_with_retention_reviewed(state,device_id,hub_key,retain_tombstone,state_requirement,&|_|Ok(()))
+    do_device_remove_with_retention_reviewed(
+        state,
+        device_id,
+        hub_key,
+        retain_tombstone,
+        state_requirement,
+        &|_| Ok(()),
+    )
 }
 
-pub(crate) fn do_active_device_forget_reviewed(state: &SharedState,device_id: &str,check:ReviewCheck<'_>)->Result<()> {
-    do_device_remove_with_retention_reviewed(state,device_id,None,false,DeviceRemovalStateRequirement::Active,check)
+pub(crate) fn do_active_device_forget_reviewed(
+    state: &SharedState,
+    device_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
+    do_device_remove_with_retention_reviewed(
+        state,
+        device_id,
+        None,
+        false,
+        DeviceRemovalStateRequirement::Active,
+        check,
+    )
 }
 fn do_device_remove_with_retention_reviewed(
     state: &SharedState,
@@ -16743,9 +16905,36 @@ pub fn do_config_set_with_options(
 /// preconditions still match inside the same state lock as the mutation.
 pub fn do_config_set_with_options_if_matches(
     state: &SharedState,
-    mut config: LightProfileConfig,
+    config: LightProfileConfig,
     apply_active_outputs: bool,
     precondition: Option<(&str, &str)>,
+) -> Result<()> {
+    let profile_id = config.id.clone();
+    do_config_set_reviewed(state, config, apply_active_outputs, &|s| {
+        if let Some((expected_server_instance_id, expected_resource_sha256)) = precondition {
+            if s.server_instance_id != expected_server_instance_id {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live server identity changed"
+                ));
+            }
+            let current = s
+                .light_profile_config(&profile_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", profile_id))?;
+            if light_profile_config_resource_sha256(current)? != expected_resource_sha256 {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live config hash changed"
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn do_config_set_reviewed(
+    state: &SharedState,
+    mut config: LightProfileConfig,
+    apply_active_outputs: bool,
+    check: ReviewCheck<'_>,
 ) -> Result<()> {
     rhythm_core::normalize_builtin_state_profile_config(&mut config);
     config.normalize_float_precision();
@@ -16788,21 +16977,7 @@ pub fn do_config_set_with_options_if_matches(
 
     let (runtime, should_apply_outputs, active_mode, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        if let Some((expected_server_instance_id, expected_resource_sha256)) = precondition {
-            if s.server_instance_id != expected_server_instance_id {
-                return Err(anyhow::anyhow!(
-                    "config precondition failed: live server identity changed"
-                ));
-            }
-            let current = s
-                .light_profile_config(&config.id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", config.id))?;
-            if light_profile_config_resource_sha256(current)? != expected_resource_sha256 {
-                return Err(anyhow::anyhow!(
-                    "config precondition failed: live config hash changed"
-                ));
-            }
-        }
+        check(&s)?;
         if !s.light_profile_configs.contains_key(&config.id) {
             return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
         }
@@ -17603,7 +17778,12 @@ pub fn do_retry_hub_connect(state: &SharedState, hub_type_str: &str, address: &s
     do_retry_hub_connect_reviewed(state, hub_type_str, address, &|_| Ok(()))
 }
 
-pub(crate) fn do_retry_hub_connect_reviewed(state: &SharedState, hub_type_str: &str, address: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_retry_hub_connect_reviewed(
+    state: &SharedState,
+    hub_type_str: &str,
+    address: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let hub_type = crate::hub::HubType::parse(hub_type_str)
         .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
     let hub_key = HubKey::new(hub_type, address);
@@ -18155,7 +18335,18 @@ fn do_node_preferences_set_inner(
     persist: bool,
     reassert_unchanged_state: bool,
 ) -> Result<String> {
-    do_node_preferences_set_inner_reviewed(state, node_id, rhythm_enabled, disabled, standby_enabled, target_state, room_profile, persist, reassert_unchanged_state, &|_| Ok(()))
+    do_node_preferences_set_inner_reviewed(
+        state,
+        node_id,
+        rhythm_enabled,
+        disabled,
+        standby_enabled,
+        target_state,
+        room_profile,
+        persist,
+        reassert_unchanged_state,
+        &|_| Ok(()),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18169,7 +18360,8 @@ pub(crate) fn do_node_preferences_set_inner_reviewed(
     room_profile: Option<&RoomProfileSettingsPatch>,
     persist: bool,
     reassert_unchanged_state: bool,
-    check: ReviewCheck<'_>) -> Result<String> {
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let node_write_lock = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         node_command_gate(&mut s, node_id)
@@ -19602,7 +19794,12 @@ pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &s
     do_canonical_rename_device_reviewed(state, device_id, name, &|_| Ok(()))
 }
 
-pub(crate) fn do_canonical_rename_device_reviewed(state: &SharedState, device_id: &str, name: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_canonical_rename_device_reviewed(
+    state: &SharedState,
+    device_id: &str,
+    name: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -21095,7 +21292,12 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
     do_triage_merge_reviewed(state, entry_id, canonical_id, &|_| Ok(()))
 }
 
-pub(crate) fn do_triage_merge_reviewed(state: &SharedState, entry_id: &str, canonical_id: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_triage_merge_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    canonical_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
     let transaction_lock = state
@@ -21107,7 +21309,7 @@ pub(crate) fn do_triage_merge_reviewed(state: &SharedState, entry_id: &str, cano
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
     let entry = match s.canonical_registry.triage().get(entry_id) {
         Some(entry) => entry.clone(),
         None => return Err(anyhow::anyhow!("Triage entry not found: {}", entry_id)),
@@ -21186,7 +21388,11 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
     do_triage_new_device_reviewed(state, entry_id, &|_| Ok(()))
 }
 
-pub(crate) fn do_triage_new_device_reviewed(state: &SharedState, entry_id: &str, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_triage_new_device_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     use crate::canonical::triage::TriageKind;
 
     let transaction_lock = state
@@ -21198,7 +21404,7 @@ pub(crate) fn do_triage_new_device_reviewed(state: &SharedState, entry_id: &str,
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
     let entry = match s.canonical_registry.triage().get(entry_id) {
         Some(entry) => entry.clone(),
         None => return Err(anyhow::anyhow!("Triage entry not found: {}", entry_id)),
@@ -21338,9 +21544,13 @@ pub fn do_triage_dismiss(state: &SharedState, entry_id: &str) -> Result<()> {
     do_triage_dismiss_reviewed(state, entry_id, &|_| Ok(()))
 }
 
-pub(crate) fn do_triage_dismiss_reviewed(state: &SharedState, entry_id: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_triage_dismiss_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
     let kind = s
         .canonical_registry
         .triage()
@@ -21384,9 +21594,12 @@ pub fn do_triage_bind_room_to(
     do_triage_bind_room_to_reviewed(state, entry_id, target_override, &|_| Ok(()))
 }
 
-pub(crate) fn do_triage_bind_room_to_reviewed(state: &SharedState,
+pub(crate) fn do_triage_bind_room_to_reviewed(
+    state: &SharedState,
     entry_id: &str,
-    target_override: Option<&str>, check: ReviewCheck<'_>) -> Result<()> {
+    target_override: Option<&str>,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
     let transaction_lock = state
@@ -21399,7 +21612,7 @@ pub(crate) fn do_triage_bind_room_to_reviewed(state: &SharedState,
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let resolved_target_override = target_override.map(|id| resolve_node_id(state, id));
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -21755,7 +21968,10 @@ pub(crate) fn set_topology_control_targets_locked(
     let targets: Vec<_> = target_ids.iter().map(String::as_str).collect();
     let old_targets = s.topology.effective_control_targets(source_id, &kind);
     let previous = s.topology.clone();
-    if !s.topology.set_control_targets(source_id, kind.clone(), &targets) {
+    if !s
+        .topology
+        .set_control_targets(source_id, kind.clone(), &targets)
+    {
         anyhow::bail!("Source or target topology node not found");
     }
     if let Err(error) = save_topology(s) {
@@ -21779,7 +21995,11 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     do_topology_create_room_reviewed(state, name, &|_| Ok(()))
 }
 
-pub(crate) fn do_topology_create_room_reviewed(state: &SharedState, name: &str, check: ReviewCheck<'_>) -> Result<String> {
+pub(crate) fn do_topology_create_room_reviewed(
+    state: &SharedState,
+    name: &str,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -21808,7 +22028,12 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
     do_topology_rename_room_reviewed(state, room_id, name, &|_| Ok(()))
 }
 
-pub(crate) fn do_topology_rename_room_reviewed(state: &SharedState, room_id: &str, name: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_topology_rename_room_reviewed(
+    state: &SharedState,
+    room_id: &str,
+    name: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -21871,7 +22096,11 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     do_topology_delete_room_reviewed(state, room_id, &|_| Ok(()))
 }
 
-pub(crate) fn do_topology_delete_room_reviewed(state: &SharedState, room_id: &str, check: ReviewCheck<'_>) -> Result<()> {
+pub(crate) fn do_topology_delete_room_reviewed(
+    state: &SharedState,
+    room_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -22035,9 +22264,12 @@ pub fn do_topology_merge_rooms(
     do_topology_merge_rooms_reviewed(state, target_id, source_id, &|_| Ok(()))
 }
 
-pub(crate) fn do_topology_merge_rooms_reviewed(state: &SharedState,
+pub(crate) fn do_topology_merge_rooms_reviewed(
+    state: &SharedState,
     target_id: &str,
-    source_id: &str, check: ReviewCheck<'_>) -> Result<()> {
+    source_id: &str,
+    check: ReviewCheck<'_>,
+) -> Result<()> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -22047,7 +22279,7 @@ pub(crate) fn do_topology_merge_rooms_reviewed(state: &SharedState,
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
     if s.topology.get(target_id).is_none() {
         return Err(anyhow::anyhow!("Target room not found"));
     }
