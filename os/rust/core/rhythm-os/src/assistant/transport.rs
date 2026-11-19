@@ -133,6 +133,23 @@ async fn execute(
     Ok(result)
 }
 
+fn identify_error(error: anyhow::Error) -> LightAssistantError {
+    use rhythm_core::controller::LightControlError;
+    match error.downcast_ref::<LightControlError>() {
+        None | Some(LightControlError::NotDispatched(_)) => LightAssistantError::bad_request(
+            "identify_unavailable",
+            "This light could not start Identify. Check its connection, light selection and Identify support.",
+        ),
+        Some(_) => LightAssistantError {
+            status: 503,
+            code: "identify_uncertain",
+            message: "The hub could not verify the Identify response. Ask the resident whether the light flashed before trying again.".into(),
+            retryable: false,
+            mutation_may_have_applied: true,
+        },
+    }
+}
+
 fn legacy(state: &SharedState, id: &str, mut args: Value) -> Result<Value, LightAssistantError> {
     if matches!(
         id,
@@ -192,12 +209,7 @@ fn legacy(state: &SharedState, id: &str, mut args: Value) -> Result<Value, Light
         }
         OP_IDENTIFY_DEVICE => {
             let id = args["device_id"].as_str().ok_or_else(invalid_args)?;
-            commands::do_flash_canonical_device(state, id).map_err(|_| {
-                LightAssistantError::bad_request(
-                    "identify_unavailable",
-                    "This light could not acknowledge Identify",
-                )
-            })?;
+            commands::do_flash_canonical_device(state, id).map_err(identify_error)?;
             Ok(json!({"server_acknowledged":true,"physical_verification":"ask_resident"}))
         }
         _ => Err(invalid_args()),
@@ -313,4 +325,27 @@ pub(crate) async fn mcp(
         _ => return rpc_error(id, -32601, "Method not found"),
     };
     Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+}
+
+#[cfg(test)]
+mod identify_tests {
+    use super::*;
+    use rhythm_core::controller::LightControlError;
+    #[test]
+    fn identify_separates_rejected_requests_from_lost_acknowledgements() {
+        let rejected = identify_error(
+            anyhow::Error::new(LightControlError::NotDispatched(
+                "no identify action".into(),
+            ))
+            .context("flash"),
+        );
+        assert_eq!(rejected.code, "identify_unavailable");
+        assert!(!rejected.mutation_may_have_applied);
+        let timeout = identify_error(
+            anyhow::Error::new(LightControlError::Timeout("light".into())).context("flash"),
+        );
+        assert_eq!(timeout.code, "identify_uncertain");
+        assert!(timeout.mutation_may_have_applied);
+        assert!(!timeout.retryable);
+    }
 }

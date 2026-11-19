@@ -2397,7 +2397,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 walk_test::record_light_report(
                     &mut s,
                     &node_id,
-                    observation.availability == "available",
+                    &observation.availability,
                     observation.lights_on,
                     observed_ms,
                 );
@@ -2487,7 +2487,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 walk_test::record_light_report(
                     &mut s,
                     &node_id,
-                    true,
+                    "available",
                     Some(lights_on),
                     current_epoch_ms(),
                 );
@@ -8498,6 +8498,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assistant_motion_walk_respects_managed_ha_selection_on_each_read() {
+        use crate::assistant::motion::call;
+        use serde_json::json;
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("hall", false, false),
+        ]));
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::HA);
+        let hub = only_hub_key(&state);
+        let sensor = add_canonical_control_source(
+            &state,
+            &hub,
+            "binary_sensor.motion",
+            "hall",
+            DeviceType::Motion,
+        );
+        let selected =
+            add_canonical_control_source(&state, &hub, "light.managed", "hall", DeviceType::Light);
+        let other =
+            add_canonical_control_source(&state, &hub, "light.other", "hall", DeviceType::Light);
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_context = "ha_addon";
+            s.managed_ha_lights = Some(["light.managed".to_string()].into());
+        }
+        let walk = call(
+            &state,
+            "start_motion_walk",
+            json!({"sensor_id":sensor,"room_id":"hall"}),
+        )
+        .await
+        .unwrap();
+        let inspect = json!({"walk_id":walk["walk_id"]});
+        let report = call(&state, "inspect_motion_walk", inspect.clone())
+            .await
+            .unwrap();
+        assert_eq!(report["lights"].as_array().unwrap().len(), 1);
+        assert_eq!(report["lights"][0]["device_id"], selected);
+        assert!(!report.to_string().contains(&other));
+        state
+            .lock()
+            .unwrap()
+            .managed_ha_lights
+            .as_mut()
+            .unwrap()
+            .clear();
+        assert_eq!(
+            call(&state, "inspect_motion_walk", inspect)
+                .await
+                .unwrap_err()
+                .code,
+            "walk_scope_changed"
+        );
+    }
+
+    #[tokio::test]
     async fn assistant_motion_walk_repair_and_retest_observes_actual_routing_and_individual_reports(
     ) {
         use crate::assistant::motion::call;
@@ -8645,6 +8700,11 @@ mod tests {
                 &mut timers,
             );
         }
+        // A delayed report generated before the command cannot supersede a current observation.
+        {
+            let mut s = state.lock().unwrap();
+            walk_test::record_light_report(&mut s, &lamp, "available", Some(false), 1);
+        }
         let result = inspect(&retest).await.unwrap();
         let lights = result["lights"].as_array().unwrap();
         let on = lights.iter().find(|l| l["device_id"] == lamp).unwrap();
@@ -8666,6 +8726,20 @@ mod tests {
             .unwrap();
         assert_eq!(observed["resident_power_on"], false);
         assert!(observed["power_on"].is_null());
+        assert_eq!(inspect(&retest).await.unwrap(), visual);
+        {
+            let mut s = state.lock().unwrap();
+            walk_test::record_light_report(&mut s, &second, "unknown", None, current_epoch_ms());
+        }
+        let report = inspect(&retest).await.unwrap();
+        let now_unknown = report["lights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["device_id"] == second)
+            .unwrap();
+        assert_eq!(now_unknown["availability"], "unknown");
+        assert_eq!(now_unknown["resident_power_on"], false);
         assert_eq!(inspect(&walk).await.unwrap()["reason"], "missing_target");
     }
 

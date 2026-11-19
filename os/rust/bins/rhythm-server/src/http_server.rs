@@ -737,6 +737,38 @@ fn install_assistant_maintenance(state: &SharedState, ota: crate::self_update::O
     ));
 }
 
+fn emit_update_check_result(state: &SharedState, info: &crate::self_update::UpdateInfo) {
+    let (stage, message) = if info.update_available {
+        (
+            rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
+            match info.update_reason {
+                Some(crate::self_update::UpdateReason::ComponentDrift) => {
+                    format!("Repair update available for v{}", info.latest_version)
+                }
+                _ => format!("Update available: v{}", info.latest_version),
+            },
+        )
+    } else {
+        (
+            rhythm_os::server_event::OtaUpdateStage::UpToDate,
+            "Already up to date".to_string(),
+        )
+    };
+    emit_ota_progress(
+        state,
+        stage,
+        message,
+        Some(info.current_version.clone()),
+        Some(info.latest_version.clone()),
+        Some(info.update_available),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+    );
+}
+
 async fn check_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
@@ -767,35 +799,7 @@ async fn check_update(
             if let Err(error) = ota_status.record_check_result(&operation, &info) {
                 return err_500(error);
             }
-            let (stage, message) = if info.update_available {
-                (
-                    rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
-                    match info.update_reason {
-                        Some(crate::self_update::UpdateReason::ComponentDrift) => {
-                            format!("Repair update available for v{}", info.latest_version)
-                        }
-                        _ => format!("Update available: v{}", info.latest_version),
-                    },
-                )
-            } else {
-                (
-                    rhythm_os::server_event::OtaUpdateStage::UpToDate,
-                    "Already up to date".to_string(),
-                )
-            };
-            emit_ota_progress(
-                &state,
-                stage,
-                message,
-                Some(info.current_version.clone()),
-                Some(info.latest_version.clone()),
-                Some(info.update_available),
-                None,
-                None,
-                None,
-                Vec::new(),
-                None,
-            );
+            emit_update_check_result(&state, &info);
             let json = serde_json::json!({
                 "review_revision": assistant_update_revision(&info),
                 "current_version": info.current_version,
@@ -1145,45 +1149,19 @@ async fn do_update_reviewed(
             return err_500(e);
         }
     };
+    if let Err(error) = ota_status.record_check_result(&operation, &info) {
+        return err_500(error);
+    }
+    emit_update_check_result(&state, &info);
     if expected_revision
         .as_ref()
         .is_some_and(|expected| *expected != assistant_update_revision(&info))
     {
         return err_409("The offered update changed. Review the new release before installing it.");
     }
-    if let Err(error) = ota_status.record_check_result(&operation, &info) {
-        return err_500(error);
-    }
-
     if !info.update_available {
-        emit_ota_progress(
-            &state,
-            rhythm_os::server_event::OtaUpdateStage::UpToDate,
-            "Already up to date",
-            Some(info.current_version.clone()),
-            Some(info.latest_version.clone()),
-            Some(false),
-            None,
-            None,
-            None,
-            Vec::new(),
-            None,
-        );
         return json_ok(r#"{"status":"ok","message":"Already up to date"}"#.to_string());
     }
-    emit_ota_progress(
-        &state,
-        rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
-        format!("Update available: v{}", info.latest_version),
-        Some(info.current_version.clone()),
-        Some(info.latest_version.clone()),
-        Some(true),
-        None,
-        None,
-        None,
-        Vec::new(),
-        None,
-    );
 
     if let Err(e) = ota_status.begin_update(&operation, &info.latest_version) {
         return err_409(e);
@@ -1924,9 +1902,26 @@ mod tests {
             let ota = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
             let preview = response_json(check_update(state.clone(), ota.clone()).await).await;
             let revision = preview["review_revision"].as_str().unwrap().to_owned();
+            let (tx, mut changes) = tokio::sync::broadcast::channel(8);
+            state.lock().unwrap().event_tx = Some(tx);
             let result = do_update_reviewed(state, ota.clone(), Some(revision)).await;
             assert_eq!(result.status(), StatusCode::CONFLICT);
             assert!(!ota.operation_active());
+            assert!(matches!(
+                changes.try_recv().unwrap(),
+                rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+                    stage: rhythm_os::server_event::OtaUpdateStage::Checking,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                changes.try_recv().unwrap(),
+                rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+                    stage: rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
+                    ..
+                }
+            ));
+            assert!(changes.try_recv().is_err());
         });
         clear_update_manifest_env();
     }
