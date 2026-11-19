@@ -287,6 +287,8 @@ class StaffAssistant {
             }
           ]
         };
+      case 'resources/templates/list':
+        result = {'resourceTemplates': []};
       case 'resources/read':
         if (params['uri'] != 'rhythm://staff/contract') {
           return json(_rpcError(id, -32002, 'Resource unavailable'));

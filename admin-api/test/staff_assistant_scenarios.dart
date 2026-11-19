@@ -38,6 +38,8 @@ void _staffAssistantScenarios() {
         () async {
       final init = await service.rpc('initialize', {});
       expect(init['serverInfo']['name'], 'rhythm-staff');
+      final templates = await service.rpc('resources/templates/list', {});
+      expect(templates['resourceTemplates'], isEmpty);
       final found = await service.call('staff_find_homes', {'query': 'Ada'});
       final hub = found['homes'].single['hubs'].single['hub_ref'];
       final selected = {'hub_ref': hub};
