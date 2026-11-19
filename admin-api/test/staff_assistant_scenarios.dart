@@ -68,6 +68,16 @@ void _staffAssistantScenarios() {
       final logs = await service.call('staff_list_logs', selected);
       final tail = await service.call('staff_read_log',
           {...selected, 'source_ref': logs['sources'].single['source_ref']});
+      final logsAudit =
+          service.audit.where((e) => e['operation'] == 'staff_read_log').single;
+      expect(logsAudit, containsPair('hub_id', 'hub-1'));
+      expect(logsAudit, containsPair('outcome', 'ok'));
+      expect(
+          service.audit
+              .where((e) => e['operation'] == 'staff_find_homes')
+              .last['outcome'],
+          'ok');
+      expect(jsonEncode(service.audit), isNot(contains('example.com')));
       expect(tail['diagnostics'], [
         {
           'category': 'network_offline',
@@ -247,6 +257,8 @@ void _staffAssistantScenarios() {
       await service.call('staff_apply_plan',
           {'plan_id': preview['plan_id'], 'confirmed': true},
           failure: true);
+      expect(service.audit.last, containsPair('operation', 'staff_apply_plan'));
+      expect(service.audit.last, containsPair('outcome', 'refused'));
       final catalog = await service.call('staff_select_hub', selected);
       expect(catalog['tools'].map((e) => e['id']),
           isNot(contains('adjust_room_brightness')));
@@ -406,6 +418,7 @@ class _StaffFixture {
   late final AdminApiServer server;
   late final Map<String, dynamic> envelope;
   String role = 'admin', actor = 'staff-user', liveHub = 'srv-test';
+  final audit = <Map<String, dynamic>>[];
   bool granted = true, rowChanged = false;
   Map<String, dynamic> extraReview = {};
   int deviceCalls = 0, writes = 0, deleted = 0, legacyRequests = 0, uploads = 0;
@@ -428,7 +441,9 @@ class _StaffFixture {
       'nonce': base64Url.encode(encrypted.nonce),
       'mac': base64Url.encode(encrypted.mac.bytes)
     };
-    f.server = _testServer(client: _HandlerClient(f.handle));
+    f.server = _testServer(
+        client: _HandlerClient(f.handle),
+        auditLog: (line) => f.audit.add(jsonDecode(line)));
     return f;
   }
 

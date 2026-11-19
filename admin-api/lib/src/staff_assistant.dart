@@ -261,7 +261,10 @@ final _trustedHubOperations = {
 
 class StaffAssistant {
   static const supportedVersions = [_version, '2025-03-26', '2025-11-25'];
-  StaffAssistant(this.support, this.probes, this.reports, this._auditKey);
+  StaffAssistant(this.support, this.probes, this.reports, this._auditKey,
+      {void Function(String)? auditLog})
+      : _auditLog = auditLog ?? stdout.writeln;
+  final void Function(String) _auditLog;
   final String? _auditKey;
   final SupportService support;
   final DeviceProbeService probes;
@@ -347,14 +350,19 @@ class StaffAssistant {
       case 'tools/call':
         final tool = _tools.where((t) => t.id == params['name']).firstOrNull;
         final args = params['arguments'] ?? <String, dynamic>{};
-        if (tool == null || args is! _Json) {
-          return json(
-              _rpcError(id, -32602, 'Unknown tool or invalid arguments'));
-        }
+        final target = args is _Json
+            ? _auditTarget(session, args)
+            : const <String, dynamic>{};
+        var outcome = 'error';
         try {
+          if (tool == null || args is! _Json) {
+            return json(
+                _rpcError(id, -32602, 'Unknown tool or invalid arguments'));
+          }
           if (tool.writes && !session.staff.isAdmin) throw _denied;
           tool.validate(args);
           final body = await _call(session, tool.id, args);
+          outcome = 'ok';
           result = {
             'content': [
               {'type': 'text', 'text': jsonEncode(body)}
@@ -362,6 +370,8 @@ class StaffAssistant {
             'structuredContent': body
           };
         } on AdminApiException catch (error) {
+          if (error.statusCode == 401 || error.statusCode == 403)
+            outcome = 'refused';
           // HTTP failures may include base URLs, request bodies and vendor
           // diagnostics. Only bounded descriptions can leave this service.
           final message = error is AssistantDeviceRejection
@@ -395,11 +405,38 @@ class StaffAssistant {
               }
             ]
           };
+        } finally {
+          _auditLog(jsonEncode({
+            'event': 'staff_assistant_tool',
+            'at': DateTime.now().toUtc().toIso8601String(),
+            'actor': session.user.id,
+            'operation': tool?.id ?? 'unknown_tool',
+            ...target,
+            'outcome': outcome
+          }));
         }
       default:
         return json(_rpcError(id, -32601, 'Method not found'));
     }
     return json({'jsonrpc': '2.0', 'id': id, 'result': result});
+  }
+
+  _Json _auditTarget(AdminSession s, _Json args) {
+    final now = DateTime.now().toUtc();
+    for (final (key, kind) in [
+      ('plan_id', 'plan'),
+      ('hub_ref', 'hub'),
+      ('home_ref', 'home')
+    ]) {
+      final ref = _refs[args[key]];
+      if (ref == null ||
+          ref.actor != s.user.id ||
+          ref.kind != kind ||
+          !ref.expires.isAfter(now)) continue;
+      if (kind == 'plan') return {'hub_id': (ref.value as _Proposal).hub.id};
+      return {'${kind}_id': ref.value};
+    }
+    return {};
   }
 
   String _reference(AdminSession s, String hub, String kind, Object value) {

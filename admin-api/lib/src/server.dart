@@ -28,7 +28,8 @@ class AdminApiServer {
         _fleetReports = fleetReports,
         _auditLog = auditLog ?? stdout.writeln,
         _assistant = StaffAssistant(
-            support, probes, fleetReports, config.supportAccessEncryptionKey);
+            support, probes, fleetReports, config.supportAccessEncryptionKey,
+            auditLog: auditLog);
 
   final void Function(String) _auditLog;
   final AdminApiConfig _config;
