@@ -169,6 +169,50 @@ void main() {
       expect(grants.single.token, 'owner-token');
     });
 
+    test(
+        'reviewed remote setup pins the physical Box and does not grant support',
+        () async {
+      final calls = <_FakeRemoteAccessApi>[];
+      var grants = 0;
+      final supabase = _FakeSupabaseClient(responseData: {
+        'remote_endpoint': {
+          'host': 'example.test',
+          'port': 443,
+          'useSsl': true
+        },
+        'hostname': 'example.test',
+        'connector_token': 'connector',
+        'tunnel_id': 'tunnel',
+        'tunnel_name': 'Tunnel'
+      });
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required baseUrl, String? authToken}) {
+          final api = _FakeRemoteAccessApi(baseUrl: baseUrl);
+          calls.add(api);
+          return api;
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async =>
+            RhythmHello.fromJson({'server_instance_id': 'srv-physical'}),
+        supportGrant: (_) async {
+          grants++;
+        },
+        canUseRemoteAccessOverride: true,
+      );
+      await expectLater(
+          service.enableForHub(_serverHub(),
+              expectedServerInstanceId: 'srv-other', autoGrantSupport: false),
+          throwsStateError);
+      expect(supabase.functions.invocations, isEmpty);
+      final result = await service.enableForHub(_serverHub(),
+          expectedServerInstanceId: 'srv-physical',
+          autoGrantSupport: false,
+          verifyRemoteRoute: true);
+      expect(result.routeVerified, isTrue);
+      expect(calls.where((api) => api.putConfigCalls > 0), hasLength(1));
+      expect(grants, 0);
+    });
+
     test('enable falls back to the saved tunnel when LAN is unreachable',
         () async {
       final configEndpoints = <String>[];

@@ -11,8 +11,11 @@ import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import 'device_pairing_flow.dart';
 import 'assistant_tools_screen.dart';
+import 'customer_assistant_screen.dart';
+import '../../services/customer_assistant_service.dart';
 
 typedef _Args = Map<String, dynamic>;
+typedef AssistantMessage = ({String text, bool resident});
 
 /// A local, guided conversation. Replies, room names, and walk evidence stay
 /// in this screen. Every operation uses the selected hub's authenticated SDK.
@@ -24,15 +27,22 @@ class AssistantChatScreen extends StatefulWidget {
     required this.isCurrentTarget,
     required this.targetChanges,
     required this.openSetup,
+    this.history,
+    this.openAccountTools,
   });
 
+  final List<AssistantMessage>? history;
+  final Future<void> Function(BuildContext, List<AssistantMessage>)?
+      openAccountTools;
   final RhythmServerApi Function() api;
   final String serverId;
   final bool Function() isCurrentTarget;
   final Listenable targetChanges;
   final Future<void> Function(BuildContext) openSetup;
 
-  static Future<void> show(BuildContext context) async {
+  static Future<void> show(BuildContext context,
+      {List<AssistantMessage>? history,
+      bool Function()? accountIsCurrent}) async {
     final sync = context.read<ServerSyncProvider>();
     final homes = context.read<HomeProvider>();
     final identity = sync.connectedServerInstanceId;
@@ -42,9 +52,16 @@ class AssistantChatScreen extends StatefulWidget {
     if (identity == null || !sync.connection.connected) return;
     await Navigator.of(context).push<void>(MaterialPageRoute(
       builder: (_) => AssistantChatScreen(
+        history: history,
+        openAccountTools:
+            history == null && CustomerAssistantService.signedIn() != null
+                ? (ctx, messages) =>
+                    CustomerAssistantScreen.show(ctx, history: messages)
+                : null,
         api: () => sync.connection.api,
         serverId: identity,
         isCurrentTarget: () =>
+            (accountIsCurrent?.call() ?? true) &&
             direct.isSameSelection &&
             sync.connection.connected &&
             homes.currentHome?.id == home &&
@@ -74,7 +91,7 @@ enum _Step {
 }
 
 class _AssistantChatScreenState extends State<AssistantChatScreen> {
-  final _messages = <({String text, bool resident})>[];
+  late final _messages = widget.history ?? <AssistantMessage>[];
   final _text = TextEditingController();
   final _scroll = ScrollController();
   late RhythmAssistantContract _contract;
@@ -601,6 +618,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     };
     return Scaffold(
       appBar: AppBar(title: const Text('Lighting assistant'), actions: [
+        if (widget.openAccountTools != null)
+          IconButton(
+              tooltip: 'Account and Home tools',
+              icon: const Icon(Icons.home_outlined),
+              onPressed: _busy
+                  ? null
+                  : () => widget.openAccountTools!(context, _messages)),
         if (enabled && _step != _Step.retry)
           IconButton(
               icon: const Icon(Icons.build_outlined),

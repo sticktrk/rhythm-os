@@ -23,6 +23,17 @@ void main() {
       });
     });
 
+    test(
+        'explicit support grant carries its claimed review to the grant service',
+        () {
+      final body = SupportAccessService.buildGrantBody(
+          serverHub: _serverHub(),
+          tokenId: 'id',
+          token: 'rhythm_support_test',
+          assistantPlanId: 'review');
+      expect(body['assistant_plan_id'], 'review');
+    });
+
     test('revoke body targets beta admin grant', () {
       final body = SupportAccessService.buildRevokeBody(
         serverHub: _serverHub(),

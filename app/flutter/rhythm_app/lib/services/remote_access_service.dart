@@ -209,6 +209,8 @@ class RemoteAccessService {
     Hub serverHub, {
     Home? home,
     bool requireSupportGrant = false,
+    bool autoGrantSupport = true,
+    String? expectedServerInstanceId,
     bool explicitUserEnable = false,
     bool? verifyRemoteRoute,
   }) async {
@@ -227,6 +229,9 @@ class RemoteAccessService {
     );
 
     final serverInstanceId = await _serverInstanceIdFor(serverHub);
+    if (expectedServerInstanceId != null && serverInstanceId != expectedServerInstanceId) {
+      throw StateError('The Box identity changed before remote setup.');
+    }
     final client = _supabaseClient();
     final response = await client.functions.invoke(
       _bootstrapFunctionName,
@@ -262,6 +267,7 @@ class RemoteAccessService {
     final configured = await _putConfigThroughReachableEndpoint(
       serverHub: serverHub,
       bootstrapEndpoint: remoteEndpoint,
+      expectedServerInstanceId: expectedServerInstanceId,
       hostname: hostname,
       connectorToken: connectorToken,
       tunnelId: tunnelId,
@@ -285,7 +291,7 @@ class RemoteAccessService {
       updatedAt: DateTime.now(),
       pendingSync: true,
     );
-    if (!requireSupportGrant) {
+    if (!requireSupportGrant && autoGrantSupport) {
       // Grant while the phone still has a known-good LAN path. Waiting for a
       // brand-new Cloudflare route first can delay this by minutes and lets a
       // transient propagation failure strand admin access indefinitely.
@@ -955,6 +961,7 @@ class RemoteAccessService {
       })> _putConfigThroughReachableEndpoint({
     required Hub serverHub,
     required HubEndpoint bootstrapEndpoint,
+    required String? expectedServerInstanceId,
     required String hostname,
     required String connectorToken,
     required String tunnelId,
@@ -976,6 +983,12 @@ class RemoteAccessService {
     for (final endpoint in endpoints) {
       final api = _apiForEndpoint(endpoint, serverHub.token);
       try {
+        if (expectedServerInstanceId != null) {
+          final hello = await _stateLoader(endpoint: endpoint, authToken: serverHub.token);
+          if (hello.serverInstanceId != expectedServerInstanceId) {
+            throw StateError('The endpoint did not identify the reviewed Box.');
+          }
+        }
         final status = await api.putConfig(
           hostname: hostname,
           connectorToken: connectorToken,

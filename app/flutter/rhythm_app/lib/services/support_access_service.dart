@@ -38,6 +38,7 @@ class SupportAccessService {
   Future<void> grantForHub(
     Hub serverHub, {
     String label = 'Rhythm beta admin support',
+    String? assistantPlanId,
   }) async {
     _ensureServerHubWithOwnerToken(serverHub);
     final supportToken = await _authApiFactory(
@@ -53,6 +54,7 @@ class SupportAccessService {
         tokenId: supportToken.tokenId,
         token: supportToken.token,
         label: label,
+        assistantPlanId: assistantPlanId,
       ),
     );
   }
@@ -72,9 +74,11 @@ class SupportAccessService {
     required String tokenId,
     required String token,
     String label = 'Rhythm beta admin support',
+    String? assistantPlanId,
   }) {
     return {
       'action': 'grant',
+      if (assistantPlanId != null) 'assistant_plan_id': assistantPlanId,
       'hub_id': serverHub.id,
       'home_id': serverHub.homeId,
       'scope': _defaultScope,
