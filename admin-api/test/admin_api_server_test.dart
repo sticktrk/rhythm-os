@@ -93,7 +93,7 @@ void main() {
       supportAccessKeyId: 'default',
       host: '127.0.0.1',
       port: 8787,
-      allowedOrigins: allowedOrigins,
+      allowedOrigins: {'http://127.0.0.1:5173'},
     );
     final supabase = SupabaseRestClient(config: config, httpClient: client);
     final supportAccess = SupportAccessService(
@@ -398,7 +398,7 @@ void main() {
       supportAccessKeyId: 'default',
       host: '127.0.0.1',
       port: 8787,
-      allowedOrigins: allowedOrigins,
+      allowedOrigins: {'http://127.0.0.1:5173'},
     );
     final supabase = SupabaseRestClient(config: config, httpClient: client);
     final supportAccess = SupportAccessService(
