@@ -29,6 +29,8 @@ void main() {
       final id = row['id'] as String;
       final op = contract.operation(id)!;
       expect(op.location, 'hub');
+      expect(op.requiresOwnerApproval, row['requires_owner_approval']);
+      expect(op.observesHousehold, row['observes_household']);
       expect(op.inputSchema, row['input_schema']);
       expect(op.resultSchema, row['result_schema']);
       expect(op.tier, isNot(RhythmAssistantTier.unknown), reason: id);

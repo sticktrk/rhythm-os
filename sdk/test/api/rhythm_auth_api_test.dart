@@ -18,6 +18,61 @@ void main() {
     );
   });
 
+  test('legacy credentials keep the default and opt-in is sent to the hub',
+      () async {
+    when(() => dio.get('api/auth/agent-tokens')).thenAnswer(
+        (_) async => Response(requestOptions: RequestOptions(), data: {
+              'tokens': [
+                {'id': 'old', 'kind': 'bearer'},
+                {'id': 'new', 'kind': 'bearer', 'unattended_changes': true}
+              ]
+            }));
+    final entries = await api.listAgentCredentials();
+    expect(entries.map((e) => e.unattendedChanges), [false, true]);
+    when(() => dio.post('api/auth/agent-tokens', data: any(named: 'data')))
+        .thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(),
+            data: {'token_id': 'fixture', 'token': 'example'}));
+    await api.createAgentCredential();
+    await api.createAgentCredential(unattendedChanges: true);
+    expect(
+        verify(() => dio.post('api/auth/agent-tokens',
+            data: captureAny(named: 'data'))).captured,
+        [
+          {'unattended_changes': false},
+          {'unattended_changes': true}
+        ]);
+  });
+
+  test('passes only the selected approval decision and returns its receipt',
+      () async {
+    when(() => dio.get('api/assistant/approvals')).thenAnswer(
+        (_) async => Response(requestOptions: RequestOptions(), data: {
+              'approvals': [
+                {
+                  'plan_id': 'p-1',
+                  'plan_operation': 'plan_room_tuning',
+                  'agent_credential_id': 'agent-1',
+                  'review': {'before': 3, 'after': 6}
+                }
+              ]
+            }));
+    final approval = (await api.listAssistantApprovals()).single;
+    expect(approval.review['before'], 3);
+    when(() => dio.post<Map<String, dynamic>>('api/assistant/approvals/p-1',
+            data: any(named: 'data')))
+        .thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(), data: {'status': 'declined'}));
+    expect(
+        (await api.decideAssistantApproval(approval.planId,
+            approve: false))['status'],
+        'declined');
+    verify(() => dio.post<Map<String, dynamic>>('api/assistant/approvals/p-1',
+        data: {'decision': 'decline'})).called(1);
+    await expectLater(api.decideAssistantApproval('../other', approve: true),
+        throwsArgumentError);
+  });
+
   group('getStatus', () {
     test('reports whether the supplied bearer authenticated as owner',
         () async {
