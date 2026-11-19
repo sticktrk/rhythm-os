@@ -215,7 +215,7 @@ Client**, enter the add-on mobile URL ending in `/api/assistant/mcp`. Use the
 HTTPS tunnel when connecting across networks. Enter the issued client ID and
 secret, then paste the activation code on Rhythm's consent screen within ten
 minutes. This flow uses Home Assistant's built-in My Home Assistant redirect.
-Enable the Rhythm tools on the selected conversation agent. The access token
+Enable the Rhythm tools on the selected conversation agent. Home Assistant Assist uses the MCP tools and their descriptions. Its MCP client does not read the contract resource. The access token
 lasts one hour. Refresh rotates the token, and deleting the registration revokes
 both access and refresh. Agent grants occupy separate fields in the existing
 auth store so an older installation can still read its owner credentials.
