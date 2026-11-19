@@ -7469,21 +7469,21 @@ fn do_native_scene_apply(
         }
 
         if preview_id.is_none() {
-        set_scene_committed_state(
-            state,
-            &runtime,
-            scene_id,
-            &target_id,
-            &affected_node_ids,
-            PaletteWindow::default(),
-            None,
-        );
-        if let Ok(mut s) = state.lock() {
-            clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
-        }
-        if persist_state {
-            persist_rooms(state);
-        }
+            set_scene_committed_state(
+                state,
+                &runtime,
+                scene_id,
+                &target_id,
+                &affected_node_ids,
+                PaletteWindow::default(),
+                None,
+            );
+            if let Ok(mut s) = state.lock() {
+                clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
+            }
+            if persist_state {
+                persist_rooms(state);
+            }
         }
         emit_node_state_event_after_apply(state, &runtime, &target_id);
         info!(
@@ -7634,7 +7634,7 @@ pub fn do_scene_preview(
     } else {
         do_scene_apply_definition_inner(
             state, SceneApplySource::Stored(scene_id.to_string()), apply_request,
-            false, false, Some(preview_id.clone()), true, PaletteWindow::default(),
+            false, false, Some(preview_id.clone()), false, PaletteWindow::default(),
         )?
     };
     record_scene_preview_session(

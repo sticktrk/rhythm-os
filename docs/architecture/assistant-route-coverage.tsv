@@ -83,7 +83,7 @@ shared	POST	/api/devices/canonical/:id/flash	operation	identify_device
 shared	PUT	/api/devices/canonical/:id/parent	operation	plan_move_device_room
 shared	PUT	/api/devices/canonical/:id/preferred	handoff	Owner reviews the preferred native control endpoint.
 shared	PUT	/api/devices/canonical/:id/room	operation	plan_move_device_room
-shared	POST	/api/devices/pair	operation	guide_device_setup
+shared	POST	/api/devices/pair	operation	plan_nearby_hue_lights
 shared	DELETE	/api/devices/pair/:session_id	operation	guide_device_setup
 shared	GET	/api/devices/pair/:session_id	operation	read_pairing_result
 shared	GET	/api/devices/removed	handoff	Owner reviews archived identity before permanent deletion.

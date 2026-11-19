@@ -50,6 +50,44 @@ Display names are present because a user-facing setup flow needs them. They
 must not be copied into analytics, logs, plan IDs, or model-provider telemetry
 unless a separately reviewed privacy contract requires it.
 
+### Running an operation
+
+The same descriptor drives MCP discovery and the app's typed SDK. Each entry
+includes an operation ID, location, tier, input and result schemas, and an
+invocation path. The app and per-hub staff console discover the selected
+server's catalog and send JSON to `POST /api/assistant/operations/{id}`.
+An MCP client uses `tools/call` with the same ID and arguments. Both receive
+the same operation result. The account and fleet services own the operations
+that run outside the hub.
+
+Read operations include previews. A temporary-output tool can change lights
+immediately. A persistent tool accepts explicit confirmation and the arguments
+from its preview. Older device-room move endpoints retain their original
+request format for existing clients. Owner actions return a handoff that
+identifies the person, the surface to open and the hub on which to resume.
+
+| Resident's request | Tools and evidence |
+| --- | --- |
+| “A little brighter” or “warmer at this brightness” | Read the current room output, then use the brightness or warmth adjustment. Check the returned per-light evidence. |
+| “Keep the kitchen brighter after dusk” | Inspect the active mode and profile. Preview a room tuning and compare dusk and later samples before applying it. |
+| “Show me an hour earlier” | Try a negative offset. Undo the returned trial, keep a room offset, or review Absorb's shared profile and offset changes. |
+| “Why didn't the hall turn on?” | Start a short walk for the chosen sensor. Inspect detection, targets, room policy, dispatch and fresh light observations. Review a target repair, then walk again. |
+| “Change my saved lighting” | Discover scene, schedule, transition, profile, binding and room-preference plans. The preview names the affected settings and the apply arguments. |
+
+The catalog also covers room and device management, pairing and triage, HA
+managed-light selection, portable settings, activity uploads and appliance
+maintenance. Sensitive pairing, HA-owned configuration, installation backups,
+full restore and factory reset direct the person to the appropriate app or HA
+surface. Portable lighting exports contain household labels for mapping and
+belong in the resident's trusted client.
+
+The route ledger records the classification of each shared, platform and add-on
+HTTP route. Run `tools/check-repo-invariants.sh` when changing routes. Regenerate
+the staff proxy's read classification with
+`cargo run --quiet -p rhythm-os --example assistant_read_policy > admin-api/lib/src/assistant_read_operations.dart`.
+
+[Hub route coverage](assistant-route-coverage.tsv)
+
 ### Device-room move plan and apply
 
 `POST /api/assistant/plans/device-room-move` is read-only. It validates current

@@ -29,6 +29,7 @@ const assistantReadOperations = <String>{
   'plan_mode_transitions_edit',
   'plan_motion_target',
   'plan_move_device_room',
+  'plan_nearby_hue_lights',
   'plan_node_preferences_edit',
   'plan_profile_bundle_reset',
   'plan_profile_reset',
