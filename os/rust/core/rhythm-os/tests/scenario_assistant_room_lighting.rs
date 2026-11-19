@@ -37,6 +37,36 @@ fn installation() -> (TestHarness, String, String) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_lighting_references_do_not_report_dispatch() {
+    let (h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+    let h = h.with_discovery(rooms, devices);
+    h.sync();
+    let room = h.resolve("den");
+    spy.reset();
+    for (id, args) in [
+        (
+            "preview_room_scene",
+            json!({"room_id":room,"scene_id":"no-such-scene"}),
+        ),
+        (
+            "run_mode_transition",
+            json!({"transition_id":"no-such-transition"}),
+        ),
+        (
+            "run_schedule_transition",
+            json!({"schedule_id":"no-such-schedule","transition_id":"missing"}),
+        ),
+        ("set_house_lighting_mode", json!({"mode":"no-such-mode"})),
+    ] {
+        let (status, body) = operation(&h, id, args).await;
+        assert!((400..500).contains(&status), "{id}: {body}");
+        assert_eq!(body["error"]["mutation_may_have_applied"], false);
+    }
+    assert!(spy.turn_on_calls().is_empty() && spy.turn_off_calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_controls_survive_runtime_bootstrap() {
     use rhythm_os::storage::FileStorage;
     let (h, kitchen, _) = installation();

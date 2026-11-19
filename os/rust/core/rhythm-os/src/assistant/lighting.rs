@@ -58,6 +58,14 @@ fn uncertain() -> Error {
         mutation_may_have_applied: true,
     }
 }
+fn dispatch_error(error: anyhow::Error) -> Error {
+    if error.is::<commands::UnknownLightingReference>() {
+        invalid(error.to_string())
+    } else {
+        uncertain()
+    }
+}
+
 fn lock(state: &SharedState) -> Result<MutexGuard<'_, AppState>> {
     state
         .lock()
@@ -896,7 +904,7 @@ fn preview_light_output(
                 }),
             },
         )
-        .map_err(|_| uncertain());
+        .map_err(dispatch_error);
     }
 
     let (color, brightness) = if id == "set_room_color" {
@@ -1125,13 +1133,13 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
     if matches!(id, "run_mode_transition" | "run_schedule_transition") {
         let transition = string(args, "transition_id")?;
         let result = if id == "run_mode_transition" {
-            commands::do_trigger_transition(state, &transition).map_err(|_| uncertain())?;
+            commands::do_trigger_transition(state, &transition).map_err(dispatch_error)?;
             json!({"scope":"hub","mode":lock(state)?.active_mode})
         } else {
             let schedule = string(args, "schedule_id")?;
             let outcome =
                 commands::do_trigger_light_schedule_transition(state, &schedule, &transition)
-                    .map_err(|_| uncertain())?;
+                    .map_err(dispatch_error)?;
             json!({"scope":"schedule","schedule_id":schedule,"mode":outcome.target_mode})
         };
         return Ok(

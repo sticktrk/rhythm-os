@@ -81,6 +81,16 @@ pub use lighting_settings::{
 /// the same transaction lock used by the ordinary app operation.
 pub(crate) type ReviewCheck<'a> = &'a dyn Fn(&AppState) -> Result<()>;
 
+/// The referenced resource was absent before any output or state change.
+#[derive(Debug)]
+pub(crate) struct UnknownLightingReference(String);
+impl fmt::Display for UnknownLightingReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for UnknownLightingReference {}
+
 pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6011,10 +6021,9 @@ fn do_scene_apply_definition_in_transaction(
     let mut scene = match source {
         SceneApplySource::Stored(scene_id) => {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.scenes
-                .get(&scene_id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?
+            s.scenes.get(&scene_id).cloned().ok_or_else(|| {
+                UnknownLightingReference(format!("Scene '{}' not found", scene_id))
+            })?
         }
         SceneApplySource::Definition(scene) => scene,
     };
@@ -7578,7 +7587,7 @@ fn do_native_scene_apply(
             discovery_errors.join("; ")
         ));
     }
-    Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
+    Err(UnknownLightingReference(format!("Scene '{}' not found", scene_id)).into())
 }
 
 /// Build individual companion commands for bulbs whose topology explicitly
@@ -14239,21 +14248,19 @@ pub fn do_trigger_light_schedule_transition(
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let transition = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let schedule = s
-            .light_schedules
-            .get(schedule_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+        let schedule = s.light_schedules.get(schedule_id).ok_or_else(|| {
+            UnknownLightingReference(format!("Unknown light schedule '{}'", schedule_id))
+        })?;
         schedule
             .transitions
             .iter()
             .find(|transition| transition.id == transition_id)
             .cloned()
             .ok_or_else(|| {
-                anyhow::anyhow!(
+                UnknownLightingReference(format!(
                     "Unknown transition '{}' for light schedule '{}'",
-                    transition_id,
-                    schedule_id
-                )
+                    transition_id, schedule_id
+                ))
             })?
     };
     apply_light_schedule_mode_internal(state, schedule_id, transition.to_mode, Some(transition))
@@ -15131,7 +15138,7 @@ pub fn do_trigger_transition(state: &SharedState, transition_id: &str) -> Result
             .into_iter()
             .find(|config| config.id == transition_id)
     }
-    .ok_or_else(|| anyhow::anyhow!("Unknown transition '{}'", transition_id))?;
+    .ok_or_else(|| UnknownLightingReference(format!("Unknown transition '{}'", transition_id)))?;
 
     let mode_change = ModeChangeContext::new(ModeChangeCause::Manual, Some(transition.clone()));
     do_settings_set_internal(
