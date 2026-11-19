@@ -1071,15 +1071,17 @@ fn write_support_audit_line(
     else {
         return;
     };
-    let _ = writeln!(
-        file,
-        "{}\t{}\t{}\t{}\t{}",
+    // Append the whole record together. Formatting directly into File can
+    // issue separate writes for individual fields on concurrent requests.
+    let record = format!(
+        "{}\t{}\t{}\t{}\t{}\n",
         current_epoch_ms(),
         token_id,
         method,
         path,
         sanitized_support_request_id(request_id),
     );
+    let _ = file.write_all(record.as_bytes());
 }
 
 fn sanitized_support_request_id(request_id: Option<&str>) -> &str {
@@ -1247,12 +1249,9 @@ mod tests {
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("rhythm-auth-{name}-{nanos}"));
-        fs::create_dir_all(&path).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("rhythm-auth-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).unwrap();
         path
     }
 
@@ -1961,8 +1960,9 @@ mod tests {
         assert_eq!(state.api_auth.tokens[1].role, ApiTokenRole::Support);
     }
 
-    #[tokio::test]
-    async fn appliance_tunnel_request_accepts_support_token_for_allowed_routes_and_audits() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_support_requests_append_complete_audit_records() {
+        const REQUESTS: usize = 16;
         let data_dir = unique_test_dir("support-audit");
         let state = test_state();
         {
@@ -1973,27 +1973,50 @@ mod tests {
         }
         let issued = issue_local_support_token(&state, Some("support".into())).unwrap();
         let app = auth_test_router(state);
+        let mut expected = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        let gate = Arc::new(tokio::sync::Barrier::new(REQUESTS));
+        for i in 0..REQUESTS {
+            let path = if i % 2 == 0 {
+                "/api/state"
+            } else {
+                "/api/auth/status"
+            };
+            let request_id = format!("fixture-request-{i}");
+            expected.push(format!("{}\tGET\t{path}\t{request_id}", issued.id));
+            let mut request = tunnel_request(Method::GET, path, Body::empty());
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", issued.token).parse().unwrap(),
+            );
+            request
+                .headers_mut()
+                .insert("x-request-id", request_id.parse().unwrap());
+            let gate = gate.clone();
+            let app = app.clone();
+            tasks.spawn(async move {
+                gate.wait().await;
+                assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
 
-        let response = app
-            .oneshot({
-                let mut req = tunnel_request(Method::GET, "/api/state", Body::empty());
-                req.headers_mut().insert(
-                    AUTHORIZATION,
-                    format!("Bearer {}", issued.token).parse().unwrap(),
-                );
-                req.headers_mut()
-                    .insert("x-request-id", "customer-tuning:test-1234".parse().unwrap());
-                req
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
         let audit = fs::read_to_string(data_dir.join(SUPPORT_AUDIT_FILE)).unwrap();
-        assert!(audit.contains(&issued.id));
-        assert!(audit.contains("\tGET\t/api/state"));
-        assert!(audit.contains("\tcustomer-tuning:test-1234"));
-        let _ = fs::remove_dir_all(data_dir);
+        assert!(audit.ends_with('\n'));
+        let mut records: Vec<_> = audit
+            .lines()
+            .map(|line| {
+                let (time, fields) = line.split_once('\t').unwrap();
+                assert!(time.parse::<u64>().is_ok());
+                fields
+            })
+            .collect();
+        records.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(records, expected);
+        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
