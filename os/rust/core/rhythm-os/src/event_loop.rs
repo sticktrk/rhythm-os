@@ -8823,6 +8823,22 @@ mod tests {
             .unwrap();
         assert_eq!(now_unknown["availability"], "unknown");
         assert_eq!(now_unknown["resident_power_on"], false);
+
+        call(&state, "inspect_motion_walk", json!({
+            "walk_id":retest["walk_id"],"resident_observations":[{"device_id":lamp,"power_on":true}]
+        })).await.unwrap();
+        let refreshed = inspect(&retest).await.unwrap();
+        let lights = refreshed["lights"].as_array().unwrap();
+        assert_eq!(refreshed["resident_confirmation"], "reported");
+        assert_eq!(
+            lights.iter().find(|l| l["device_id"] == lamp).unwrap()["resident_power_on"],
+            true
+        );
+        let previous = lights.iter().find(|l| l["device_id"] == second).unwrap();
+        assert_eq!(previous["resident_power_on"], false);
+        assert!(previous["power_on"].is_null());
+        clients.verify(&refreshed).await;
+
         assert_eq!(inspect(&walk).await.unwrap()["reason"], "missing_target");
     }
 

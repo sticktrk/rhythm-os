@@ -32,6 +32,7 @@ class _Hub extends RhythmServerApi {
                   'adjust_room_brightness',
                   'adjust_room_warmth',
                   'return_room_to_schedule',
+                  'plan_absorb_offset',
                   'try_room_offset',
                   'undo_room_trial',
                   'identify_device',
@@ -82,6 +83,16 @@ class _Hub extends RhythmServerApi {
       sawPower = args['resident_observations'][0]['power_on'] as bool;
     }
     return switch (id) {
+      'plan_absorb_offset' => {
+          'operation': 'apply_absorb_offset',
+          'room_id': args['room_id'],
+          'server_instance_id': 'hub1',
+          'plan_id': 'review-offset',
+          'profile_id': 'day',
+          'affected_rooms': [],
+          'cleared_offsets': [],
+          'samples': [],
+        },
       'explain_room_output' => current,
       'adjust_room_brightness' ||
       'adjust_room_warmth' ||
@@ -154,6 +165,36 @@ class _Hub extends RhythmServerApi {
 }
 
 void main() {
+  testWidgets(
+      'Save this look uses the trial that ran after cancelling another preview',
+      (tester) async {
+    final hub = _Hub();
+    await tester.pumpWidget(MaterialApp(
+        home: AssistantChatScreen(
+            api: () => hub,
+            serverId: 'hub1',
+            isCurrentTarget: () => true,
+            targetChanges: ValueNotifier(true),
+            openSetup: (_) async {})));
+    await tester.pumpAndSettle();
+
+    Future<void> send(String message) async {
+      await tester.enterText(find.byType(TextField), message);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    await send('Downstairs hall 1 hour earlier');
+    await send('Try 60 minutes earlier');
+    await send('Downstairs hall 30 minutes earlier');
+    await send('Cancel');
+    await send('Save this look');
+    expect(hub.calls.where((c) => c.$1 == 'try_room_offset').single.$2,
+        {'room_id': 'hall', 'offset_minutes': -60});
+    expect(hub.calls.last.$1, 'plan_absorb_offset');
+    expect(hub.calls.last.$2, {'room_id': 'hall', 'offset_minutes': -60});
+  });
+
   testWidgets(
       'resident resumes after setup on the same hub, reviews, confirms and retests',
       (tester) async {

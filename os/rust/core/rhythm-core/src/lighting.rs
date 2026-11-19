@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::adaptive::LightingValues;
 use crate::color::{kelvin_to_mireds, kelvin_to_rgb, kelvin_to_xy, Rgb, XyColor};
 
+/// Rendered scene output for one light or group.
+#[derive(Clone)]
+pub enum SceneLightDispatch {
+    On(LightingCommand),
+    Off(Option<u32>),
+}
+
 /// A command to send to lights.
 ///
 /// Contains all the values needed to control a light, with multiple

@@ -84,14 +84,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   String _intent = '';
   RhythmTopologyNode? _room;
   String _sensor = '', _walk = '';
-  String? _trial, _trialRoom;
+  ({String id, String room, num? minutes})? _trial;
   RhythmMotionTargetReview? _review;
   RhythmMotionDiagnosis? _diagnosis;
   String? _lightPlan, _lightApply, _lightActionLabel;
   _Args _lightArguments = {};
   bool _phoneSetup = false;
   String _lightOperation = '';
-  num? _trialMinutes;
 
   bool get _active => mounted && widget.isCurrentTarget();
   Iterable<RhythmTopologyNode> get _rooms => _nodes.where((n) => n.isRoom);
@@ -247,10 +246,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             _say('Cancelled.');
           } else if (reply == _lightActionLabel) {
             final result = await _call(_lightOperation, _lightArguments);
-            if (result['trial_id'] is String) {
-              _trial = result['trial_id'] as String;
-              _trialRoom = _room!.id;
-              _trialMinutes = _lightArguments['offset_minutes'] as int?;
+            if (_lightOperation == 'try_room_offset' &&
+                result['trial_id'] is String) {
+              _trial = (
+                id: result['trial_id'] as String,
+                room: _room!.id,
+                minutes: _lightArguments['offset_minutes'] as num
+              );
             } else if (_lightOperation == 'undo_room_trial') {
               _trial = null;
             }
@@ -281,7 +283,6 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             if (_lightApply == 'apply_absorb_offset' &&
                 result['canonical_readback_verified'] == true) {
               _trial = null;
-              _trialMinutes = null;
             }
             _say(result['canonical_readback_verified'] == true
                 ? 'The hub verified the saved change.'
@@ -303,7 +304,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
           _room = _match(lower, _rooms);
           if (_room == null) {
             if ({'undo trial', 'undo', 'save this look'}.contains(lower)) {
-              _room = _nodes.where((n) => n.id == _trialRoom).firstOrNull;
+              _room = _nodes.where((n) => n.id == _trial?.room).firstOrNull;
             } else if (RegExp(
               r'^(go back to normal|back to normal|a little (brighter|dimmer)( in here)?|warmer(,? but keep this brightness)?|why is it dim)[?.!]*$',
             ).hasMatch(lower)) {
@@ -398,15 +399,15 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       final active = current['active_trial'];
       final id = active is Map ? active['trial_id'] : null;
       if (id is String && active is Map) {
-        final sameTrial = id == _trial && _room!.id == _trialRoom;
-        _trialMinutes = active.containsKey('offset_minutes')
+        final previous = _trial;
+        final minutes = active.containsKey('offset_minutes')
             ? active['offset_minutes'] as num?
-            : (sameTrial ? _trialMinutes : null);
-        _trial = id;
-        _trialRoom = _room!.id;
-      } else if (id == null && _trialRoom == _room!.id) {
+            : (previous?.id == id && previous?.room == _room!.id
+                ? previous?.minutes
+                : null);
+        _trial = (id: id, room: _room!.id, minutes: minutes);
+      } else if (id == null && _trial?.room == _room!.id) {
         _trial = null;
-        _trialMinutes = null;
       }
     }
     final mode = current['mode'],
@@ -415,13 +416,15 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     _say('${_room!.name} is in $mode mode ($state) using $profile. '
         'The current target is ${current['canonical_brightness']}% at ${current['canonical_kelvin']} K.');
     if (_intent.contains('save this look') || _intent.contains('absorb')) {
-      if (_trialRoom != _room!.id || _trial == null || _trialMinutes == null) {
+      if (_trial?.room != _room!.id ||
+          _trial == null ||
+          _trial?.minutes == null) {
         _say('Try a time-shifted look in this room before saving it.');
         _step = _Step.request;
         return;
       }
       await _planLighting(
-          'plan_absorb_offset', {...room, 'offset_minutes': _trialMinutes});
+          'plan_absorb_offset', {...room, 'offset_minutes': _trial?.minutes});
       return;
     }
     if (RegExp('dusk|sunset|evening').hasMatch(_intent)) {
@@ -463,9 +466,9 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       args = {...room, 'offset_minutes': shiftMinutes};
       label = 'Try ${shiftMinutes.abs()} minutes earlier';
     } else if (_intent.contains('normal') || _intent.contains('undo')) {
-      if (_trial != null && _trialRoom == _room!.id) {
+      if (_trial != null && _trial?.room == _room!.id) {
         op = 'undo_room_trial';
-        args = {...room, 'trial_id': _trial};
+        args = {...room, 'trial_id': _trial!.id};
         label = 'End this trial';
       } else {
         op = 'return_room_to_schedule';
@@ -714,7 +717,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
           'Check a motion sensor',
           'A little brighter',
           if (_trial != null) 'Undo trial',
-          if (_trial != null && _trialMinutes != null) 'Save this look'
+          if (_trial != null && _trial?.minutes != null) 'Save this look'
         ],
       _Step.walk => ['Check walk', 'Review room link', 'Walk again'],
       _Step.handoff => [
