@@ -7,10 +7,11 @@ import {
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
 
+import { readScope, storeGrant } from './store.ts'
+
 const ENVELOPE_VERSION = 'support_access_token_v1'
 const ENVELOPE_ALGORITHM = 'aes-gcm-256'
 const KEY_DERIVATION = 'sha256-env-v1'
-const DEFAULT_SCOPE = 'beta_admin'
 const SUPPORT_TOKEN_PREFIX = 'rhythm_support_'
 const SUPPORT_SESSION_TOKEN_PREFIX = 'rhythm_support_session_'
 
@@ -93,26 +94,6 @@ async function createGrant(
   }
 }
 
-async function storeGrant(
-  adminClient: any,
-  userId: string,
-  hub: HubRow,
-  action: 'grant' | 'revoke',
-  body: JsonObject,
-  payload: JsonObject,
-): Promise<Response> {
-  const scope = readScope(body)
-  if (scope instanceof Response) return scope
-  const { data, error } = await adminClient.rpc('store_customer_support_grant', {
-    p_actor: userId, p_hub: hub.id, p_action: action, p_payload: payload,
-    p_review: readString(body, 'assistant_plan_id'),
-  })
-  if (error?.code === '42501') return jsonResponse({ error: 'Support access requires resident review' }, 403)
-  if (error?.code === 'P0001') return jsonResponse({ error: 'Review support access again' }, 409)
-  if (error) return jsonResponse({ error: 'Could not update support access' }, 500)
-  return jsonResponse(data)
-}
-
 async function readAuthorizedHub(
   adminClient: any,
   userId: string,
@@ -139,14 +120,6 @@ async function readAuthorizedHub(
   }
 
   return { hub, home }
-}
-
-function readScope(body: JsonObject): string | Response {
-  const scope = readString(body, 'scope') ?? DEFAULT_SCOPE
-  if (scope !== DEFAULT_SCOPE) {
-    return jsonResponse({ error: `Unsupported support access scope: ${scope}` }, 400)
-  }
-  return scope
 }
 
 function isHomeMember(home: HomeRow, userId: string): boolean {

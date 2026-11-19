@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -43,15 +44,21 @@ class SupportAccessService {
     _ensureServerHubWithOwnerToken(serverHub);
     final client = _supabaseClient();
     if (assistantPlanId == null) {
-      final response = await client.functions.invoke(_grantFunctionName, body: {
-        'action': 'check',
-        'hub_id': serverHub.id,
-        'home_id': serverHub.homeId,
-        'scope': _defaultScope,
-      });
-      if (response.data is! Map || response.data['allowed'] != true) {
-        throw StateError(
-            'This Box requires a resident-reviewed support grant.');
+      try {
+        final response =
+            await client.functions.invoke(_grantFunctionName, body: {
+          'action': 'check',
+          'hub_id': serverHub.id,
+          'home_id': serverHub.homeId,
+          'scope': _defaultScope,
+        });
+        if (response.data is! Map || response.data['allowed'] != true) {
+          throw StateError(
+              'This Box requires a resident-reviewed support grant.');
+        }
+      } on FunctionException catch (error) {
+        // Older grant functions reject the check action with HTTP 400.
+        if (error.status != 400) rethrow;
       }
     }
     final supportToken = await _authApiFactory(
