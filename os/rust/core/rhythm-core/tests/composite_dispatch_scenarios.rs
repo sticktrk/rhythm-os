@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rhythm_core::composite_controller::{HubDispatchPolicy, HubDispatchTimeoutScope};
+use rhythm_core::composite_controller::{
+    HubDispatchPolicy, HubDispatchStatus, HubDispatchTimeoutScope,
+};
 use rhythm_core::{
     CompositeController, HubDispatchTarget, HubLightController, LightControlError,
     LightControlResult, LightController, LightingCommand, Room,
@@ -236,6 +238,12 @@ async fn slow_inflight_command_coalesces_followups_and_never_rejects() {
 async fn dispatch_timeout_cools_down_then_recovers_after_slow_command_finishes() {
     let controller = Arc::new(SlowHubController::new());
     let composite = CompositeController::new();
+    let (timed_out, timeout_observed) = mpsc::channel();
+    composite.set_outcome_listener(Arc::new(move |outcome| {
+        if matches!(outcome.status, HubDispatchStatus::TimedOut { .. }) {
+            let _ = timed_out.send(());
+        }
+    }));
     composite.register_controller_with_policy(
         "hue@bridge",
         controller.clone(),
@@ -250,12 +258,14 @@ async fn dispatch_timeout_cools_down_then_recovers_after_slow_command_finishes()
         .unwrap();
     controller.wait_started();
 
-    assert!(wait_until(Duration::from_secs(5), || {
-        let retry = futures::executor::block_on(
-            composite.turn_on("kitchen", LightingCommand::new(70, 3500)),
-        );
-        matches!(retry, Err(LightControlError::Timeout(_)))
-    }));
+    // Polling with turn_on would enqueue another command before cooldown starts.
+    timeout_observed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let retry = composite
+        .turn_on("kitchen", LightingCommand::new(70, 3500))
+        .await;
+    assert!(matches!(retry, Err(LightControlError::Timeout(_))));
 
     controller.release();
 
