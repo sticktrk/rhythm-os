@@ -68,6 +68,9 @@ async function session(req: Request, backend?: Backend) {
     auth,
   });
   const user = await client.auth.getUser(token);
+  if (user.error && ![400, 401, 403].includes(user.error.status ?? 0)) {
+    throw new Rejection(503, "account_service_unavailable");
+  }
   if (user.error || !user.data.user || user.data.user.is_anonymous) {
     throw new Rejection(401, "sign_in");
   }

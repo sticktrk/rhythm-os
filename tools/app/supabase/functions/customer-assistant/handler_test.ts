@@ -28,6 +28,11 @@ function fixture() {
       seen.push(path);
       if (path === "/auth/v1/user") {
         authCalls++;
+        if (bearer === "Bearer auth-offline") {
+          return Response.json({ message: "backend unavailable" }, {
+            status: 500,
+          });
+        }
         if (bearer !== "Bearer fixture-resident") {
           return Response.json({ message: "expired" }, { status: 401 });
         }
@@ -134,6 +139,10 @@ Deno.test("authentication, confirmation, payload bounds and stale receipts fail 
   const { invoke, seen, authCalls } = fixture();
   const denied = await invoke({ contract: true }, "expired");
   equal([denied.status, (await denied.json()).step], [401, "sign_in"]);
+  const unavailable = await invoke({ contract: true }, "auth-offline");
+  equal([unavailable.status, await unavailable.json()], [503, {
+    error: "account_service_unavailable",
+  }]);
   const refused = await invoke({
     operation: "apply_customer_plan",
     arguments: { plan_id: hubId, confirmed: false },
@@ -156,5 +165,5 @@ Deno.test("authentication, confirmation, payload bounds and stale receipts fail 
     )).status,
     403,
   );
-  equal(authCalls(), 5);
+  equal(authCalls(), 6);
 });
