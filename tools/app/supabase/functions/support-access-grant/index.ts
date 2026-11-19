@@ -41,8 +41,14 @@ Deno.serve((req) =>
     if (authorized instanceof Response) return authorized
 
     const action = readString(body, 'action') ?? 'grant'
+    if (action === 'check') {
+      const { data, error } = await adminClient.from('hub_support_review_policy')
+        .select('hub_id').eq('hub_id', authorized.hub.id).maybeSingle()
+      if (error) return jsonResponse({ error: 'Could not check automatic support access' }, 503)
+      return jsonResponse({ allowed: !data })
+    }
     if (action === 'revoke') {
-      return await revokeGrant(adminClient, authorized.hub, body)
+      return await storeGrant(adminClient, userId, authorized.hub, 'revoke', body, {})
     }
     if (action !== 'grant') {
       return jsonResponse({ error: 'Invalid action' }, 400)
@@ -78,74 +84,33 @@ async function createGrant(
       tokenId,
       scope,
     })
-    const now = new Date().toISOString()
-
-    const { error: revokeError } = await adminClient
-      .from('hub_support_access_grants')
-      .update({ revoked_at: now, encrypted_token: revokedEnvelope() })
-      .eq('hub_id', hub.id)
-      .eq('scope', scope)
-      .is('revoked_at', null)
-    if (revokeError) throw new Error(revokeError.message)
-
-    const payload: Record<string, unknown> = {
-      hub_id: hub.id,
-      home_id: hub.home_id,
-      token_id: tokenId,
-      scope,
-      encrypted_token: encryptedToken,
-      key_id: encryptedToken.key_id,
-      granted_by: userId,
-    }
-    if (label) payload.label = label
-    if (expiresAt) payload.expires_at = expiresAt
-
-    const { data, error } = await adminClient
-      .from('hub_support_access_grants')
-      .insert(payload)
-      .select(
-        'id, hub_id, home_id, token_id, label, scope, key_id, granted_by, expires_at, revoked_at, created_at, updated_at',
-      )
-      .single()
-    if (error) throw new Error(error.message)
-
-    return jsonResponse({ status: 'ok', grant: data })
+    return await storeGrant(adminClient, userId, hub, 'grant', body, {
+      token_id: tokenId, label, scope, encrypted_token: encryptedToken,
+      key_id: encryptedToken.key_id, expires_at: expiresAt,
+    })
   } catch (error) {
     return jsonResponse({ error: errorMessage(error) }, 500)
   }
 }
 
-async function revokeGrant(
+async function storeGrant(
   adminClient: any,
+  userId: string,
   hub: HubRow,
+  action: 'grant' | 'revoke',
   body: JsonObject,
+  payload: JsonObject,
 ): Promise<Response> {
-  try {
-    const scopeResult = readScope(body)
-    if (scopeResult instanceof Response) return scopeResult
-    const scope = scopeResult
-    const now = new Date().toISOString()
-    const { data, error } = await adminClient
-      .from('hub_support_access_grants')
-      .update({ revoked_at: now, encrypted_token: revokedEnvelope() })
-      .eq('hub_id', hub.id)
-      .eq('scope', scope)
-      .is('revoked_at', null)
-      .select('id, token_id')
-    if (error) throw new Error(error.message)
-
-    return jsonResponse({
-      status: 'ok',
-      revoked_count: Array.isArray(data) ? data.length : 0,
-      token_ids: Array.isArray(data)
-        ? data.map((row) => row.token_id).filter((value) =>
-          typeof value === 'string' && value.length > 0
-        )
-        : [],
-    })
-  } catch (error) {
-    return jsonResponse({ error: errorMessage(error) }, 500)
-  }
+  const scope = readScope(body)
+  if (scope instanceof Response) return scope
+  const { data, error } = await adminClient.rpc('store_customer_support_grant', {
+    p_actor: userId, p_hub: hub.id, p_action: action, p_payload: payload,
+    p_review: readString(body, 'assistant_plan_id'),
+  })
+  if (error?.code === '42501') return jsonResponse({ error: 'Support access requires resident review' }, 403)
+  if (error?.code === 'P0001') return jsonResponse({ error: 'Review support access again' }, 409)
+  if (error) return jsonResponse({ error: 'Could not update support access' }, 500)
+  return jsonResponse(data)
 }
 
 async function readAuthorizedHub(
@@ -191,12 +156,6 @@ function isHomeMember(home: HomeRow, userId: string): boolean {
 function isDurableSupportToken(token: string): boolean {
   return token.startsWith(SUPPORT_TOKEN_PREFIX) &&
     !token.startsWith(SUPPORT_SESSION_TOKEN_PREFIX)
-}
-
-function revokedEnvelope(): Record<string, string> {
-  return {
-    version: 'support_access_token_revoked_v1',
-  }
 }
 
 async function encryptSupportToken(
