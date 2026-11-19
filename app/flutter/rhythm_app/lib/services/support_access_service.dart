@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -38,14 +39,33 @@ class SupportAccessService {
   Future<void> grantForHub(
     Hub serverHub, {
     String label = 'Rhythm beta admin support',
+    String? assistantPlanId,
   }) async {
     _ensureServerHubWithOwnerToken(serverHub);
+    final client = _supabaseClient();
+    if (assistantPlanId == null) {
+      try {
+        final response =
+            await client.functions.invoke(_grantFunctionName, body: {
+          'action': 'check',
+          'hub_id': serverHub.id,
+          'home_id': serverHub.homeId,
+          'scope': _defaultScope,
+        });
+        if (response.data is! Map || response.data['allowed'] != true) {
+          throw StateError(
+              'This Box requires a resident-reviewed support grant.');
+        }
+      } on FunctionException catch (error) {
+        // Older grant functions reject the check action with HTTP 400.
+        if (error.status != 400) rethrow;
+      }
+    }
     final supportToken = await _authApiFactory(
       baseUrl: serverHub.endpoint.baseUrl,
       authToken: serverHub.token,
     ).issueSupportToken(label: label);
 
-    final client = _supabaseClient();
     await client.functions.invoke(
       _grantFunctionName,
       body: buildGrantBody(
@@ -53,6 +73,7 @@ class SupportAccessService {
         tokenId: supportToken.tokenId,
         token: supportToken.token,
         label: label,
+        assistantPlanId: assistantPlanId,
       ),
     );
   }
@@ -72,9 +93,11 @@ class SupportAccessService {
     required String tokenId,
     required String token,
     String label = 'Rhythm beta admin support',
+    String? assistantPlanId,
   }) {
     return {
       'action': 'grant',
+      if (assistantPlanId != null) 'assistant_plan_id': assistantPlanId,
       'hub_id': serverHub.id,
       'home_id': serverHub.homeId,
       'scope': _defaultScope,

@@ -1,3 +1,6 @@
+import { approveStaffPlan, pendingStaffPlans } from '../../api';
+import { useOptionalSession } from '../../state/SessionContext';
+import { StaffHubDiagnostics } from './StaffHubDiagnostics';
 import { AssistantTools } from './AssistantTools';
 import { useEffect, useState } from 'react';
 import { SectionCard } from '../../components/ui/SectionCard';
@@ -16,6 +19,9 @@ const preview = 'plan_motion_target', apply = 'apply_motion_target';
 
 export default function AssistantPage() {
   const client = useDeviceClient();
+  const session = useOptionalSession();
+  const token = client.hubId ? session?.accessToken : undefined;
+  const [pending, setPending] = useState<Obj[]>([]);
   const { hub } = useHub();
   const canWrite = useSnapshot().me?.staffStatus.isAdmin === true;
   const [operations, setOperations] = useState<Obj[]>([]);
@@ -44,8 +50,14 @@ export default function AssistantPage() {
     setError('');
     setMessage('');
     setOperations([]);
+    setPending([]);
     setNodes([]);
     (async () => {
+      if (token && canWrite) {
+        const list = await pendingStaffPlans(token, hub.id);
+        if (!active) return;
+        setPending(list.plans);
+      }
       const contract = await client.get<Obj>('api/assistant/contract');
       if (!active) return;
       const ops = asRecordArray(contract.operations);
@@ -72,7 +84,7 @@ export default function AssistantPage() {
     })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
-  }, [client, hub.serverInstanceId, refresh]);
+  }, [client, hub.id, hub.serverInstanceId, refresh, token, canWrite]);
 
   const has = (id: string) => operations.some(op => op.id === id);
   const name = (id: unknown) => asString(nodes.find(n => n.id === id)?.name) ?? String(id ?? 'Unassigned');
@@ -98,6 +110,26 @@ export default function AssistantPage() {
       throw new Error('The result belongs to a different hub. Refresh the connection.');
     }
     return result;
+  }
+
+  async function confirmHubPlan(review: Obj, operation: string, args: Obj) {
+    if (!token) return invoke(operation, args);
+    const id = asString(review.console_plan_id);
+    if (!id) throw new Error('Refresh the hub and review the change in the staff console.');
+    return approveStaffPlan(token, id);
+  }
+
+  async function approvePending(plan: Obj) {
+    if (!token || busy || !canWrite) return;
+    setBusy(true); setError('');
+    try {
+      const receipt = await approveStaffPlan(token, String(plan.plan_id));
+      setMessage(String(receipt.status ?? 'Receipt received').replaceAll('_', ' '));
+    } catch (err) { setError(errorMessage(err)); }
+    finally {
+      setPending(current => current.filter(item => item.plan_id !== plan.plan_id));
+      setBusy(false);
+    }
   }
 
   async function run(id: string, observation?: { device_id: string; power_on: boolean }) {
@@ -137,7 +169,7 @@ export default function AssistantPage() {
         }
       } else if (id === apply && canWrite && review) {
         setReview(null);
-        const result = await invoke(id, {
+        const result = await confirmHubPlan(review, id, {
           plan_id: review.plan_id, server_instance_id: identity, confirmed: true
         });
         if (result.canonical_readback_verified !== true) throw new Error('The hub could not verify the link.');
@@ -156,6 +188,14 @@ export default function AssistantPage() {
 
   return <div className="consolePage">
     <header className="pageHeader"><h2>Lighting assistant</h2></header>
+    <StaffHubDiagnostics key={hub.id} hubId={hub.id}/>
+    {pending.length > 0 && <SectionCard title="Pending staff approvals">
+      {pending.map(plan => <div key={String(plan.plan_id)}>
+        <h3>{String(plan.operation).replaceAll('_', ' ')}</h3>
+        <pre>{JSON.stringify(plan.review, null, 2)}</pre>
+        <button className="consoleButton" disabled={busy} onClick={() => void approvePending(plan)}>Approve reviewed change</button>
+      </div>)}
+    </SectionCard>}
     <SectionCard title="Motion walk test" subtitle={hub.name} busy={busy} error={error}
       actions={<button className="consoleButton" disabled={busy} onClick={() => setRefresh(v => v + 1)}>Refresh hub</button>}>
       {identity && has(walk) && <div className="deviceAdminGrid">
@@ -204,6 +244,6 @@ export default function AssistantPage() {
       </div>}
     </SectionCard>
     {identity && <AssistantTools key={identity + refresh} operations={operations} nodes={nodes}
-      identity={identity} canWrite={canWrite} call={invoke}/>}
+      identity={identity} canWrite={canWrite} call={invoke} confirmPlan={confirmHubPlan}/>}
   </div>;
 }

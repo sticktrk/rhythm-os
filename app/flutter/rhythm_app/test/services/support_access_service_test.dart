@@ -1,9 +1,72 @@
+import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/support_access_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+class _GrantCheck {
+  _GrantCheck([this.checkStatus]);
+  final int? checkStatus;
+  final calls = <Map<String, dynamic>>[];
+  _GrantCheck get functions => this;
+  Future<({Map<String, dynamic> data})> invoke(String name,
+      {required Map<String, dynamic> body}) async {
+    calls.add(body);
+    if (body['action'] == 'check' && checkStatus != null) {
+      throw FunctionException(status: checkStatus!);
+    }
+    return (data: {'allowed': false});
+  }
+}
+
+class _SupportApi extends Fake implements RhythmAuthApi {
+  @override
+  Future<RhythmSupportToken> issueSupportToken(
+          {String label = 'Rhythm support'}) async =>
+      const RhythmSupportToken(
+          tokenId: 'fixture', token: 'fixture-token', role: 'support');
+}
+
 void main() {
   group('SupportAccessService', () {
+    test(
+        'suppressed automatic grant checks cloud consent before issuing a local credential',
+        () async {
+      final check = _GrantCheck();
+      var minted = false;
+      final service = SupportAccessService.testing(
+          supabaseClientFactory: () => check,
+          authApiFactory: ({required baseUrl, String? authToken}) {
+            minted = true;
+            throw StateError('Should not issue a credential');
+          });
+      await expectLater(service.grantForHub(_serverHub()), throwsStateError);
+      expect(minted, isFalse);
+      expect(check.calls.single['action'], 'check');
+    });
+
+    for (final status in [400, 503]) {
+      test('automatic support grant handles check response $status', () async {
+        final client = _GrantCheck(status);
+        var minted = false;
+        final service = SupportAccessService.testing(
+            supabaseClientFactory: () => client,
+            authApiFactory: ({required baseUrl, String? authToken}) {
+              minted = true;
+              return _SupportApi();
+            });
+        if (status == 400) {
+          await service.grantForHub(_serverHub());
+          expect(client.calls.map((r) => r['action']), ['check', 'grant']);
+          expect(minted, isTrue);
+        } else {
+          await expectLater(service.grantForHub(_serverHub()),
+              throwsA(isA<FunctionException>()));
+          expect(client.calls.map((r) => r['action']), ['check']);
+          expect(minted, isFalse);
+        }
+      });
+    }
     test('grant body sends beta admin support token metadata', () {
       final body = SupportAccessService.buildGrantBody(
         serverHub: _serverHub(),
@@ -21,6 +84,17 @@ void main() {
         'token': 'rhythm_support_raw',
         'label': 'admin support',
       });
+    });
+
+    test(
+        'explicit support grant carries its claimed review to the grant service',
+        () {
+      final body = SupportAccessService.buildGrantBody(
+          serverHub: _serverHub(),
+          tokenId: 'id',
+          token: 'rhythm_support_test',
+          assistantPlanId: 'review');
+      expect(body['assistant_plan_id'], 'review');
     });
 
     test('revoke body targets beta admin grant', () {

@@ -167,3 +167,48 @@ older API does not return the config hash. An older UI against the hardened API
 receives HTTP 428 for unguarded writes. The admin API retains its preflight for
 older appliances, but atomic overwrite protection requires the updated
 appliance.
+
+## Staff assistant
+
+Connect an MCP Streamable HTTP client to `POST /api/assistant/mcp` with the
+operator's Supabase access token in its bearer authentication header. Browser
+clients must use an origin allowed by `ADMIN_API_ALLOWED_ORIGINS`. The
+service checks the enabled staff row on each request. Start with `initialize`
+and `tools/list`. The resource `rhythm://staff/contract` describes each tool's
+location, permission tier, confirmation rule, input schema and verification.
+
+Find the home with `staff_find_homes`, or resolve the selected console record
+with `staff_list_fleet`. Pass its `hub_ref` to probe reachability, read status,
+list log sources and inspect recent diagnostic categories. Log sources have a
+bounded family such as Wi-Fi or remote tunnel. For a dated outage, pass
+`since` and `until` with explicit time zones. Results identify the recent tail
+examined and any undated diagnostics. Events outside the available tail need
+further investigation in the authorized Logs view. In the console,
+open the home's **Open assistant** link and choose **Check support access**.
+The existing Logs view shows authorized staff the underlying diagnostic text.
+
+Use `staff_select_hub` to discover the selected appliance's operations in the
+same conversation. Use `staff_find_hub_nodes` to match the person's room,
+sensor or light name inside the service and pass the returned reference to the
+hub operation. `staff_call_hub_tool` accepts reads and previews. Support staff
+can see the proposed scope and the next step for an administrator. Admins
+can use `staff_control_hub` for temporary output. A persistent change requires
+approval in the staff console. Calling `staff_apply_plan` returns
+`awaiting_console_approval`. The administrator reviews the pending plan for the
+selected hub and approves it in the console, which submits
+`POST /api/assistant/plans/<planId>/approve` from an allowed origin. Approval
+consumes the plan once and rechecks its target. This also covers firmware
+updates, fleet reports and cloud hub deletion. Re-read the state
+after an uncertain outcome before preparing another proposal. When the full
+review contains private or unsupported details, open **Hub tools** in the
+selected hub’s staff console to preview and confirm it there. This includes
+portable settings transfers and profile resets.
+
+The staff service owns the customer-granted support credential and checks the
+active grant on every hub request, including requests with a cached session.
+Model responses use short-lived references, bounded diagnostics and verified
+receipts. References and plans belong to one staff actor and service process,
+expire after ten minutes, and disappear on restart. A confirmed plan can be
+dispatched once. Service-role credentials, device sessions, signed storage
+URLs, personal labels, household history and raw log lines stay in their
+respective trusted services.

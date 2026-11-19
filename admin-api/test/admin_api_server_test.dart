@@ -8,13 +8,17 @@ import 'package:rhythm_admin_api/src/config.dart';
 import 'package:rhythm_admin_api/src/device_probe_service.dart';
 import 'package:rhythm_admin_api/src/fleet_report_service.dart';
 import 'package:rhythm_admin_api/src/server.dart';
+import 'package:rhythm_admin_api/src/staff_hub_catalog.dart';
 import 'package:rhythm_admin_api/src/supabase_rest_client.dart';
 import 'package:rhythm_admin_api/src/support_access_service.dart';
 import 'package:rhythm_admin_api/src/support_service.dart';
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
+part 'staff_assistant_scenarios.dart';
+
 void main() {
+  _staffAssistantScenarios();
   for (final legacyKey in <String?>[null, 'nodes', 'rooms']) {
     test('dashboard probe requests base state (legacy=$legacyKey)', () async {
       final deviceRequests = <http.BaseRequest>[];
@@ -902,7 +906,7 @@ void main() {
     expect(await proxy('POST', apply), 200);
     // Same staff identity, endpoint and unexpired device session.
     pinned = false;
-    expect(await proxy('POST', plan), 403);
+    expect(await proxy('POST', plan), 503);
     pinned = true;
     granted = false;
     expect(await proxy('POST', apply), 403);
@@ -1448,6 +1452,7 @@ AdminApiServer _testServer({
   required http.Client client,
   String? serviceRoleKey = 'service-role-key',
   void Function(String)? auditLog,
+  Set<String> allowedOrigins = const {'http://127.0.0.1:5173'},
 }) {
   final config = AdminApiConfig(
     supabaseUrl: Uri.parse('https://supabase.test'),
@@ -1458,7 +1463,7 @@ AdminApiServer _testServer({
     remoteAccessDomain: 'relay.test',
     host: '127.0.0.1',
     port: 8787,
-    allowedOrigins: {'http://127.0.0.1:5173'},
+    allowedOrigins: allowedOrigins,
   );
   final supabase = SupabaseRestClient(config: config, httpClient: client);
   final supportAccess = SupportAccessService(

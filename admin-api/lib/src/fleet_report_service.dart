@@ -70,6 +70,7 @@ class FleetReportService {
     required AdminSession session,
     required String hubId,
     required FleetFindingReportRequestDto finding,
+    String? reviewedServerId,
   }) async {
     if (!_supabase.canUseServiceRole) {
       throw const AdminApiException(
@@ -96,6 +97,7 @@ class FleetReportService {
         session: session,
         hubId: hubId,
         storagePath: storagePath,
+        reviewedServerId: reviewedServerId,
       );
     } catch (_) {
       await _deleteUploadedBundle(storagePath);
@@ -155,6 +157,7 @@ class FleetReportService {
     required AdminSession session,
     required String hubId,
     required String storagePath,
+    String? reviewedServerId,
   }) async {
     final uploadUrl = await _supabase.createSignedStorageUploadUrl(
       bucket: _bucket,
@@ -164,6 +167,7 @@ class FleetReportService {
       session: session,
       hubId: hubId,
       uploadUrl: uploadUrl,
+      reviewedServerId: reviewedServerId,
     );
     final legacyBytes = bundle.legacyBytes;
     if (!bundle.uploadedByDevice && legacyBytes != null) {

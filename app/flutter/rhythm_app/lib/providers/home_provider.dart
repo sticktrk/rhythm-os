@@ -91,7 +91,7 @@ List<Hub> activateServerHubSnapshotForTesting({
   return nextHubs;
 }
 
-String _homeScopedServerHubId({
+String homeScopedServerHubId({
   required String homeId,
   required String cloudHubId,
 }) {
@@ -111,7 +111,7 @@ bool _cloudServerHubMatchesLocalHubForHome({
 
   return localHub.id == cloudHub.id ||
       localHub.id ==
-          _homeScopedServerHubId(
+          homeScopedServerHubId(
             homeId: homeId,
             cloudHubId: cloudHub.id,
           );
@@ -126,7 +126,7 @@ Hub accountHomeServerHubForLocalStorageForTesting({
   final normalized = cloudHub.copyWith(homeId: homeId);
   if (cloudHub.type != HubType.server) return normalized;
 
-  final scopedId = _homeScopedServerHubId(
+  final scopedId = homeScopedServerHubId(
     homeId: homeId,
     cloudHubId: cloudHub.id,
   );

@@ -1,0 +1,44 @@
+surface	method	path	classification	reason_or_operation
+staff	GET	/health	exclusion	Process health check for deployment monitoring.
+staff	GET	/ready	exclusion	Deployment readiness and credential configuration are operational monitoring.
+staff	GET	/api/me	handoff	The signed-in staff member reviews their identity and role in the staff console.
+staff	GET	/api/support/snapshot	operation	staff_find_homes
+staff	GET	/api/fleet/hubs	operation	staff_list_fleet
+staff	DELETE	/api/hubs/<hubId>	operation	staff_plan_delete_hub
+staff	POST	/api/hubs/<hubId>/probe	operation	staff_probe_hub
+staff	GET	/api/hubs/<hubId>/status	operation	staff_read_hub_status
+staff	POST	/api/hubs/<hubId>/ota/check	operation	staff_call_hub_tool
+staff	POST	/api/hubs/<hubId>/ota/update	operation	staff_apply_plan (after staff_call_hub_tool previews plan_hub_update)
+staff	POST	/api/hubs/<hubId>/debug-bundle	handoff	An authorized staff member downloads the bundle in the console. Raw files may contain private diagnostics.
+staff	GET	/api/hubs/<hubId>/logs	operation	staff_list_logs
+staff	GET	/api/hubs/<hubId>/logs/<sourceId>/tail	operation	staff_read_log
+staff	POST	/api/hubs/<hubId>/fleet-report	operation	staff_plan_fleet_report
+staff	POST	/api/hubs/<hubId>/device-admin/proxy	operation	staff_call_hub_tool (advertised reads and proposals), staff_control_hub (temporary output), staff_apply_plan (reviewed writes)
+staff	GET	/api/assistant/mcp	exclusion	Stateless MCP endpoint responds with HTTP 405 to a streaming GET.
+staff	POST	/api/assistant/mcp	exclusion	Protocol transport for the staff operation catalog.
+edge	INVOKE	customer-assistant	exclusion	Protocol transport and authenticated resident app continuation for the customer operation catalog.
+edge	INVOKE	delete-user	handoff	get_account_handoff (account_deletion)
+edge	INVOKE	join-home-by-local-device-proof	operation	plan_customer_change (join_home, device proof)
+edge	INVOKE	support-access-grant	operation	plan_customer_change (grant_support, revoke_support)
+edge	INVOKE	remote-access-bootstrap	operation	plan_customer_change (enable_remote, device continuation)
+edge	INVOKE	report-bug	operation	plan_customer_change (submit_report)
+edge	INVOKE	report-bug-bundle-complete	operation	plan_customer_change (submit_report, resident app completes the reviewed attachment)
+edge	INVOKE	set-subscription-tier	exclusion	Retired write returns HTTP 410. Subscription changes are a get_account_handoff step.
+edge	INVOKE	server-activity-bootstrap	handoff	The signed-in app provisions the selected hub's activity upload authorization.
+edge	INVOKE	server-activity-ingest	exclusion	Hub-only activity ingestion authenticated by a device upload credential.
+edge	INVOKE	matter-device-profiles	exclusion	Product capability catalog consumed internally by device integrations and the app.
+edge	INVOKE	report-matter-bulb	handoff	The resident submits a hardware compatibility test from the app's Matter tester.
+edge	INVOKE	monster-device	handoff	The resident uses the app's vendor-device setup and trusted device broker.
+app_rpc	CALL	remove_home_member	operation	plan_customer_change (remove_member)
+staff	POST	/api/assistant/plans/<planId>/approve	handoff	The signed-in administrator approves the reviewed change in the staff console.
+staff	GET	/api/hubs/<hubId>/assistant/plans	handoff	The administrator reviews their pending changes for the selected hub in the staff console.
+app_table	WRITE	homes	handoff	Residents create, edit and delete homes in the app. Account sync persists their home settings and reconciles empty homes.
+app_table	WRITE	hubs	handoff	Residents pair, edit and remove hubs in the app. Account sync persists hub records and encrypted connection information.
+app_table	WRITE	support_debug_bundle_submissions	operation	plan_customer_change (submit_report, the resident app stores the approved report)
+app_table	WRITE	user_cloud_snapshots	handoff	Residents manage portable configuration and installation backups through the app's cloud backup settings.
+app_rpc	CALL	add_home_member	handoff	Household membership is managed by an authorized resident. The assistant join flow requires device proof on the phone.
+app_rpc	CALL	approve_matter_profile_candidate	handoff	An enabled administrator reviews and publishes a product-wide Matter profile using the profile approval procedure.
+app_rpc	CALL	customer_assistant_home_members	operation	list_home_members
+app_rpc	CALL	is_rhythm_admin	exclusion	Internal authorization predicate for administrator-only database operations and policies.
+app_rpc	CALL	is_rhythm_staff	exclusion	Internal authorization predicate for staff-only database views and policies.
+app_rpc	CALL	set_rhythm_subscription_tier	handoff	An authorized administrator changes a customer's plan through the subscription management procedure.
