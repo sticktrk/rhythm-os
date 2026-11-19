@@ -27,6 +27,15 @@ def literal(token):
     return None
 
 
+def past_parentheses(ts, opening):
+    depth = 1
+    for i in range(opening + 1, len(ts)):
+        depth += (ts[i] == "(") - (ts[i] == ")")
+        if not depth:
+            return i + 1
+    raise ValueError("Unterminated Dart call")
+
+
 def staff_routes(source):
     ts = tokens(source)
     # Recognize both a constructor cascade and later references to the named
@@ -34,7 +43,7 @@ def staff_routes(source):
     routers = {
         ts[i - 2]
         for i in range(2, len(ts) - 2)
-        if ts[i - 1 : i + 3] == ["=", "Router", "(", ")"]
+        if ts[i - 1 : i + 2] == ["=", "Router", "("]
     }
     routers.update(
         ts[i + 1]
@@ -47,7 +56,9 @@ def staff_routes(source):
             raise ValueError("Extend the coverage scanner for an annotated staff route")
         if t != "Router" and t not in routers:
             continue
-        j = i + (3 if ts[i : i + 3] == ["Router", "(", ")"] else 1)
+        j = i + 1
+        if t == "Router" and ts[j : j + 1] == ["("]:
+            j = past_parentheses(ts, j)
         while ts[j : j + 1] in (["."], [".."]):
             method = ts[j + 1]
             if ts[j + 2 : j + 3] != ["("]:
@@ -73,7 +84,7 @@ def staff_routes(source):
     return found
 
 
-def app_rpcs(source):
+def app_database_surfaces(source):
     ts = tokens(source)
     found = set()
     constants = {}
@@ -89,6 +100,19 @@ def app_rpcs(source):
             if not name:
                 raise ValueError("Unresolved PostgREST RPC path in app source")
             found.add(("app_rpc", "CALL", name[1]))
+        if t == "from" and ts[i - 1] == "." and ts[i + 1 : i + 2] == ["("]:
+            end = past_parentheses(ts, i + 1)
+            if (
+                end + 1 < len(ts) and ts[end] in {".", ".."}
+                and ts[end + 1] in {"insert", "update", "upsert", "delete"}
+            ):
+                arg = ts[i + 2]
+                names = constants.get(arg, set())
+                table = literal(arg) or (next(iter(names)) if len(names) == 1 else None)
+                trailing = ts[i + 3 : end - 1]
+                if trailing not in ([], [","]) or not table or not re.fullmatch(r"[a-z][a-z0-9_]*", table):
+                    raise ValueError("Use a statically discoverable database table for app writes")
+                found.add(("app_table", "WRITE", table))
         if t != "rpc" or ts[i - 1] not in {".", ".."}:
             continue
         j = i + 1
@@ -117,6 +141,46 @@ def app_rpcs(source):
     return found
 
 
+# Ignore function bodies, string literals, and comments when reading top-level ACLs.
+SQL_LITERALS = re.compile(
+    r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|(?P<tag>\$(?:[A-Za-z_]\w*)?\$)[\s\S]*?(?P=tag)"
+)
+SIGNATURE = re.compile(r"(?:public\.)?([a-z_]\w*)\s*\(([^()]*)\)")
+FUNCTION_ACL = re.compile(
+    r"\s*(grant|revoke)\s+(?:execute|all(?: privileges)?)\s+on\s+(?:function|routine)s?\s+"
+    r"(.+?)\s+(?:to|from)\s+(.+?)\s*", re.S,
+)
+DROP_FUNCTION = re.compile(
+    r"\s*drop\s+(?:function|routine)\s+(?:if\s+exists\s+)?(.+?)(?:\s+(?:restrict|cascade))?\s*", re.S,
+)
+
+
+def granted_rpcs(directory):
+    granted = set()
+    for file in sorted(directory.glob("*.sql")):
+        sql = SQL_LITERALS.sub(" ", file.read_text()).lower()
+        for statement in sql.split(";"):
+            acl = FUNCTION_ACL.fullmatch(statement)
+            drop = DROP_FUNCTION.fullmatch(statement)
+            if acl:
+                if "authenticated" not in re.findall(r'\b\w+\b', acl[3]):
+                    continue
+                signatures, add = acl[2], acl[1] == "grant"
+            elif drop:
+                signatures, add = drop[1], False
+            else:
+                continue
+            if SIGNATURE.sub("", signatures).strip(" ,\n\t\r"):
+                raise ValueError(f"Unresolved SQL function signature in {file}")
+            for name, args in SIGNATURE.findall(signatures):
+                key = (name, re.sub(r"\s+", "", args))
+                if add:
+                    granted.add(key)
+                else:
+                    granted.discard(key)
+    return {("app_rpc", "CALL", name) for name, _ in granted}
+
+
 def inventory(root):
     actual = set()
     for file in (root / "admin-api").rglob("*.dart"):
@@ -130,6 +194,7 @@ def inventory(root):
             except ValueError as error:
                 raise ValueError(f"{file}: {error}") from error
     supabase = root / "tools/app/supabase"
+    actual.update(granted_rpcs(supabase / "migrations"))
     functions = set(
         tomllib.loads((supabase / "config.toml").read_text()).get("functions", {})
     )
@@ -145,7 +210,7 @@ def inventory(root):
     for path in roots:
         for file in path.rglob("*.dart"):
             try:
-                actual.update(app_rpcs(file.read_text()))
+                actual.update(app_database_surfaces(file.read_text()))
             except ValueError as error:
                 raise ValueError(f"{file}: {error}") from error
     return actual
@@ -204,12 +269,26 @@ def verify_new_surfaces_fail():
         (staff / "server.dart").write_text(
             "final routes = Router()..get('/new', handler); routes.add('PATCH','/new', handler);"
         )
+        (staff / "custom.dart").write_text(
+            "final custom = Router(notFoundHandler: fallback())..get('/custom', handler);"
+        )
+        migrations = supabase / "migrations"
+        migrations.mkdir()
+        (migrations / "01.sql").write_text(
+            "GRANT EXECUTE ON FUNCTION public.new_grant(uuid), public.retired(text) TO authenticated;"
+            "GRANT EXECUTE ON FUNCTION public.overloaded(text), public.overloaded(uuid) TO authenticated;"
+        )
+        (migrations / "02.sql").write_text(
+            "REVOKE ALL ON FUNCTION public.retired(text) FROM anon, authenticated;"
+            "DROP FUNCTION IF EXISTS public.overloaded(text);"
+        )
         (supabase / "functions/new-edge").mkdir()
         (supabase / "config.toml").write_text(
             '[functions.custom_entry]\nentrypoint = "./nested.ts"'
         )
         (app / "database.dart").write_text(
             "await client.rpc<List<Map<String,dynamic>>>('new_rpc');"
+            "await client.from('new_table',).update(payload);"
         )
         core = root / "app/flutter/rhythm_core/lib"
         core.mkdir(parents=True)
@@ -217,6 +296,10 @@ def verify_new_surfaces_fail():
         actual = inventory(root)
         wanted = {
             ("staff", "GET", "/new"),
+            ("staff", "GET", "/custom"),
+            ("app_table", "WRITE", "new_table"),
+            ("app_rpc", "CALL", "new_grant"),
+            ("app_rpc", "CALL", "overloaded"),
             ("staff", "PATCH", "/new"),
             ("edge", "INVOKE", "new-edge"),
             ("edge", "INVOKE", "custom_entry"),

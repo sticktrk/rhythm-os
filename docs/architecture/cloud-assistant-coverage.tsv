@@ -32,3 +32,13 @@ edge	INVOKE	monster-device	handoff	The resident uses the app's vendor-device set
 app_rpc	CALL	remove_home_member	operation	plan_customer_change (remove_member)
 staff	POST	/api/assistant/plans/<planId>/approve	handoff	The signed-in administrator approves the reviewed change in the staff console.
 staff	GET	/api/hubs/<hubId>/assistant/plans	handoff	The administrator reviews their pending changes for the selected hub in the staff console.
+app_table	WRITE	homes	handoff	Residents create, edit and delete homes in the app. Account sync persists their home settings and reconciles empty homes.
+app_table	WRITE	hubs	handoff	Residents pair, edit and remove hubs in the app. Account sync persists hub records and encrypted connection information.
+app_table	WRITE	support_debug_bundle_submissions	operation	plan_customer_change (submit_report, the resident app stores the approved report)
+app_table	WRITE	user_cloud_snapshots	handoff	Residents manage portable configuration and installation backups through the app's cloud backup settings.
+app_rpc	CALL	add_home_member	handoff	Household membership is managed by an authorized resident. The assistant join flow requires device proof on the phone.
+app_rpc	CALL	approve_matter_profile_candidate	handoff	An enabled administrator reviews and publishes a product-wide Matter profile using the profile approval procedure.
+app_rpc	CALL	customer_assistant_home_members	operation	list_home_members
+app_rpc	CALL	is_rhythm_admin	exclusion	Internal authorization predicate for administrator-only database operations and policies.
+app_rpc	CALL	is_rhythm_staff	exclusion	Internal authorization predicate for staff-only database views and policies.
+app_rpc	CALL	set_rhythm_subscription_tier	handoff	An authorized administrator changes a customer's plan through the subscription management procedure.
