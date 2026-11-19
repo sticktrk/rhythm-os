@@ -1,0 +1,31 @@
+surface	method	path	classification	reason_or_operation
+staff	GET	/health	exclusion	Process health check for deployment monitoring.
+staff	GET	/ready	exclusion	Deployment readiness and credential configuration are operational monitoring.
+staff	GET	/api/me	handoff	The signed-in staff member reviews their identity and role in the staff console.
+staff	GET	/api/support/snapshot	operation	staff_find_homes
+staff	GET	/api/fleet/hubs	operation	staff_list_fleet
+staff	DELETE	/api/hubs/<hubId>	operation	staff_plan_delete_hub
+staff	POST	/api/hubs/<hubId>/probe	operation	staff_probe_hub
+staff	GET	/api/hubs/<hubId>/status	operation	staff_read_hub_status
+staff	POST	/api/hubs/<hubId>/ota/check	operation	staff_call_hub_tool
+staff	POST	/api/hubs/<hubId>/ota/update	operation	staff_apply_plan (after staff_call_hub_tool previews plan_hub_update)
+staff	POST	/api/hubs/<hubId>/debug-bundle	handoff	An authorized staff member downloads the bundle in the console. Raw files may contain private diagnostics.
+staff	GET	/api/hubs/<hubId>/logs	operation	staff_list_logs
+staff	GET	/api/hubs/<hubId>/logs/<sourceId>/tail	operation	staff_read_log
+staff	POST	/api/hubs/<hubId>/fleet-report	operation	staff_plan_fleet_report
+staff	POST	/api/hubs/<hubId>/device-admin/proxy	operation	staff_call_hub_tool (advertised reads and proposals), staff_control_hub (temporary output), staff_apply_plan (reviewed writes)
+staff	POST	/api/assistant/mcp	exclusion	Protocol transport for the staff operation catalog.
+edge	INVOKE	customer-assistant	exclusion	Protocol transport and authenticated resident app continuation for the customer operation catalog.
+edge	INVOKE	delete-user	handoff	get_account_handoff (account_deletion)
+edge	INVOKE	join-home-by-local-device-proof	operation	plan_customer_change (join_home, device proof)
+edge	INVOKE	support-access-grant	operation	plan_customer_change (grant_support, revoke_support)
+edge	INVOKE	remote-access-bootstrap	operation	plan_customer_change (enable_remote, device continuation)
+edge	INVOKE	report-bug	operation	plan_customer_change (submit_report)
+edge	INVOKE	report-bug-bundle-complete	operation	plan_customer_change (submit_report, resident app completes the reviewed attachment)
+edge	INVOKE	set-subscription-tier	exclusion	Retired write returns HTTP 410. Subscription changes are a get_account_handoff step.
+edge	INVOKE	server-activity-bootstrap	handoff	The signed-in app provisions the selected hub's activity upload authorization.
+edge	INVOKE	server-activity-ingest	exclusion	Hub-only activity ingestion authenticated by a device upload credential.
+edge	INVOKE	matter-device-profiles	exclusion	Product capability catalog consumed internally by device integrations and the app.
+edge	INVOKE	report-matter-bulb	handoff	The resident submits a hardware compatibility test from the app's Matter tester.
+edge	INVOKE	monster-device	handoff	The resident uses the app's vendor-device setup and trusted device broker.
+app_rpc	CALL	remove_home_member	operation	plan_customer_change (remove_member)
