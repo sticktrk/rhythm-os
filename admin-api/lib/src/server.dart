@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import 'assistant_audit.dart';
 import 'config.dart';
 import 'device_probe_service.dart';
 import 'fleet_report_service.dart';
@@ -227,6 +228,7 @@ class AdminApiServer {
     }
     proxyRequest.validateMutationGuards();
     var status = 500;
+    Object? receipt;
     try {
       final result = await _probes.proxyJson(
         session: session,
@@ -234,6 +236,7 @@ class AdminApiServer {
         request: proxyRequest,
       );
       status = result.statusCode;
+      receipt = result.body;
       return _json(result.toJson());
     } on AdminApiException catch (error) {
       status = error.statusCode;
@@ -250,6 +253,11 @@ class AdminApiServer {
           'operation': proxyRequest.path,
           'request_id': proxyRequest.requestId,
           'status': status,
+          ...await assistantAuditReceipt(
+              hubId: hubId,
+              secret: _config.supportAccessEncryptionKey,
+              arguments: proxyRequest.body,
+              receipt: receipt),
         }));
       }
     }

@@ -15,11 +15,6 @@ const walk = 'start_motion_walk', inspect = 'inspect_motion_walk';
 const preview = 'plan_motion_target', apply = 'apply_motion_target';
 
 export default function AssistantPage() {
-  const { hubId } = useHub();
-  return <SelectedHubAssistant key={hubId}/>;
-}
-
-function SelectedHubAssistant() {
   const client = useDeviceClient();
   const { hub } = useHub();
   const canWrite = useSnapshot().me?.staffStatus.isAdmin === true;
