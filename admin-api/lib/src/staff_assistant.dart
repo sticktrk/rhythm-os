@@ -533,6 +533,7 @@ class StaffAssistant {
       final trusted = _trustedHubOperations[id];
       if (id is! String ||
           trusted == null ||
+          trusted['observes_household'] == true && !s.staff.isAdmin ||
           tier != trusted['tier'] ||
           canonicalJsonString(op['input_schema']) !=
               canonicalJsonString(trusted['input_schema']) ||

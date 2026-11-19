@@ -310,6 +310,39 @@ void _staffAssistantScenarios() {
     });
 
     test(
+        'the full console preview binds its approval to one actor and native plan',
+        () async {
+      final result = await service.server.handler(Request('POST',
+          Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+          headers: {
+            'authorization': 'Bearer staff-session',
+            'content-type': 'application/json'
+          },
+          body: jsonEncode({
+            'method': 'POST',
+            'path': 'api/assistant/operations/plan_motion_target',
+            'expectedServerInstanceId': 'srv-test',
+            'body': {
+              'sensor_id': 'room',
+              'room_id': 'room',
+              'correlation_id': 'console-review'
+            }
+          })));
+      expect(result.statusCode, 200);
+      final body = jsonDecode(await result.readAsString())['body'];
+      expect(body['after_targets'], ['private_canary']);
+      final planId = body['console_plan_id'] as String;
+      expect(service.writes, 0);
+      service.actor = 'another-admin';
+      await service.approve(planId, status: 409);
+      service.actor = 'staff-user';
+      final receipt = await service.approve(planId);
+      expect(receipt['canonical_readback_verified'], true);
+      await service.approve(planId, status: 409);
+      expect(service.writes, 1);
+    });
+
+    test(
         'scoped model results retain handoffs, walk evidence, and partial dispatch without exporting labels or household history',
         () async {
       final selected = {
