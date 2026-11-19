@@ -1487,10 +1487,11 @@ mod tests {
         install_assistant_maintenance(&state, ota.clone());
         let run = state.lock().unwrap().assistant_devices.platform.clone().unwrap();
         let _operation = ota.begin_operation().unwrap();
+        let before = ota.snapshot();
         let status = run(state, PlatformAction::ReadUpdateStatus).await.unwrap();
         assert_eq!(status["current_version"], "1.0.0");
         assert_eq!(status["stage"], serde_json::json!(ota.snapshot().state));
-        assert!(status["checked_at_epoch_ms"].is_null());
+        assert_eq!(status["checked_at_epoch_ms"], serde_json::json!(before.checked_at_epoch_ms));
         assert!(status.get("last_error").is_none());
     }
 
