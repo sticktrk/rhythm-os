@@ -235,8 +235,27 @@ class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
 
 /// Metadata returned when an owner lists existing agent credentials.
 class RhythmAgentCredential {
-  const RhythmAgentCredential(this.id, this.kind);
+  const RhythmAgentCredential(this.id, this.kind,
+      {this.unattendedChanges = false});
+  final bool unattendedChanges;
   final String id, kind;
+}
+
+class RhythmAssistantApproval {
+  const RhythmAssistantApproval(
+      {required this.planId,
+      required this.operation,
+      required this.credentialId,
+      required this.review});
+  final String planId, operation, credentialId;
+  final Map<String, dynamic> review;
+
+  factory RhythmAssistantApproval.fromJson(Map<String, dynamic> data) =>
+      RhythmAssistantApproval(
+          planId: data['plan_id'] as String,
+          operation: data['plan_operation'] as String,
+          credentialId: data['agent_credential_id'] as String,
+          review: Map<String, dynamic>.from(data['review'] as Map));
 }
 
 class RhythmAssistantClientRegistration {
@@ -293,24 +312,49 @@ class RhythmAuthApi {
     final entries = response.data?['tokens'] as List;
     return entries
         .map((entry) => RhythmAgentCredential(
-            entry['id'] as String, entry['kind'] as String))
+            entry['id'] as String, entry['kind'] as String,
+            unattendedChanges: entry['unattended_changes'] == true))
         .toList();
   }
 
-  Future<({String id, String token})> createAgentCredential() async {
-    final response = await _dio.post('api/auth/agent-tokens');
+  Future<({String id, String token})> createAgentCredential(
+      {bool unattendedChanges = false}) async {
+    final response = await _dio.post('api/auth/agent-tokens',
+        data: {'unattended_changes': unattendedChanges});
     final data = response.data;
     return (id: data['token_id'] as String, token: data['token'] as String);
   }
 
-  Future<RhythmAssistantClientRegistration> registerAssistantClient() async {
-    final response = await _dio.post('api/auth/assistant-clients');
+  Future<RhythmAssistantClientRegistration> registerAssistantClient(
+      {bool unattendedChanges = false}) async {
+    final response = await _dio.post('api/auth/assistant-clients',
+        data: {'unattended_changes': unattendedChanges});
     final data = response.data;
     return RhythmAssistantClientRegistration(
         data['client_id'] as String,
         data['client_secret'] as String,
         data['activation_code'] as String,
         Duration(seconds: data['expires_in'] as int));
+  }
+
+  Future<List<RhythmAssistantApproval>> listAssistantApprovals() async {
+    final response = await _dio.get('api/assistant/approvals');
+    return (response.data['approvals'] as List)
+        .map((value) =>
+            RhythmAssistantApproval.fromJson(value as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> decideAssistantApproval(String planId,
+      {required bool approve}) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(planId)) {
+      throw ArgumentError('Invalid assistant plan ID');
+    }
+    final response = await _dio.post<Map<String, dynamic>>(
+        'api/assistant/approvals/$planId',
+        data: {'decision': approve ? 'approve' : 'decline'});
+    return response.data ??
+        (throw StateError('The hub returned no approval receipt.'));
   }
 
   Future<void> revokeAgentCredential(String id) async {

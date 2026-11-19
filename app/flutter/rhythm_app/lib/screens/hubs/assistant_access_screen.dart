@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -21,6 +23,8 @@ class AssistantAccessScreen extends StatefulWidget {
 
 class _AssistantAccessState extends State<AssistantAccessScreen> {
   List<RhythmAgentCredential> _credentials = [];
+  List<RhythmAssistantApproval> _approvals = [];
+  bool _supportsApprovals = false, _unattended = false;
   Map<String, String> _issued = {};
   bool _busy = true, _ready = false, _revealed = false;
   String? _error;
@@ -59,8 +63,20 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
       if (action != null) await action();
       if (!mounted || !widget.isCurrentTarget()) return;
       final entries = await widget.api.listAgentCredentials();
+      List<RhythmAssistantApproval> approvals;
+      bool supportsApprovals = true;
+      try {
+        approvals = await widget.api.listAssistantApprovals();
+      } on DioException catch (error) {
+        if (error.response?.statusCode != 404) rethrow;
+        // Older hubs still support listing and revoking registered clients.
+        approvals = [];
+        supportsApprovals = false;
+      }
       if (mounted && widget.isCurrentTarget()) {
         setState(() {
+          _approvals = approvals;
+          _supportsApprovals = supportsApprovals;
           _credentials = entries;
           _ready = true;
         });
@@ -90,7 +106,8 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
     await _refresh(() async {
       Map<String, String> issued;
       if (homeAssistant) {
-        final registration = await widget.api.registerAssistantClient();
+        final registration = await widget.api
+            .registerAssistantClient(unattendedChanges: _unattended);
         issued = {
           'Client ID': registration.id,
           'Client secret': registration.secret,
@@ -98,14 +115,30 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
               registration.activationCode
         };
       } else {
-        final credential = await widget.api.createAgentCredential();
+        final credential = await widget.api
+            .createAgentCredential(unattendedChanges: _unattended);
         issued = {'Agent token': credential.token};
       }
       if (mounted && widget.isCurrentTarget()) {
         setState(() {
+          _unattended = false;
           _issued = issued;
           _revealed = false;
         });
+      }
+    });
+  }
+
+  Future<void> _decide(RhythmAssistantApproval approval, bool approve) async {
+    await _refresh(() async {
+      final receipt = await widget.api
+          .decideAssistantApproval(approval.planId, approve: approve);
+      if (mounted && widget.isCurrentTarget()) {
+        final status = receipt['status'] as String?;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(status == null
+                ? 'The hub returned its decision receipt.'
+                : status.replaceAll('_', ' '))));
       }
     });
   }
@@ -148,12 +181,56 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
             SelectableText(widget.endpoint),
             if (_error != null) Text(_error!),
             if (_busy) const LinearProgressIndicator(),
-            if (!_ready && !_busy)
+            if (!_busy)
               TextButton(
                   onPressed: _refresh, child: const Text('Refresh access')),
+            if (_ready && _approvals.isNotEmpty) ...[
+              Text('Pending approvals',
+                  style: Theme.of(context).textTheme.titleMedium),
+              for (final approval in _approvals)
+                Card(
+                    child: ExpansionTile(
+                        key: ValueKey(approval.planId),
+                        title: Text(approval.operation.replaceAll('_', ' ')),
+                        subtitle: Text('Requested by ${approval.credentialId}'),
+                        childrenPadding: const EdgeInsets.all(12),
+                        children: [
+                      for (final field
+                          in approval.review.entries.where((entry) => !const {
+                                'plan_id',
+                                'apply_arguments',
+                                'operation',
+                                'correlation_id',
+                                'server_instance_id'
+                              }.contains(entry.key)))
+                        ListTile(
+                            title: Text(field.key.replaceAll('_', ' ')),
+                            subtitle: SelectableText(field.value is String
+                                ? field.value as String
+                                : const JsonEncoder.withIndent('  ')
+                                    .convert(field.value))),
+                      Wrap(children: [
+                        TextButton(
+                            onPressed:
+                                enabled ? () => _decide(approval, false) : null,
+                            child: const Text('Decline')),
+                        FilledButton(
+                            onPressed:
+                                enabled ? () => _decide(approval, true) : null,
+                            child: const Text('Approve'))
+                      ]),
+                    ])),
+            ],
             if (enabled && _issued.isEmpty) ...[
               const Text(
-                  'Create a credential for a client to read this hub, control its lights, and apply confirmed changes.'),
+                  'Create a credential for a client to read this hub and control its lights.'),
+              if (_supportsApprovals)
+                SwitchListTile(
+                    value: _unattended,
+                    onChanged: (value) => setState(() => _unattended = value),
+                    title: const Text('Allow unattended changes'),
+                    subtitle: const Text(
+                        'Lifecycle and ownership changes always require your approval.')),
               FilledButton(
                   onPressed: () => _issue(false),
                   child: const Text('Create agent token')),
@@ -183,7 +260,9 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
             for (final entry in _credentials)
               ListTile(
                   title: Text(entry.kind),
-                  subtitle: Text(entry.id),
+                  subtitle: Text(entry.unattendedChanges
+                      ? '${entry.id} · unattended changes allowed'
+                      : entry.id),
                   trailing: TextButton(
                       onPressed: enabled ? () => _revoke(entry) : null,
                       child: const Text('Revoke'))),

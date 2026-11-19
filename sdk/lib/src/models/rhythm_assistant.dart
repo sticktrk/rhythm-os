@@ -40,6 +40,7 @@ class RhythmAssistantOperation {
   final String confirmation;
   final String freshnessPrecondition;
   final String verification;
+  final bool requiresOwnerApproval, observesHousehold;
   final bool physicalConfirmationRequired;
   final Map<String, dynamic> inputSchema;
   final Map<String, dynamic> resultSchema;
@@ -56,6 +57,8 @@ class RhythmAssistantOperation {
     required this.confirmation,
     required this.freshnessPrecondition,
     required this.verification,
+    this.requiresOwnerApproval = false,
+    this.observesHousehold = false,
     required this.physicalConfirmationRequired,
     this.inputSchema = const {},
     this.resultSchema = const {},
@@ -74,6 +77,8 @@ class RhythmAssistantOperation {
       confirmation: json['confirmation'] as String? ?? '',
       freshnessPrecondition: json['freshness_precondition'] as String? ?? '',
       verification: json['verification'] as String? ?? '',
+      requiresOwnerApproval: json['requires_owner_approval'] == true,
+      observesHousehold: json['observes_household'] == true,
       physicalConfirmationRequired:
           json['physical_confirmation_required'] as bool? ?? false,
       inputSchema: jsonMap(json['input_schema']) ?? const {},
