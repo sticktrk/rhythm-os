@@ -8,6 +8,7 @@ class AdminApiConfig {
     this.supabaseServiceRoleKey,
     this.supportAccessEncryptionKey,
     this.supportAccessKeyId,
+    this.remoteAccessDomain,
   });
 
   final Uri supabaseUrl;
@@ -15,6 +16,7 @@ class AdminApiConfig {
   final String? supabaseServiceRoleKey;
   final String? supportAccessEncryptionKey;
   final String? supportAccessKeyId;
+  final String? remoteAccessDomain;
   final String host;
   final int port;
   final Set<String> allowedOrigins;
@@ -70,6 +72,8 @@ class AdminApiConfig {
       allowedOrigins: origins,
       supportAccessEncryptionKey: supportAccessEncryptionKey,
       supportAccessKeyId: supportAccessKeyId,
+      remoteAccessDomain:
+          _optional(environment, 'RHYTHM_REMOTE_ACCESS_DOMAIN')?.toLowerCase(),
     );
   }
 

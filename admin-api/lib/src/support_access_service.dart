@@ -41,6 +41,7 @@ class SupportAccessService {
     required String hubId,
     required String baseUrl,
     bool assistantRequest = false,
+    String? expectedServerInstanceId,
   }) async {
     if (!canUseSupportAccess ||
         !(assistantRequest ? session.staff.isActive : session.staff.isAdmin)) {
@@ -53,7 +54,10 @@ class SupportAccessService {
     // Staff assistant access checks the customer grant for each call, even
     // while a previously minted session token is still valid on the hub.
     final activeGrant = assistantRequest ? await _loadActiveGrant(hubId) : null;
-    if (assistantRequest && activeGrant == null) {
+    if (assistantRequest &&
+        (activeGrant == null ||
+            !await _isAssistantGrantDestination(
+                hubId, activeGrant, expectedServerInstanceId, baseUrl))) {
       _sessionTokens.remove(cacheKey);
       return null;
     }
@@ -76,19 +80,21 @@ class SupportAccessService {
     // endpoint candidate. They must not escape as unhandled 500s.
     final http.Response response;
     try {
+      final request = http.Request('POST',
+          _uriWithAppendedPath(baseUrl, 'api/auth/support-session-token'))
+        ..followRedirects = false
+        ..headers.addAll({
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $durableToken',
+        })
+        ..body = jsonEncode({
+          'label': _sessionLabel(session),
+          'ttl_seconds': _sessionTokenTtl.inSeconds
+        });
       response = await _http
-          .post(
-            _uriWithAppendedPath(baseUrl, 'api/auth/support-session-token'),
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $durableToken',
-            },
-            body: jsonEncode({
-              'label': _sessionLabel(session),
-              'ttl_seconds': _sessionTokenTtl.inSeconds,
-            }),
-          )
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(const Duration(seconds: 5));
     } on Exception {
       return null;
@@ -124,6 +130,47 @@ class SupportAccessService {
     String baseUrl,
   ) {
     return '${session.user.id}|$hubId|${baseUrl.trim().toLowerCase()}';
+  }
+
+  // Hub endpoint preferences are editable by residents. An assistant
+  // credential may travel only to the provisioned HTTPS relay for this
+  // installation. Validate before decrypting or returning a cached session.
+  Future<bool> _isAssistantGrantDestination(
+    String hubId,
+    Map<String, dynamic> grant,
+    String? instance,
+    String baseUrl,
+  ) async {
+    final domain = _config.remoteAccessDomain;
+    final homeId = cleanString(grant['home_id']);
+    if (domain == null ||
+        homeId == null ||
+        instance == null ||
+        instance.isEmpty) return false;
+    final uri = Uri.tryParse(baseUrl);
+    final host = '${hubId.toLowerCase()}.$domain';
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.port != 443 ||
+        uri.host != host ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        (uri.path.isNotEmpty && uri.path != '/')) return false;
+    final rows = await _supabase.select(
+      table: 'hub_remote_access',
+      select: 'hostname',
+      accessToken: null,
+      serviceRole: true,
+      limit: 1,
+      filters: {
+        'hub_id': 'eq.$hubId',
+        'home_id': 'eq.$homeId',
+        'server_instance_id': 'eq.$instance',
+        'hostname': 'eq.$host'
+      },
+    );
+    return rows.length == 1 && rows.single['hostname'] == host;
   }
 
   Future<Map<String, dynamic>?> _loadActiveGrant(String hubId) async {
@@ -167,12 +214,12 @@ class SupportAccessService {
 
     try {
       final digest = await _sha256.hash(utf8.encode(secret));
-      final aad = cleanString(envelope['aad']) ??
-          _supportAccessAad(
-            hubId: row['hub_id'] as String? ?? '',
-            tokenId: row['token_id'] as String? ?? '',
-            scope: row['scope'] as String? ?? _scope,
-          );
+      final aad = _supportAccessAad(
+        hubId: row['hub_id'] as String? ?? '',
+        tokenId: row['token_id'] as String? ?? '',
+        scope: row['scope'] as String? ?? _scope,
+      );
+      if (envelope['aad'] != null && envelope['aad'] != aad) return null;
       final bytes = await _cipher.decrypt(
         SecretBox(
           _decodeBase64Url(envelope['ciphertext']),

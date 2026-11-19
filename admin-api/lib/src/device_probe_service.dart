@@ -361,11 +361,16 @@ class DeviceProbeService {
     required DeviceAdminProxyRequestDto request,
   }) async {
     final hub = await _loadHub(session: session, hubId: hubId);
-    final candidates = _endpointCandidates(hub);
+    final candidates = _endpointCandidates(hub)
+        .where(
+            (candidate) => !request.isAssistant || candidate.route == 'remote')
+        .toList();
     if (candidates.isEmpty) {
-      throw const AdminApiException(
-        400,
-        'No endpoint is configured for this Light Box.',
+      throw AdminApiException(
+        request.isAssistant ? 403 : 400,
+        request.isAssistant
+            ? 'This hub needs a verified remote support route.'
+            : 'No endpoint is configured for this Light Box.',
       );
     }
 
@@ -587,6 +592,7 @@ class DeviceProbeService {
             request.queryParameters.isEmpty ? null : request.queryParameters,
       );
       final outbound = http.Request(request.method, uri)
+        ..followRedirects = false
         ..headers.addAll({
           'Accept': 'application/json',
           if (authToken != null) 'Authorization': 'Bearer $authToken',
@@ -1023,6 +1029,7 @@ class DeviceProbeService {
           hubId: hub.id,
           baseUrl: baseUrl,
           assistantRequest: assistantRequest,
+          expectedServerInstanceId: hub.serverInstanceId,
         ) ??
         Future<String?>.value();
   }

@@ -35,6 +35,7 @@ Optional:
 - `SUPPORT_ACCESS_KEY_ID`: optional key id for support access envelopes;
   defaults to `default`.
 - `ADMIN_API_PORT`: defaults to `8787`
+- `RHYTHM_REMOTE_ACCESS_DOMAIN` identifies the HTTPS relay domain configured in remote-access-bootstrap. Assistant sessions require the selected hub's provisioned `<hub-id>.<domain>` HTTPS relay and live installation identity. Apply the relay-permissions migration before enabling assistant access. A legacy hostname requires reprovisioning on the canonical relay.
 - `ADMIN_API_ALLOWED_ORIGINS`: comma-separated browser origins allowed by CORS
 
 ## Support access key

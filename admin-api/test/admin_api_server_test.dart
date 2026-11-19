@@ -786,6 +786,7 @@ void main() {
         aad: utf8.encode(aad));
     var role = 'support', liveHub = 'srv-test';
     var granted = true;
+    var pinned = true;
     final calls = <String>[];
     final client = _HandlerClient((request) async {
       final staff = _staffAuthResponse(request, role: role);
@@ -798,6 +799,7 @@ void main() {
           if (granted)
             {
               'id': 'grant1',
+              'home_id': 'home-1',
               'hub_id': 'hub-1',
               'token_id': 't1',
               'scope': 'beta_admin',
@@ -814,9 +816,23 @@ void main() {
             }
         ]);
       }
+      if (path == '/rest/v1/hub_remote_access') {
+        expect(
+            request.url.queryParameters['server_instance_id'], 'eq.srv-test');
+        expect(request.url.queryParameters['hostname'], 'eq.hub-1.relay.test');
+        return _jsonResponse([
+          if (pinned) {'hostname': 'hub-1.relay.test'}
+        ]);
+      }
+      if (path == '/rest/v1/hubs') {
+        final rows = jsonDecode(_supabaseResponse(request).body) as List;
+        rows.first['remote_endpoint']['host'] = 'hub-1.relay.test';
+        return _jsonResponse(rows);
+      }
       if (request.url.host == 'supabase.test') {
         return _supabaseResponse(request);
       }
+      expect(request.url.host, 'hub-1.relay.test');
       if (path == '/api/auth/support-session-token') {
         expect(request.headers['Authorization'], 'Bearer synthetic-support');
         return _jsonResponse({'token': 'synthetic-short-session'});
@@ -860,6 +876,9 @@ void main() {
     liveHub = 'srv-test';
     expect(await proxy('POST', apply), 200);
     // Same staff identity, endpoint and unexpired device session.
+    pinned = false;
+    expect(await proxy('POST', plan), 403);
+    pinned = true;
     granted = false;
     expect(await proxy('POST', apply), 403);
     expect(await proxy('POST', plan), 403);
@@ -1405,6 +1424,7 @@ AdminApiServer _testServer({
     supabaseServiceRoleKey: serviceRoleKey,
     supportAccessEncryptionKey: 'support-key',
     supportAccessKeyId: 'default',
+    remoteAccessDomain: 'relay.test',
     host: '127.0.0.1',
     port: 8787,
     allowedOrigins: {'http://127.0.0.1:5173'},
