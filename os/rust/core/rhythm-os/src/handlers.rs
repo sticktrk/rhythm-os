@@ -2414,6 +2414,17 @@ pub fn handle_post_home_scene_apply(
     }
 }
 
+fn scene_preview_error(error: anyhow::Error) -> ApiResponse {
+    if let Some(trial) = error.downcast_ref::<commands::TrialOutputError>() {
+        ApiResponse::json_status(
+            503,
+            json!({"error":trial.message, "trial_id":trial.trial_id}).to_string(),
+        )
+    } else {
+        ApiResponse::bad_request(&error.to_string())
+    }
+}
+
 pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
     let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
@@ -2437,7 +2448,7 @@ pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Val
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 
@@ -2470,7 +2481,7 @@ pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> Api
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 
@@ -2516,7 +2527,7 @@ pub fn handle_post_scene_preview_cancel(state: &SharedState, preview_id: &str) -
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 

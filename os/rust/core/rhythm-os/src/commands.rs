@@ -7866,6 +7866,7 @@ fn build_native_scene_companion_plan_locked(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_scene_preview_session(
     state: &SharedState,
     preview_id: &str,
@@ -7918,16 +7919,23 @@ fn record_scene_preview_session(
             .remaining_light_ids
             .retain(|node| !common.contains(node));
         let restore = restore_scene_preview(state, &previous, transaction);
+        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if restore.is_ok() {
             previous.remaining_light_ids = common;
         } else {
+            if let Some(failed) = restore
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<FailedRestoreRoutes>())
+            {
+                retain_failed_restore_lights(&app, &mut previous, failed);
+            }
             previous.remaining_light_ids.extend(common);
             previous.failed_restore_routes = None;
             previous.restore_failed_at_epoch_ms = Some(current_epoch_ms());
         }
         // Keep the previous token usable until its successor has a durable
         // record. A storage failure here must not strand the overlapping lamps.
-        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let saved = update_trial_recovery_locked(&app, &[], Some(&previous));
         app.light_scene_previews.insert(id.clone(), previous);
         saved?;
@@ -8255,12 +8263,12 @@ fn finish_scene_preview_in_transaction(
             // The scene transaction prevents superseding previews or commits from
             // interleaving. Keep the token so a temporary I/O failure can recover.
             let now = current_epoch_ms();
+            let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             if let Some(failed) = error.downcast_ref::<FailedRestoreRoutes>() {
-                preview.failed_restore_routes = Some(failed.0.clone());
+                retain_failed_restore_lights(&app, &mut preview, failed);
             }
             preview.restore_failed_at_epoch_ms = Some(now);
             preview.expires_at_epoch_ms = preview.expires_at_epoch_ms.min(now);
-            let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             let saved = update_trial_recovery_locked(&app, &[], Some(&preview));
             app.light_scene_previews.insert(preview.id.clone(), preview);
             saved?;
@@ -8402,6 +8410,29 @@ fn restore_scene_preview(
     Ok("restore_requested")
 }
 
+fn retain_failed_restore_lights(
+    app: &AppState,
+    preview: &mut LightScenePreviewSession,
+    failed: &FailedRestoreRoutes,
+) {
+    if !failed.0.contains(&preview.target_node_id) {
+        let routing = app.topology.composite_routing(&app.canonical_registry);
+        preview.remaining_light_ids.retain(|id| {
+            failed.0.contains(id)
+                || failed
+                    .0
+                    .contains(&crate::topology::device_light_node_id(id))
+                || routing.get(id).is_some_and(|route| {
+                    failed
+                        .0
+                        .iter()
+                        .any(|other| routing.get(other) == Some(route))
+                })
+        });
+    }
+    preview.failed_restore_routes = Some(failed.0.clone());
+}
+
 fn retry_route(preview: &LightScenePreviewSession, id: &str) -> bool {
     preview
         .failed_restore_routes
@@ -8487,7 +8518,7 @@ fn restore_preview_output(
                 .filter_map(|snap| crate::periodic::preview_dispatch_node_for_target(&snap))
                 .collect()
         } else if target.kind.is_room() {
-            crate::periodic::periodic_dispatch_nodes_from_state(&s, std::slice::from_ref(target))
+            crate::periodic::routed_dispatch_nodes_from_state(&s, std::slice::from_ref(target))
         } else {
             crate::periodic::preview_dispatch_node_for_target(target)
                 .into_iter()

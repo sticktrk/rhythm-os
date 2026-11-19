@@ -154,7 +154,7 @@ fn periodic_settings_node_kind(
     }
 }
 
-pub(crate) fn periodic_dispatch_nodes_from_state(
+pub(crate) fn routed_dispatch_nodes_from_state(
     state: &AppState,
     room_snapshots: &[rhythm_core::NodeSnapshot],
 ) -> Vec<PeriodicDispatchNode> {
@@ -173,7 +173,7 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
 
-    let mut dispatch_nodes = if !has_composite_controller {
+    if !has_composite_controller {
         eligible_room_ids
             .into_iter()
             .map(|room_id| PeriodicDispatchNode {
@@ -220,8 +220,14 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
             }
         }
         dispatch_nodes
-    };
+    }
+}
 
+pub(crate) fn periodic_dispatch_nodes_from_state(
+    state: &AppState,
+    room_snapshots: &[rhythm_core::NodeSnapshot],
+) -> Vec<PeriodicDispatchNode> {
+    let mut dispatch_nodes = routed_dispatch_nodes_from_state(state, room_snapshots);
     let active_scene_node_ids: HashSet<&str> = room_snapshots
         .iter()
         .filter(|node| node.mood_active && node.profile_settings.mood_scene_id.is_some())

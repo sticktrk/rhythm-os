@@ -1055,8 +1055,30 @@ async fn partial_room_trials_restore_every_route_and_supersede_shared_lamps() {
         .contains(&lamps[1]));
     assert_eq!(spy.turn_off_calls(), lamps);
     spy.reset();
+    let (status, sibling) = operation(
+        &h,
+        "audition_light",
+        json!({"light_id":lamps[0],"output":output}),
+    )
+    .await;
+    assert_eq!(status, 200, "{sibling}");
+    assert!(
+        spy.turn_off_calls().is_empty(),
+        "starting a sibling trial must not retry the middle lamp"
+    );
+
     assert_eq!(operation(&h, "undo_room_trial", args).await.0, 200);
     assert_eq!(spy.turn_off_calls(), [lamps[1].clone()]);
+    assert_eq!(
+        operation(
+            &h,
+            "audition_light",
+            json!({"light_id":lamps[0],"trial_id":sibling["trial_id"]})
+        )
+        .await
+        .0,
+        200
+    );
     let (status, first) = operation(
         &h,
         "set_room_color",
