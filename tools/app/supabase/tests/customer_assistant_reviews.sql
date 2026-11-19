@@ -227,7 +227,11 @@ BEGIN
   ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='uncertain';
   plan:=public.customer_assistant_review(actor,'plan',arguments);
   PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
-  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  -- Claim at minute nine, then finish three minutes later.
+  UPDATE public.customer_assistant_reviews SET expires_at=now()+interval '1 minute' WHERE id=(plan->>'plan_id')::uuid;
+  receipt:=public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  ASSERT (receipt->>'expires_at')::timestamptz >= now()+interval '10 minutes';
+  UPDATE public.customer_assistant_reviews SET expires_at=expires_at-interval '3 minutes' WHERE id=(plan->>'plan_id')::uuid;
   INSERT INTO public.support_debug_bundle_submissions(id,user_id,summary) VALUES((plan->>'plan_id')::uuid,actor,'fixture');
   ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='acknowledged';
 END;

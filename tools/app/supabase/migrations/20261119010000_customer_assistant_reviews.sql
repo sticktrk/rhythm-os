@@ -229,7 +229,8 @@ BEGIN
   ELSE
     IF r.revision IS DISTINCT FROM rev THEN RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001'; END IF;
     IF p_step='claim' THEN
-      UPDATE public.customer_assistant_reviews SET state='claimed' WHERE id=r.id RETURNING * INTO r;
+      UPDATE public.customer_assistant_reviews SET state='claimed', expires_at=greatest(expires_at,now()+interval '10 minutes')
+        WHERE id=r.id RETURNING * INTO r;
     ELSE
       UPDATE public.customer_assistant_reviews SET state='awaiting_device' WHERE id=r.id RETURNING * INTO r;
     END IF;
