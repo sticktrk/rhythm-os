@@ -167,3 +167,34 @@ older API does not return the config hash. An older UI against the hardened API
 receives HTTP 428 for unguarded writes. The admin API retains its preflight for
 older appliances, but atomic overwrite protection requires the updated
 appliance.
+
+## Staff assistant
+
+Connect an MCP Streamable HTTP client to `POST /api/assistant/mcp` with the
+operator's Supabase access token in its bearer authentication header. Browser
+clients must use an origin explicitly listed in `ADMIN_API_ALLOWED_ORIGINS`. The
+service checks the enabled staff row on each request. Start with `initialize`
+and `tools/list`. The resource `rhythm://staff/contract` describes each tool's
+location, permission tier, confirmation rule, input schema and verification.
+
+Find the home with `staff_find_homes`, or resolve the selected console record
+with `staff_list_fleet`. Pass its `hub_ref` to probe reachability, read status,
+list log sources and inspect recent diagnostic categories. In the console,
+open the home's **Open assistant** link and choose **Check support access**.
+The existing Logs view shows authorized staff the underlying diagnostic text.
+
+Use `staff_select_hub` to discover the selected appliance's operations in the
+same conversation. `staff_call_hub_tool` accepts its reads and previews. Admins
+can use `staff_control_hub` for temporary output. A persistent change requires
+the reviewed plan and `confirmed: true` in `staff_apply_plan`. This also covers
+firmware updates, fleet reports and cloud hub deletion. Re-read the state
+after an uncertain outcome before preparing another proposal.
+
+The staff service owns the customer-granted support credential and checks the
+active grant on every hub request, including requests with a cached session.
+Model responses use short-lived references, bounded diagnostics and verified
+receipts. References and plans belong to one staff actor and service process,
+expire after ten minutes, and disappear on restart. A confirmed plan can be
+dispatched once. Service-role credentials, device sessions, signed storage
+URLs, personal labels, household history and raw log lines stay in their
+respective trusted services.

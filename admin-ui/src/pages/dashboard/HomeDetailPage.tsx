@@ -281,6 +281,7 @@ function HomeHubCard({
           <span>Hub {shortId(hub.id)}</span>
         </div>
       </div>
+      <Link className="homeHubOpen" to={`/hubs/${hub.id}/assistant`}>Open assistant</Link>
       <Link className="homeHubOpen" to={`/hubs/${hub.id}/overview`}>
         Open hub
         <ChevronRight size={16} />

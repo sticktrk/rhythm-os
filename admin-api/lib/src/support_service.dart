@@ -7,7 +7,10 @@ class SupportService {
 
   final SupabaseRestClient _supabase;
 
-  Future<DeletedHubDto> deleteServerHub(String hubId) async {
+  Future<DeletedHubDto> deleteServerHub(
+    String hubId, {
+    SupportHubDto? reviewed,
+  }) async {
     final normalizedHubId = hubId.trim();
     if (normalizedHubId.isEmpty) {
       throw const AdminApiException(400, 'Hub id is required.');
@@ -26,9 +29,22 @@ class SupportService {
       filters: {
         'id': 'eq.$normalizedHubId',
         'type': 'eq.server',
+        if (reviewed != null) ...{
+          'home_id': 'eq.${reviewed.homeId}',
+          'server_instance_id': reviewed.serverInstanceId == null
+              ? 'is.null'
+              : 'eq.${reviewed.serverInstanceId}',
+          'updated_at': reviewed.updatedAt == null
+              ? 'is.null'
+              : 'eq.${reviewed.updatedAt!.toUtc().toIso8601String()}',
+          'enabled': 'eq.true',
+        },
       },
     );
     if (deletedRows.isEmpty) {
+      if (reviewed != null) {
+        throw const AdminApiException(409, 'The reviewed hub record changed.');
+      }
       throw const AdminApiException(
         404,
         'Server hub was not found or was already deleted.',

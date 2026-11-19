@@ -24,6 +24,27 @@ export async function fetchMe(accessToken: string): Promise<MeResponse> {
   return apiFetch<MeResponse>('/api/me', accessToken);
 }
 
+export async function runStaffAssistantTool(
+  accessToken: string,
+  name: string,
+  args: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const message = await apiFetch<Record<string, unknown>>('/api/assistant/mcp', accessToken, {
+    method: 'POST',
+    headers: { Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: crypto.randomUUID(), method: 'tools/call',
+      params: { name, arguments: args }
+    })
+  });
+  const result = asRecord(message.result);
+  if (result.isError || !result.structuredContent) {
+    const first = Array.isArray(result.content) ? asRecord(result.content[0]) : {};
+    throw new Error(asNonEmptyString(first.text) ?? 'The staff assistant could not complete the operation.');
+  }
+  return asRecord(result.structuredContent);
+}
+
 export async function fetchHealth(): Promise<AdminApiHealth> {
   const response = await fetch(`${apiBaseUrl}/health`, {
     headers: { Accept: 'application/json' }

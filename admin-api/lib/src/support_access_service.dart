@@ -36,6 +36,9 @@ class SupportAccessService {
   bool get canUseSupportAccess =>
       _supabase.canUseServiceRole && _config.hasSupportAccessEncryptionKey;
 
+  Future<bool> hasActiveAssistantGrant(String hubId) async =>
+      canUseSupportAccess && await _loadActiveGrant(hubId) != null;
+
   Future<String?> createSessionToken({
     required AdminSession session,
     required String hubId,
