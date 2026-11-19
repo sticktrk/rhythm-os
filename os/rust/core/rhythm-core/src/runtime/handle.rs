@@ -302,6 +302,11 @@ pub trait RuntimeHandle: Send + Sync {
     /// Get the current local hour from the time provider (0.0–24.0).
     fn current_hour(&self) -> f32;
 
+    /// Solar context used by the active engine to render its current commands.
+    fn current_curve_context(&self) -> Option<crate::CurveContext> {
+        None
+    }
+
     /// Set the active light profile by ID. Returns true if found.
     fn set_light_profile(&self, id: &str) -> bool;
 
@@ -1318,6 +1323,14 @@ where
 
     fn current_hour(&self) -> f32 {
         RhythmRuntime::current_hour(self)
+    }
+
+    fn current_curve_context(&self) -> Option<crate::CurveContext> {
+        let hour = self.current_hour();
+        self.engine()
+            .read()
+            .ok()
+            .map(|engine| engine.create_context(hour))
     }
 
     fn set_light_profile(&self, id: &str) -> bool {

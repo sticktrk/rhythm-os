@@ -512,6 +512,12 @@ pub struct LightScenePreviewSession {
     pub scene_id: String,
     pub target_node_id: String,
     pub affected_node_ids: Vec<String>,
+    /// A single-lamp audition may only reconcile through its independent device route.
+    #[serde(skip)]
+    pub assistant_individual_audition: bool,
+    /// A time-shift audition can be consumed by a reviewed Absorb operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_time_offset_minutes: Option<f32>,
     pub previous_mood_scene_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_scene: Option<SceneDefinition>,

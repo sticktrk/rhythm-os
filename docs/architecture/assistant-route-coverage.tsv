@@ -37,6 +37,7 @@ rhythm-server	GET	/api/ota/status	operation	read_appliance_update_status
 rhythm-server	POST	/api/ota/update	operation	plan_hub_update
 rhythm-server	POST	/api/restart	operation	plan_hub_restart
 shared	GET	/.well-known/oauth-authorization-server	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	GET	/.well-known/oauth-authorization-server/api/assistant/mcp	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	DELETE	/api/activity-cloud/config	handoff	Account holder provisions the activity upload credential in Rhythm.
 shared	GET	/api/activity-cloud/config	operation	read_activity_upload
 shared	PUT	/api/activity-cloud/config	operation	plan_activity_upload
@@ -63,13 +64,13 @@ shared	GET	/api/backup	handoff	Owner reviews installation backup, destructive re
 shared	PUT	/api/backup	handoff	Owner reviews installation backup, destructive reset and recovery.
 shared	POST	/api/cloud/join-proof	handoff	Owner manages credentials and enrollment on their device.
 shared	GET	/api/config	operation	export_lighting_settings
-shared	PUT	/api/config	operation	plan_lighting_transfer
+shared	PUT	/api/config	operation	plan_profile_edit
 shared	POST	/api/config/absorb-offset	operation	plan_absorb_offset
 shared	POST	/api/config/reset	operation	plan_profile_reset
-shared	GET	/api/curve	operation	sample_room_curve
-shared	POST	/api/curve	operation	sample_room_curve
-shared	GET	/api/curve/now	operation	sample_room_curve
-shared	GET	/api/curve/solar	operation	sample_room_curve
+shared	GET	/api/curve	operation	read_profile_curve
+shared	POST	/api/curve	operation	read_profile_curve
+shared	GET	/api/curve/now	operation	read_profile_curve
+shared	GET	/api/curve/solar	operation	read_profile_curve
 shared	GET	/api/device-attention	operation	read_device_review
 shared	PUT	/api/device-attention/:id/removal-selected	operation	plan_device_review
 shared	PUT	/api/device-attention/:id/snooze	operation	plan_device_review
@@ -102,7 +103,7 @@ shared	DELETE	/api/input-bindings/:id	operation	plan_input_binding_edit
 shared	PUT	/api/input-bindings/:id	operation	plan_input_binding_edit
 shared	GET	/api/light-breaker	operation	read_hub_status
 shared	PUT	/api/light-breaker	operation	plan_light_breaker_edit
-shared	PUT	/api/light-profile	operation	plan_lighting_transfer
+shared	PUT	/api/light-profile	exclusion	Retired route always rejects global profile selection. Use set_house_lighting_mode or plan_mode_settings_edit.
 shared	GET	/api/light-runtime	operation	read_automation_settings
 shared	PUT	/api/light-runtime	operation	plan_light_runtime_edit
 shared	GET	/api/light-runtimes	operation	read_automation_settings

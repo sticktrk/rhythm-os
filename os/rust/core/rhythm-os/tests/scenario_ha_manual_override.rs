@@ -650,6 +650,90 @@ async fn assistant_room_command_excludes_unreviewed_ha_siblings_from_output_and_
         assert_eq!(report(&f.nodes[0])["verification"], "no_fresh_readback");
         assert_eq!(report(&f.nodes[1])["control_scope"], "outside_ha_selection");
         assert_eq!(report(&f.nodes[1])["verification"], "outside_control_scope");
+        let (status, _) = call(
+            &f,
+            "plan_node_preferences_edit",
+            json!({"node_id":f.nodes[1],"disabled":true}),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (_, export) = call(&f, "export_lighting_settings", json!({})).await;
+        let (status, _) = call(
+            &f,
+            "plan_lighting_transfer",
+            json!({"settings":export,"node_mappings":{&f.nodes[0]: &f.nodes[1]}}),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (status, plan) = call(
+            &f,
+            "plan_node_preferences_edit",
+            json!({"node_id":f.nodes[0],"disabled":true}),
+        )
+        .await;
+        assert_eq!(status, 200, "{plan}");
+        let selected = f.state.lock().unwrap().managed_ha_lights.take();
+        let (status, _) = call(
+            &f,
+            "apply_node_preferences_edit",
+            json!({"plan_id":plan["plan_id"],"confirmed":true}),
+        )
+        .await;
+        assert_eq!(status, 409);
+        assert!(
+            !f.runtime
+                .engine_node_snapshot(&f.nodes[0])
+                .unwrap()
+                .disabled
+        );
+        f.state.lock().unwrap().managed_ha_lights = selected;
+        let out = json!({"power":"on","brightness":45,"color":{"kind":"kelvin","kelvin":2800}});
+        let (status, _) = call(
+            &f,
+            "audition_light",
+            json!({"light_id":f.nodes[1],"output":out}),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (status, trial) = call(
+            &f,
+            "audition_light",
+            json!({"light_id":f.nodes[0],"output":out}),
+        )
+        .await;
+        assert_eq!(status, 200, "{trial}");
+        assert_eq!(trial["light_readback"].as_array().unwrap().len(), 1);
+        f.settle();
+        let (status, restored) = call(
+            &f,
+            "audition_light",
+            json!({"light_id":f.nodes[0],"trial_id":trial["trial_id"]}),
+        )
+        .await;
+        assert_eq!(status, 200, "{restored}");
+        assert_eq!(restored["status"], "restore_requested");
+        let (_, trial) = call(
+            &f,
+            "audition_light",
+            json!({"light_id":f.nodes[0],"output":out}),
+        )
+        .await;
+        f.settle();
+        let selected = f.state.lock().unwrap().managed_ha_lights.take();
+        let before = f.spy.calls_for_service("turn_off").len();
+        let cancelled: serde_json::Value = serde_json::from_str(
+            &rhythm_os::commands::do_scene_preview_cancel(
+                &f.state,
+                trial["trial_id"].as_str().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cancelled["restoration"], "skipped_changed_ownership");
+        f.settle();
+        assert_eq!(f.spy.calls_for_service("turn_off").len(), before);
+        f.state.lock().unwrap().managed_ha_lights = selected;
+        f.settle();
         for mode in ["rooms", "devices"] {
             let (status, plan) = call(
                 &f,

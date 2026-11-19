@@ -2104,7 +2104,7 @@ fn node_metadata_from_topology(
     )
 }
 
-fn known_light_capabilities_for_device(
+pub(crate) fn known_light_capabilities_for_device(
     device: &crate::canonical::identity::CanonicalDevice,
 ) -> Option<LightCapabilitiesDto> {
     if device.is_removed() || device.device_type != DeviceType::Light {
@@ -7666,6 +7666,8 @@ fn record_scene_preview_session(
             scene_id: response.scene_id.clone(),
             target_node_id: target_id,
             affected_node_ids: response.affected_node_ids.clone(),
+            assistant_individual_audition: false,
+            assistant_time_offset_minutes: None,
             previous_mood_scene_id,
             draft_scene,
             started_at_epoch_ms: now,
@@ -7832,9 +7834,18 @@ pub(crate) fn do_scene_preview_commit_reviewed(
 pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<String> {
     let preview = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.light_scene_previews
+        let preview = s
+            .light_scene_previews
             .remove(preview_id)
-            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
+            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?;
+        if preview.assistant_individual_audition
+            && !s.independently_managed_light(&preview.target_node_id)
+        {
+            return Ok(serde_json::json!({
+                "preview_id": preview.id, "cancelled":true, "restoration":"skipped_changed_ownership"
+            }).to_string());
+        }
+        preview
     };
 
     // Reconcile to the live room behavior. A dormant saved Mood binding is
@@ -7867,7 +7878,8 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
 
     serde_json::to_string(&serde_json::json!({
         "preview_id": preview.id,
-        "cancelled": true
+        "cancelled": true,
+        "restoration": "restore_requested"
     }))
     .map_err(|e| anyhow::anyhow!("serialize scene preview cancel: {}", e))
 }
@@ -13353,7 +13365,7 @@ pub fn do_light_schedules_set(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, true, None)
+    do_light_schedules_set_internal(state, schedules, true, None, &|_| Ok(()))
 }
 
 /// Replace the reusable schedule registry only when the caller reviewed the
@@ -13373,6 +13385,22 @@ pub fn do_light_schedules_set_guarded_with_correlation(
     expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
     correlation_id: Option<String>,
 ) -> Result<String> {
+    do_light_schedules_set_reviewed(
+        state,
+        schedules,
+        expected_schedules,
+        correlation_id,
+        &|_| Ok(()),
+    )
+}
+
+pub(crate) fn do_light_schedules_set_reviewed(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+    expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
+    correlation_id: Option<String>,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -13390,7 +13418,7 @@ pub fn do_light_schedules_set_guarded_with_correlation(
             "light schedule registry precondition failed: live schedules changed"
         ));
     }
-    do_light_schedules_set_internal(state, schedules, true, correlation_id)
+    do_light_schedules_set_internal(state, schedules, true, correlation_id, check)
 }
 
 /// Backup restore replaces the topology and room manager after applying the
@@ -13408,7 +13436,7 @@ fn do_light_schedules_set_for_backup_restore(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, false, None)
+    do_light_schedules_set_internal(state, schedules, false, None, &|_| Ok(()))
 }
 
 fn do_light_schedules_set_internal(
@@ -13416,6 +13444,7 @@ fn do_light_schedules_set_internal(
     schedules: Vec<rhythm_core::LightScheduleConfig>,
     validate_current_references: bool,
     correlation_id: Option<String>,
+    check: ReviewCheck<'_>,
 ) -> Result<String> {
     let ids = validate_light_schedule_definitions(&schedules)?;
     let assigned_roots = if validate_current_references {
@@ -13427,6 +13456,7 @@ fn do_light_schedules_set_internal(
     };
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        check(&s)?;
         s.set_light_schedule_configs(schedules);
         persist_settings_locked(&s);
         for (node_id, _) in &assigned_roots {
@@ -13574,6 +13604,31 @@ fn do_light_schedule_override_set_at(
     persist: bool,
     current_utc: chrono::NaiveDateTime,
 ) -> Result<String> {
+    do_light_schedule_override_set_reviewed(
+        state,
+        node_id,
+        schedule_id,
+        schedule_override,
+        expected_effective_overrides,
+        correlation_id,
+        persist,
+        current_utc,
+        &|_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn do_light_schedule_override_set_reviewed(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    schedule_override: Option<rhythm_core::LightScheduleOverride>,
+    expected_effective_overrides: Option<BTreeMap<String, rhythm_core::LightScheduleOverride>>,
+    correlation_id: Option<String>,
+    persist: bool,
+    current_utc: chrono::NaiveDateTime,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -13649,7 +13704,7 @@ fn do_light_schedule_override_set_at(
         expected_effective_light_schedule_overrides: expected_effective_overrides,
         ..RoomProfileSettingsPatch::default()
     };
-    do_node_preferences_set(
+    do_node_preferences_set_inner_reviewed(
         state,
         node_id,
         None,
@@ -13658,6 +13713,8 @@ fn do_light_schedule_override_set_at(
         None,
         Some(&patch),
         persist,
+        true,
+        check,
     )?;
     let mut activity =
         crate::activity::LightActivityRecord::app(node_id, "light_schedule_override_updated");

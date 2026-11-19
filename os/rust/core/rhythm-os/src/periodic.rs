@@ -3558,6 +3558,8 @@ mod tests {
                 scene_id: "icy-glow".to_string(),
                 target_node_id: "room-a".to_string(),
                 affected_node_ids: vec!["room-a".to_string()],
+                assistant_individual_audition: false,
+                assistant_time_offset_minutes: None,
                 previous_mood_scene_id: None,
                 draft_scene: None,
                 started_at_epoch_ms: now,

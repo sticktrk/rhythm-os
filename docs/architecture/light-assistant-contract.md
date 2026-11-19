@@ -69,6 +69,7 @@ identifies the person, the surface to open and the hub on which to resume.
 | Resident's request | Tools and evidence |
 | --- | --- |
 | “A little brighter” or “warmer at this brightness” | Read the current room output, then use the brightness or warmth adjustment. Check the returned per-light evidence. |
+| “Try this color on one lamp” | Use `audition_light` with the delegated lamp ID and its output. The trial expires after one minute. Use its trial ID to end it early. Lamps with a room-only route require a room-wide preview. |
 | “Keep the kitchen brighter after dusk” | Inspect the active mode and profile. Preview a room tuning and compare dusk and later samples before applying it. |
 | “Show me an hour earlier” | Try a negative offset. Undo the returned trial, keep a room offset, or review Absorb's shared profile and offset changes. |
 | “Why didn't the hall turn on?” | Start a short walk for the chosen sensor. Inspect detection, targets, room policy, dispatch and fresh light observations. Review a target repair, then walk again. |
