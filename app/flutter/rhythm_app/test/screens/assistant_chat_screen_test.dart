@@ -102,7 +102,11 @@ class _Hub extends RhythmServerApi {
         {
           ...current,
           if (id == 'try_room_offset') 'trial_id': 'trial',
-          'server_acknowledged': true,
+          'server_acknowledged': id != 'undo_room_trial',
+          if (id == 'undo_room_trial') ...{
+            'restored': false,
+            'restoration': 'skipped_paused_target'
+          },
           'light_readback': [
             {
               'light_id': 'bulb',
@@ -297,6 +301,7 @@ void main() {
     await choose('Try 60 minutes earlier');
     await request('Go back to normal');
     await choose('End this trial');
+    expect(find.textContaining('The room is paused'), findsOneWidget);
     expect(hub.calls.last.$1, 'undo_room_trial');
     expect(hub.calls.last.$2, {'room_id': 'hall', 'trial_id': 'trial'});
     hub.current['scheduled_default_state'] = 'hard_off';

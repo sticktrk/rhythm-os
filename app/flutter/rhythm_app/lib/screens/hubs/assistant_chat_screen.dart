@@ -256,7 +256,20 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             } else if (_lightOperation == 'undo_room_trial') {
               _trial = null;
             }
-            _say('The hub acknowledged the request.');
+            if (_lightOperation == 'undo_room_trial' &&
+                result['restored'] == false) {
+              _say(switch (result['restoration']) {
+                'skipped_paused_target' =>
+                  'The trial ended. The room is paused, so the hub left its lights as they were.',
+                'skipped_missing_target' =>
+                  'The trial ended. The hub could no longer find the target to restore its lights.',
+                'skipped_changed_ownership' =>
+                  'The trial ended. Lighting control changed, so the hub left the lights as they were.',
+                _ => 'The trial ended without restoring the lights.',
+              });
+            } else {
+              _say('The hub acknowledged the request.');
+            }
             if (result['requested_kelvin'] is num) {
               _say(
                   'Requested ${result['requested_kelvin']} K. The hub target is ${result['canonical_kelvin']} K at ${result['canonical_brightness']}%.');
@@ -605,6 +618,10 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
         preview['room_id'] != _room!.id ||
         preview['server_instance_id'] != widget.serverId) {
       throw StateError('Review target changed');
+    }
+    if (preview['detaches_from_profile_curve'] == true) {
+      _say(
+          'This room will keep its own curve until you remove the override. Changes to the shared profile curve will no longer reach this room.');
     }
     _lightPlan = preview['plan_id'] as String;
     _step = _Step.lightingReview;
