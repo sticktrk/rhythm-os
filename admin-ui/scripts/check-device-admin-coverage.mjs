@@ -22,6 +22,9 @@ const explicitExemptions = new Set([
   'POST api/auth/agent-tokens',
   'DELETE api/auth/agent-tokens/{}',
   'POST api/auth/assistant-clients',
+  // Only the hub owner can inspect or decide an agent's pending change.
+  'GET api/assistant/approvals',
+  'POST api/assistant/approvals/{}',
   // Owner-only Matter setup secrets must never become staff/admin operations.
   'GET api/matter/setup-code/{}',
   // Saved commissioning Wi-Fi credentials are likewise owner-only secrets.
