@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 81,
+  "head": "36fef8d2eeebc0bdee117a5b2dfd783b248aba57",
+  "uses_mock_data": true,
+  "source_test": "app/flutter/rhythm_app/test/screens/assistant_access_screen_test.dart",
+  "screenshots": [
+    {
+      "file": "approval.png",
+      "caption": "Owner review of a pending room tuning change"
+    }
+  ]
+}
