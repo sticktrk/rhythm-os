@@ -13,6 +13,13 @@ for file in (root / 'tools/app/supabase/migrations').glob('*.sql'):
     assert match, 'Invalid migration filename: ' + file.name
     assert match[1] not in versions, 'Duplicate migration version: ' + match[1]
     versions.add(match[1])
+# Cargo silently skips scenario files that aren't declared by the test target.
+hub_tests = root / 'os/rust/core/rhythm-os/tests'
+scenarios = hub_tests / 'scenarios'
+assert not list(hub_tests.glob('scenario_*.rs')), 'Place hub scenario modules in ' + str(scenarios)
+modules = set(re.findall(r'^mod (\w+);$', (scenarios / 'main.rs').read_text(), re.MULTILINE))
+missing = sorted(p.name for p in scenarios.glob('*.rs') if p.stem != 'main' and p.stem not in modules)
+assert not missing, 'Register these modules in scenarios/main.rs: ' + ', '.join(missing)
 # Inspect tracked paths; ignored local tool state is allowed in a developer clone.
 if (root / '.git').exists():
     tracked = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
