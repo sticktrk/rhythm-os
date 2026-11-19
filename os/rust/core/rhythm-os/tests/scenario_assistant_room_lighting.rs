@@ -1094,3 +1094,80 @@ async fn partial_room_trials_restore_every_route_and_supersede_shared_lamps() {
         200
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_trials_recover_on_restart_even_when_old_and_topology_arrives_late() {
+    use rhythm_os::storage::{FileStorage, Storage};
+    let data = tempfile::tempdir().unwrap();
+    let storage = std::sync::Arc::new(FileStorage::new(data.path().to_str().unwrap()).unwrap());
+    let (topology, devices, room) = {
+        let (h, spy) = TestHarness::with_spy_controller();
+        let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+        let h = h.with_discovery(rooms, devices);
+        h.sync();
+        let room = h.resolve("den");
+        h.state.lock().unwrap().storage = Some(storage.clone());
+        assert_eq!(
+            operation(
+                &h,
+                "control_room_power",
+                json!({"room_id":room,"power":"hard_off"})
+            )
+            .await
+            .0,
+            200
+        );
+        spy.reset();
+        let (status, trial) = operation(
+            &h,
+            "set_room_color",
+            json!({"room_id":room,"red":255,"green":0,"blue":0}),
+        )
+        .await;
+        assert_eq!(status, 200, "{trial}");
+        assert_eq!(spy.turn_on_count(), 1);
+        let recovery = storage.load_trial_recovery().unwrap();
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(json!(recovery[0].id), trial["trial_id"]);
+        assert_eq!(recovery[0].target, room);
+        assert_eq!(recovery[0].lights.len(), 1);
+        let s = h.state.lock().unwrap();
+        (s.topology.clone(), s.canonical_registry.clone(), room)
+    };
+    let mut records = storage.load_trial_recovery().unwrap();
+    for delayed_topology in [false, true] {
+        if delayed_topology {
+            records[0].expires_at_epoch_ms = 1;
+            storage.save_trial_recovery(&records).unwrap();
+        }
+        let (restarted, spy) = TestHarness::with_spy_controller();
+        {
+            let mut app = restarted.state.lock().unwrap();
+            app.storage = Some(storage.clone());
+        }
+        if delayed_topology {
+            rhythm_os::commands::try_ensure_runtime(&restarted.state).unwrap();
+            rhythm_os::commands::reconcile_runtime_from_state(&restarted.state).unwrap();
+            assert_eq!(storage.load_trial_recovery().unwrap().len(), 1);
+            assert!(spy.turn_off_calls().is_empty());
+        }
+        {
+            let mut app = restarted.state.lock().unwrap();
+            app.topology = topology.clone();
+            app.canonical_registry = devices.clone();
+        }
+        rhythm_os::commands::reconcile_runtime_from_state(&restarted.state).unwrap();
+        assert_eq!(spy.turn_off_calls(), [room.clone()]);
+        assert!(restarted.snapshot(&room).unwrap().hard_off);
+        assert!(restarted
+            .state
+            .lock()
+            .unwrap()
+            .light_scene_previews
+            .is_empty());
+        assert!(storage.load_trial_recovery().unwrap().is_empty());
+        spy.reset();
+        rhythm_os::commands::reconcile_runtime_from_state(&restarted.state).unwrap();
+        assert!(spy.turn_off_calls().is_empty());
+    }
+}

@@ -813,6 +813,8 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         }
     }
     if let Some(trial) = &plan.trial_id {
+        commands::update_trial_recovery_locked(&app, std::slice::from_ref(trial), None)
+            .map_err(|_| uncertain())?;
         app.light_scene_previews.remove(trial);
     }
     app.invalidate_queued_light_dispatches();

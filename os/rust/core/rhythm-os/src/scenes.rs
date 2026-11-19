@@ -512,6 +512,9 @@ pub struct LightScenePreviewSession {
     pub scene_id: String,
     pub target_node_id: String,
     pub affected_node_ids: Vec<String>,
+    /// Loaded from disk after an interrupted trial. It can only be restored.
+    #[serde(skip)]
+    pub interrupted: bool,
     /// Physical light coverage, including members reached by a room command.
     #[serde(skip)]
     pub remaining_light_ids: std::collections::BTreeSet<String>,
@@ -538,6 +541,65 @@ pub struct LightScenePreviewSession {
     pub restore_failed_at_epoch_ms: Option<u64>,
     pub started_at_epoch_ms: u64,
     pub expires_at_epoch_ms: u64,
+}
+
+/// Recovery needs only routing and authority information. The draft, light
+/// colors, profile settings and assistant request are never written here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredTrialRecovery {
+    pub id: String,
+    pub target: String,
+    pub lights: std::collections::BTreeSet<String>,
+    pub expires_at_epoch_ms: u64,
+    pub room_command: bool,
+    pub individual_audition: bool,
+    pub rhythm_owned: bool,
+    pub breaker_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_routes: Option<std::collections::BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_failed_at_epoch_ms: Option<u64>,
+}
+impl StoredTrialRecovery {
+    pub(crate) fn from_session(s: &LightScenePreviewSession) -> Self {
+        Self {
+            id: s.id.clone(),
+            target: s.target_node_id.clone(),
+            lights: s.remaining_light_ids.clone(),
+            expires_at_epoch_ms: s.expires_at_epoch_ms,
+            room_command: s.affected_node_ids.contains(&s.target_node_id),
+            individual_audition: s.assistant_individual_audition,
+            rhythm_owned: s.rhythm_owned_at_start,
+            breaker_enabled: s.breaker_enabled_at_start,
+            failed_routes: s.failed_restore_routes.clone(),
+            restore_failed_at_epoch_ms: s.restore_failed_at_epoch_ms,
+        }
+    }
+
+    pub(crate) fn into_interrupted_session(self) -> LightScenePreviewSession {
+        LightScenePreviewSession {
+            id: self.id,
+            scene_id: String::new(),
+            affected_node_ids: if self.room_command {
+                vec![self.target.clone()]
+            } else {
+                self.lights.iter().cloned().collect()
+            },
+            target_node_id: self.target,
+            interrupted: true,
+            remaining_light_ids: self.lights,
+            failed_restore_routes: self.failed_routes,
+            assistant_individual_audition: self.individual_audition,
+            assistant_time_offset_minutes: None,
+            previous_mood_scene_id: None,
+            rhythm_owned_at_start: self.rhythm_owned,
+            breaker_enabled_at_start: self.breaker_enabled,
+            draft_scene: None,
+            restore_failed_at_epoch_ms: self.restore_failed_at_epoch_ms,
+            started_at_epoch_ms: 0,
+            expires_at_epoch_ms: self.expires_at_epoch_ms,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

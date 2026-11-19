@@ -5804,18 +5804,122 @@ fn set_scene_committed_state(
     queue_motion_timer_clear(state, target_id);
 }
 
+/// Update only the affected records while holding AppState. Other sessions
+/// can temporarily leave the in-memory map during physical restoration.
+pub(crate) fn update_trial_recovery_locked(
+    app: &AppState,
+    remove: &[String],
+    insert: Option<&LightScenePreviewSession>,
+) -> Result<()> {
+    let Some(storage) = &app.storage else {
+        return Ok(());
+    };
+    if remove.is_empty() && insert.is_none() {
+        return Ok(());
+    }
+    let mut records = storage.load_trial_recovery()?;
+    records.retain(|r| !remove.contains(&r.id) && insert.is_none_or(|s| s.id != r.id));
+    if let Some(session) = insert {
+        records.push(crate::scenes::StoredTrialRecovery::from_session(session));
+    }
+    storage.save_trial_recovery(&records)
+}
+
+pub(crate) fn load_interrupted_trials(app: &mut AppState) -> Result<()> {
+    let Some(storage) = &app.storage else {
+        return Ok(());
+    };
+    if !app.trial_recovery_loaded {
+        for record in storage.load_trial_recovery()? {
+            app.light_scene_previews
+                .entry(record.id.clone())
+                .or_insert_with(|| record.into_interrupted_session());
+        }
+        app.trial_recovery_loaded = true;
+    }
+    Ok(())
+}
+
+pub(crate) fn recover_interrupted_light_trials(state: &SharedState) -> Result<()> {
+    let gate = {
+        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if app.hub_runtime().is_none() {
+            return Ok(());
+        }
+        load_interrupted_trials(&mut app)?;
+        if !app
+            .light_scene_previews
+            .values()
+            .any(|s| s.interrupted && s.restore_failed_at_epoch_ms.is_none())
+        {
+            return Ok(());
+        }
+        app.scene_lifecycle_transaction_lock.clone()
+    };
+    // Reconciliation can also run within another scene transaction. Its next
+    // pass, or the scheduler, will drain the records when the gate is released.
+    let Ok(transaction) = gate.try_lock() else {
+        return Ok(());
+    };
+    let ids = {
+        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let Some(runtime) = app.hub_runtime() else {
+            return Ok(());
+        };
+        let now = current_epoch_ms();
+        let mut ready = Vec::new();
+        for p in app
+            .light_scene_previews
+            .values_mut()
+            .filter(|p| p.interrupted && p.restore_failed_at_epoch_ms.is_none())
+        {
+            // An old expiry says nothing about how much topology has loaded
+            // since this boot. Start the discovery grace with the new runtime.
+            if p.started_at_epoch_ms == 0 {
+                p.started_at_epoch_ms = now;
+            }
+            let loaded = runtime
+                .engine_effective_node_snapshot(&p.target_node_id)
+                .is_some()
+                && p.remaining_light_ids
+                    .iter()
+                    .all(|id| runtime.engine_effective_node_snapshot(id).is_some());
+            if loaded || now.saturating_sub(p.started_at_epoch_ms) >= 300_000 {
+                ready.push(p.id.clone());
+            }
+        }
+        ready
+    };
+    for id in ids {
+        if let Err(error) = finish_scene_preview_in_transaction(state, &id, true, &transaction) {
+            warn!(target:"cmd","Failed to restore interrupted light trial: {}", error);
+        }
+    }
+    Ok(())
+}
+
 fn clear_scene_preview_sessions_locked(
     s: &mut AppState,
     target_id: &str,
     affected_node_ids: &[String],
-) {
-    s.light_scene_previews.retain(|_, preview| {
-        preview.target_node_id != target_id
-            && !preview
-                .affected_node_ids
-                .iter()
-                .any(|node_id| affected_node_ids.iter().any(|affected| affected == node_id))
-    });
+) -> Result<()> {
+    let ids: Vec<_> = s
+        .light_scene_previews
+        .values()
+        .filter(|preview| {
+            preview.target_node_id == target_id
+                || preview
+                    .affected_node_ids
+                    .iter()
+                    .any(|node_id| affected_node_ids.contains(node_id))
+        })
+        .map(|p| p.id.clone())
+        .collect();
+    update_trial_recovery_locked(s, &ids, None)?;
+    for id in ids {
+        s.light_scene_previews.remove(&id);
+    }
+    Ok(())
 }
 
 /// Dispatch one planned scene light command synchronously and reconcile the
@@ -6129,7 +6233,7 @@ fn do_scene_apply_definition_in_transaction(
             None,
         );
         if let Ok(mut s) = state.lock() {
-            clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids);
+            clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids)?;
         }
         if persist_state {
             persist_rooms(state);
@@ -6362,6 +6466,12 @@ pub(crate) fn do_scene_delete_reviewed(
             .scenes
             .remove(scene_id)
             .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?;
+        let removed_trials: Vec<_> = s
+            .light_scene_previews
+            .values()
+            .filter(|p| p.scene_id == scene_id)
+            .map(|p| p.id.clone())
+            .collect();
         let previews_before = s.light_scene_previews.clone();
         s.light_scene_previews
             .retain(|_, preview| preview.scene_id != scene_id);
@@ -6370,6 +6480,7 @@ pub(crate) fn do_scene_delete_reviewed(
             s.light_scene_previews = previews_before;
             return Err(error.context("Failed to durably delete the scene"));
         }
+        update_trial_recovery_locked(&s, &removed_trials, None)?;
         s.hub_runtime()
     };
 
@@ -6947,7 +7058,7 @@ pub(crate) fn do_home_scene_apply_reviewed(
             None,
         );
         if let Ok(mut s) = state.lock() {
-            clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids);
+            clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids)?;
         }
         emit_node_state_event_after_apply(state, &runtime, target_id);
     }
@@ -7440,7 +7551,7 @@ fn home_scene_apply_to_devices(
                     )])),
                 );
                 if let Ok(mut s) = state.lock() {
-                    clear_scene_preview_sessions_locked(&mut s, &target.node_id, &affected);
+                    clear_scene_preview_sessions_locked(&mut s, &target.node_id, &affected)?;
                 }
                 emit_node_state_event_after_apply(state, &runtime, &target.node_id);
             }
@@ -7462,7 +7573,7 @@ fn home_scene_apply_to_devices(
             Some(&slots),
         );
         if let Ok(mut s) = state.lock() {
-            clear_scene_preview_sessions_locked(&mut s, room_id, members);
+            clear_scene_preview_sessions_locked(&mut s, room_id, members)?;
         }
         emit_node_state_event_after_apply(state, &runtime, room_id);
     }
@@ -7652,7 +7763,7 @@ fn do_native_scene_apply_with_recovery(
                 None,
             );
             if let Ok(mut s) = state.lock() {
-                clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
+                clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids)?;
             }
             if persist_state {
                 persist_rooms(state);
@@ -7785,13 +7896,19 @@ fn record_scene_preview_session(
     };
     // Retire overlaps before applying the replacement. Restore only lamps that
     // the replacement leaves behind. Keep the previous token on failed recovery.
-    for id in overlapping {
-        let mut previous = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("lock"))?
-            .light_scene_previews
-            .remove(&id)
-            .expect("serialized preview");
+    for id in &overlapping {
+        let mut previous = {
+            let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let Some(old) = app.light_scene_previews.get(id) else {
+                continue;
+            };
+            if old.remaining_light_ids.is_subset(&coverage) {
+                continue;
+            }
+            app.light_scene_previews
+                .remove(id)
+                .expect("checked under lock")
+        };
         let common: BTreeSet<_> = previous
             .remaining_light_ids
             .intersection(&coverage)
@@ -7800,24 +7917,26 @@ fn record_scene_preview_session(
         previous
             .remaining_light_ids
             .retain(|node| !common.contains(node));
-        if !previous.remaining_light_ids.is_empty() {
-            if let Err(error) = restore_scene_preview(state, &previous, transaction) {
-                previous.remaining_light_ids.extend(common);
-                // The replacement has not started. Keep the old token responsible
-                // for the common lights as well as any unrestored siblings.
-                previous.failed_restore_routes = None;
-                previous.restore_failed_at_epoch_ms = Some(current_epoch_ms());
-                state
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("lock"))?
-                    .light_scene_previews
-                    .insert(id.clone(), previous);
-                return Err(TrialOutputError {
-                    trial_id: id,
-                    message: error.to_string(),
-                }
-                .into());
+        let restore = restore_scene_preview(state, &previous, transaction);
+        if restore.is_ok() {
+            previous.remaining_light_ids = common;
+        } else {
+            previous.remaining_light_ids.extend(common);
+            previous.failed_restore_routes = None;
+            previous.restore_failed_at_epoch_ms = Some(current_epoch_ms());
+        }
+        // Keep the previous token usable until its successor has a durable
+        // record. A storage failure here must not strand the overlapping lamps.
+        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let saved = update_trial_recovery_locked(&app, &[], Some(&previous));
+        app.light_scene_previews.insert(id.clone(), previous);
+        saved?;
+        if let Err(error) = restore {
+            return Err(TrialOutputError {
+                trial_id: id.clone(),
+                message: error.to_string(),
             }
+            .into());
         }
     }
     let now = current_epoch_ms();
@@ -7831,26 +7950,30 @@ fn record_scene_preview_session(
         .and_then(|snap| snap.profile_settings.mood_scene_id);
     let rhythm_owned_at_start = s.rhythm_automation_allowed_for_node(target_id);
     let breaker_enabled_at_start = s.light_breaker_enabled;
-    s.light_scene_previews.insert(
-        preview_id.to_owned(),
-        LightScenePreviewSession {
-            id: preview_id.to_owned(),
-            scene_id: scene_id.to_owned(),
-            target_node_id: target_id.to_owned(),
-            affected_node_ids: affected.to_vec(),
-            remaining_light_ids: coverage,
-            failed_restore_routes: None,
-            assistant_individual_audition: individual,
-            assistant_time_offset_minutes: None,
-            previous_mood_scene_id,
-            rhythm_owned_at_start,
-            breaker_enabled_at_start,
-            restore_failed_at_epoch_ms: None,
-            draft_scene,
-            started_at_epoch_ms: now,
-            expires_at_epoch_ms: now.saturating_add(duration_ms),
-        },
-    );
+    let session = LightScenePreviewSession {
+        id: preview_id.to_owned(),
+        interrupted: false,
+        scene_id: scene_id.to_owned(),
+        target_node_id: target_id.to_owned(),
+        affected_node_ids: affected.to_vec(),
+        remaining_light_ids: coverage,
+        failed_restore_routes: None,
+        assistant_individual_audition: individual,
+        assistant_time_offset_minutes: None,
+        previous_mood_scene_id,
+        rhythm_owned_at_start,
+        breaker_enabled_at_start,
+        restore_failed_at_epoch_ms: None,
+        draft_scene,
+        started_at_epoch_ms: now,
+        expires_at_epoch_ms: now.saturating_add(duration_ms),
+    };
+    update_trial_recovery_locked(&s, &overlapping, Some(&session))?;
+    for id in &overlapping {
+        s.light_scene_previews.remove(id);
+    }
+    s.light_scene_previews
+        .insert(preview_id.to_owned(), session);
     Ok(())
 }
 
@@ -7907,6 +8030,7 @@ fn apply_scene_preview(
     let transaction = gate
         .lock()
         .map_err(|_| anyhow::anyhow!("scene transaction"))?;
+    load_interrupted_trials(&mut *state.lock().map_err(|_| anyhow::anyhow!("lock"))?)?;
     let preview_id = crate::canonical::identity::generate_uuid_public();
     let target_id = resolve_node_id(state, &request.target_id);
     let apply_request = SceneApplyRequest {
@@ -8027,7 +8151,7 @@ pub(crate) fn do_scene_preview_commit_reviewed(
         let preview = app
             .light_scene_previews
             .get(preview_id)
-            .filter(|p| p.expires_at_epoch_ms > current_epoch_ms())
+            .filter(|p| !p.interrupted && p.expires_at_epoch_ms > current_epoch_ms())
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?;
         if let Some(mut scene) = preview.draft_scene.clone() {
@@ -8102,12 +8226,21 @@ fn finish_scene_preview(
     let transaction = gate
         .lock()
         .map_err(|_| anyhow::anyhow!("scene transaction"))?;
+    finish_scene_preview_in_transaction(state, preview_id, expired_only, &transaction)
+}
+
+fn finish_scene_preview_in_transaction(
+    state: &SharedState,
+    preview_id: &str,
+    expired_only: bool,
+    transaction: &std::sync::MutexGuard<'_, ()>,
+) -> Result<String> {
     let mut preview = {
         let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if expired_only
             && !app.light_scene_previews.get(preview_id).is_some_and(|p| {
                 p.restore_failed_at_epoch_ms.is_none()
-                    && p.expires_at_epoch_ms <= current_epoch_ms()
+                    && (p.interrupted || p.expires_at_epoch_ms <= current_epoch_ms())
             })
         {
             anyhow::bail!("Scene preview is no longer due for expiry");
@@ -8116,7 +8249,7 @@ fn finish_scene_preview(
             .remove(preview_id)
             .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
     };
-    let restoration = match restore_scene_preview(state, &preview, &transaction) {
+    let restoration = match restore_scene_preview(state, &preview, transaction) {
         Ok(status) => status,
         Err(error) => {
             // The scene transaction prevents superseding previews or commits from
@@ -8127,11 +8260,10 @@ fn finish_scene_preview(
             }
             preview.restore_failed_at_epoch_ms = Some(now);
             preview.expires_at_epoch_ms = preview.expires_at_epoch_ms.min(now);
-            state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("lock"))?
-                .light_scene_previews
-                .insert(preview.id.clone(), preview);
+            let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let saved = update_trial_recovery_locked(&app, &[], Some(&preview));
+            app.light_scene_previews.insert(preview.id.clone(), preview);
+            saved?;
             return Err(TrialOutputError {
                 trial_id: preview_id.to_owned(),
                 message: error.to_string(),
@@ -8139,6 +8271,10 @@ fn finish_scene_preview(
             .into());
         }
     };
+    {
+        let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        update_trial_recovery_locked(&app, std::slice::from_ref(&preview.id), None)?;
+    }
     let restored = restoration == "restore_requested";
     if expired_only {
         crate::state::emit_server_event(
@@ -11634,7 +11770,7 @@ fn update_node_mood_scene_brightness(
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene_id.clone(), scene);
-        clear_scene_preview_sessions_locked(&mut s, owner_id, &response.affected_node_ids);
+        clear_scene_preview_sessions_locked(&mut s, owner_id, &response.affected_node_ids)?;
         if persist {
             persist_scenes_locked(&s);
         }
@@ -19886,6 +20022,7 @@ pub(crate) fn reconcile_runtime_from_state_with_group_sync(
         schedule_topology_group_sync_for_integrations(state);
     }
     apply_pending_mode_outputs_if_ready(state);
+    recover_interrupted_light_trials(state)?;
 
     Ok(())
 }

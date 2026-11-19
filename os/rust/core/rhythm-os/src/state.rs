@@ -444,6 +444,8 @@ pub struct AppState {
     pub assistant_approvals: crate::assistant::approvals::PlanStore,
     pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,
     pub assistant_light_plans: std::collections::VecDeque<crate::assistant::lighting::LightPlan>,
+    /// Set once this process has loaded any interrupted light trials.
+    pub trial_recovery_loaded: bool,
     /// Ephemeral light scene previews keyed by preview ID.
     pub light_scene_previews: HashMap<String, crate::scenes::LightScenePreviewSession>,
     /// Serializes stored-scene definition changes with projection, dispatch,
@@ -1087,6 +1089,7 @@ impl Default for AppState {
             assistant_transfers: Default::default(),
             assistant_automation_plans: Default::default(),
             assistant_light_plans: Default::default(),
+            trial_recovery_loaded: false,
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
             motion_scene_transaction_lock: Arc::new(RwLock::new(())),

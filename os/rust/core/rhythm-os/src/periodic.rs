@@ -678,6 +678,9 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 }
 
 fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Duration {
+    if let Err(error) = crate::commands::recover_interrupted_light_trials(&state) {
+        log::warn!(target:"cmd","Unable to load interrupted light trials: {}",error);
+    }
     // Expiry also restores hard-off and scene-owned rooms whose ordinary
     // adaptive ticks may be suppressed. A superseding trial has a different ID.
     let expired_previews: Vec<_> = state
@@ -687,14 +690,28 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             let now = crate::state::current_epoch_ms();
             // A failed undo is retained briefly for an explicit retry. Never
             // resend partially applied commands on every scheduler tick.
-            s.light_scene_previews.retain(|_, preview| {
-                preview
-                    .restore_failed_at_epoch_ms
-                    .is_none_or(|at| now.saturating_sub(at) < 300_000)
-            });
+            let stale: Vec<_> = s
+                .light_scene_previews
+                .values()
+                .filter(|preview| {
+                    preview
+                        .restore_failed_at_epoch_ms
+                        .is_some_and(|at| now.saturating_sub(at) >= 300_000)
+                })
+                .map(|p| p.id.clone())
+                .collect();
+            if crate::commands::update_trial_recovery_locked(&s, &stale, None).is_ok() {
+                for id in stale {
+                    s.light_scene_previews.remove(&id);
+                }
+            }
             s.light_scene_previews
                 .values()
-                .filter(|p| p.restore_failed_at_epoch_ms.is_none() && p.expires_at_epoch_ms <= now)
+                .filter(|p| {
+                    !p.interrupted
+                        && p.restore_failed_at_epoch_ms.is_none()
+                        && p.expires_at_epoch_ms <= now
+                })
                 .map(|p| p.id.clone())
                 .collect()
         })
@@ -3631,6 +3648,7 @@ mod tests {
                 scene_id: "icy-glow".to_string(),
                 target_node_id: "room-a".to_string(),
                 affected_node_ids: vec!["room-a".to_string()],
+                interrupted: false,
                 remaining_light_ids: Default::default(),
                 failed_restore_routes: None,
                 assistant_individual_audition: false,
