@@ -1600,6 +1600,15 @@ async fn ha_rejected_commissioning_stays_unknown_until_explicit_review() {
 
 #[tokio::test]
 async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_results() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        exercise_ha_administration_waits(),
+    )
+    .await
+    .expect("HA administration concurrency scenario deadlocked");
+}
+
+async fn exercise_ha_administration_waits() {
     use futures_util::{SinkExt, StreamExt};
     use rhythm_ha::{matter::HaMatterClient, transport::HaConnectionConfig};
     use tokio_tungstenite::tungstenite::Message;
@@ -1756,7 +1765,7 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 ))
                 .layer(Extension(f.access.clone()));
             let token = phone["token"].as_str().unwrap().to_owned();
-            let operation = tokio::spawn(async move {
+            let mut operation = tokio::spawn(async move {
                 json_request(
                     router,
                     if remove { Method::DELETE } else { Method::POST },
@@ -1766,23 +1775,26 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 )
                 .await
             });
-            tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
-                .await
-                .unwrap()
-                .unwrap();
-            // A real control write completes while HA deliberately stays blocked.
-            let light = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                json_request(
-                    f.mobile(),
-                    Method::PUT,
-                    "/api/light-breaker",
-                    phone["token"].as_str(),
+            tokio::select! {
+                entered = entered_rx => entered.expect("upstream never received the HA command"),
+                result = &mut operation => panic!("HA administration ended before its command: {result:?}"),
+            }
+            // The upstream has received the command and cannot answer until
+            // finish_tx is sent. Check the lock directly, then require the
+            // real write and durable reset to finish ahead of that response.
+            drop(
+                f.access
+                    .mutation_gate
+                    .try_lock()
+                    .expect("HA held the mutation gate during network I/O"),
+            );
+            let light = tokio::select! {
+                response = json_request(
+                    f.mobile(), Method::PUT, "/api/light-breaker", phone["token"].as_str(),
                     json!({"enabled":true}),
-                ),
-            )
-            .await
-            .expect("HA administration blocked an unrelated light write");
+                ) => response,
+                result = &mut operation => panic!("HA administration finished before the light write: {result:?}"),
+            };
             assert_eq!(light.0, StatusCode::OK);
             if reset {
                 let controller = Arc::new(
@@ -1790,23 +1802,16 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 );
                 crate::install_factory_reset_hook(&f.state, f.access.clone(), controller).unwrap();
                 f.state.lock().unwrap().after_factory_reset_fn = None;
-                assert_eq!(
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        json_request(
-                            f.admin(),
-                            Method::POST,
-                            "/api/factory-reset",
-                            Some(ADMIN),
-                            json!({}),
-                        )
-                    )
-                    .await
-                    .expect("reset waited on HA network I/O")
-                    .0,
-                    StatusCode::OK
-                );
+                let reset = tokio::select! {
+                    response = json_request(f.admin(), Method::POST, "/api/factory-reset", Some(ADMIN), json!({})) => response,
+                    result = &mut operation => panic!("HA administration finished before factory reset: {result:?}"),
+                };
+                assert_eq!(reset.0, StatusCode::OK);
             }
+            assert!(
+                !operation.is_finished(),
+                "HA operation completed before upstream release"
+            );
             finish_tx.send(()).unwrap();
             let result = operation.await.unwrap();
             upstream.await.unwrap();
