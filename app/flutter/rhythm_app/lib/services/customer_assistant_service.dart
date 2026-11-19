@@ -313,7 +313,8 @@ class ResidentAssistantDevice {
             assistantPlanId: claim['plan_id'] as String);
         return true;
       case 'enable_remote':
-        final result = await RemoteAccessService.instance.enableForHub(cloudHub,
+        final result = await RemoteAccessService.instance.enableForHub(hub,
+            reviewedCloudHubId: cloudHub.id,
             home: homes.currentHome,
             explicitUserEnable: true,
             autoGrantSupport: false,
@@ -321,8 +322,7 @@ class ResidentAssistantDevice {
             assistantPlanId: claim['plan_id'] as String,
             verifyRemoteRoute: true);
         _matched(claim);
-        return await homes.updateHub(result.updatedHub.copyWith(id: hub.id)) &&
-            result.routeVerified;
+        return await homes.updateHub(result.updatedHub) && result.routeVerified;
       case 'submit_report':
         final reports = DebugBundleSubmissionService.instance;
         final id = claim['plan_id'] as String;

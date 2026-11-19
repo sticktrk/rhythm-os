@@ -27,12 +27,14 @@ class CustomerAssistantScreen extends StatefulWidget {
       continueOnHub;
 
   static Future<void> show(BuildContext context,
-      {List<AssistantMessage>? history}) async {
-    final service = CustomerAssistantService.signedIn();
+      {List<AssistantMessage>? history,
+      CustomerAssistantService? account}) async {
+    final service = account ?? CustomerAssistantService.signedIn();
     if (service == null) {
       SignInModal.show(context);
       return;
     }
+    if (!service.isCurrentAccount()) return;
     final device = ResidentAssistantDevice(context.read<HomeProvider>(),
         context.read<ServerSyncProvider>(), service.isCurrentAccount);
     await Navigator.push<void>(
@@ -45,7 +47,7 @@ class CustomerAssistantScreen extends StatefulWidget {
                   continueOnHub: (context, history) => AssistantChatScreen.show(
                       context,
                       history: history,
-                      accountIsCurrent: service.isCurrentAccount),
+                      account: service),
                 )));
   }
 
@@ -68,7 +70,9 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
   var _items = <CustomerAction>[];
   String? _intent;
   bool _includeBundle = true;
-  bool get _active => mounted && widget.service.isCurrentAccount();
+  bool _accountEnded = false;
+  bool get _active =>
+      mounted && !_accountEnded && widget.service.isCurrentAccount();
   bool _offers(String id) => _contract?.supportsOperation(id) == true;
 
   @override
@@ -77,7 +81,9 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
     _accountSub = widget.service.accountChanges.listen((_) {
       if (!mounted) return;
       if (!widget.service.isCurrentAccount()) {
+        _accountEnded = true;
         _review = null;
+        _text.clear();
         _history.clear();
         final route = ModalRoute.of(context);
         if (route != null && route.isActive) {
@@ -498,7 +504,7 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
                                 child: SelectableText(item.text)))),
               ])),
           if (!_active)
-            const Text('Return to your original account to continue.'),
+            const Text('Account changed. Open a new conversation to continue.'),
           if (_busy) const LinearProgressIndicator(),
           if (_active && _contract == null && !_busy)
             TextButton(

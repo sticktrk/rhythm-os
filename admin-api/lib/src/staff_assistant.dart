@@ -632,14 +632,68 @@ class StaffAssistant {
         final body = await _request(
             s, h, 'POST', 'api/assistant/operations/$tool',
             body: arguments);
-        final result = tool == 'read_lighting_history'
-            ? <String, dynamic>{'status': 'available_in_private_hub_console'}
-            : _project(s, h.id, body) as _Json;
-        final apply = body['operation'],
-            reviewedArgs = asStringMap(body['apply_arguments']);
-        if (reviewedArgs != null &&
-            body['server_instance_id'] == h.serverInstanceId &&
-            catalog[apply]?['tier'] == 'persistent_change') {
+        if (body['status'] == 'handoff') {
+          final details = asStringMap(body['handoff']) ?? body;
+          final steps = op['input_schema']['properties']['step']?['enum'];
+          final step = arguments['step'];
+          final knownStep =
+              step is String && steps is List && steps.contains(step);
+          return {
+            'status': 'handoff',
+            'hub_ref': args['hub_ref'],
+            if (knownStep) 'step': step,
+            'actor': switch (details['actor']) {
+              'resident' || 'owner' || 'ha_administrator' => details['actor'],
+              _ => 'staff',
+            },
+            'surface': switch (details['surface']) {
+              'home_assistant' ||
+              'home_assistant_addon' ||
+              'rhythm_app' ||
+              'integration' ||
+              'integration_settings' =>
+                details['surface'],
+              _ when tool == 'get_handoff' && knownStep =>
+                step.startsWith('ha_') ? 'home_assistant' : 'rhythm_app',
+              _ => 'staff_hub_console',
+            },
+            'instructions':
+                'Continue on the indicated surface for the selected hub. The staff console can display the full handoff instructions.',
+          };
+        }
+        if (tool == 'read_lighting_history') {
+          return {'status': 'available_in_private_hub_console'};
+        }
+        final apply = body['operation'];
+        final reviewedArgs = asStringMap(body['apply_arguments']);
+        if (reviewedArgs == null) return _project(s, h.id, body) as _Json;
+        if (body['server_instance_id'] != h.serverInstanceId) throw _stale;
+
+        // Omit only envelope fields represented by the service's own plan,
+        // hub handle and trusted operation descriptor. Compare the remaining
+        // review recursively so new fields and truncated lists fail closed.
+        final scope = Map.of(body)
+          ..removeWhere((key, value) =>
+              _reviewEnvelope.contains(key) ||
+              key == 'change' && value == tool);
+        final result = _project(s, h.id, scope) as _Json;
+        if (!scope.keys.any((key) => !_reviewMetadata.contains(key)) ||
+            !_completeProjection(scope, result)) {
+          return {
+            'status': 'handoff',
+            'hub_ref': args['hub_ref'],
+            'actor': 'staff',
+            'surface': 'staff_hub_console',
+            'instructions':
+                'Open Hub tools for this hub and run the same preview. Review the full scope there before an administrator confirms the change.',
+            if (body['potentially_affected_rooms'] is List)
+              'affected_room_count':
+                  (body['potentially_affected_rooms'] as List).length,
+            if (body['pauses_adaptation'] is bool)
+              'pauses_adaptation': body['pauses_adaptation'],
+          };
+        }
+        if (catalog[apply]?['tier'] == 'persistent_change') {
           return _preview(s, h, 'hub', {
             'id': apply,
             'arguments': reviewedArgs
@@ -770,14 +824,68 @@ class StaffAssistant {
     }
     if (value is bool || value is num || value == null) return value;
     if (value is String) {
-      if (_symbols.contains(value)) return value;
+      if (_symbols.contains(value) ||
+          (field == 'integrations' && _integrationKinds.contains(value)) ||
+          (field == 'reason' && _updateReasons.contains(value))) {
+        return value;
+      }
       if (_versionFields.contains(field)) return _safeVersion(value);
     }
     return null;
   }
 }
 
+const _integrationKinds = {
+  'hue',
+  'hue_ble',
+  'local_ble',
+  'ha',
+  'homeassistant',
+  'matter',
+  'monster',
+};
+const _updateReasons = {
+  'version_mismatch',
+  'component_drift',
+  'image_base_drift'
+};
+const _reviewEnvelope = {
+  'schema_version',
+  'contract_sha256',
+  'topology_resource_sha256',
+  'server_instance_id',
+  'plan_id',
+  'correlation_id',
+  'operation',
+  'apply_arguments',
+};
+const _reviewMetadata = {
+  'status',
+  'expires_in_seconds',
+  'expires_at_epoch_ms',
+  'requires_confirmation',
+};
+
+bool _completeProjection(Object? source, Object? projected) {
+  if (source is Map) {
+    return projected is Map &&
+        source.entries.every((entry) =>
+            projected.containsKey(entry.key) &&
+            _completeProjection(entry.value, projected[entry.key]));
+  }
+  if (source is List) {
+    if (projected is! List || source.length != projected.length) return false;
+    for (var i = 0; i < source.length; i++) {
+      if (!_completeProjection(source[i], projected[i])) return false;
+    }
+    return true;
+  }
+  // Scalars may be replaced with opaque references. A redacted value is null.
+  return source == null || projected != null;
+}
+
 const _idFields = {
+  'review_revision',
   'id',
   'target_id',
   'bridge_id',
@@ -830,9 +938,12 @@ const _versionFields = {
   'latest_package_version'
 };
 const _publicFields = {
+  ..._reviewMetadata,
+  'integrations',
+  'configured',
+  'needs_reprovision',
   ..._versionFields,
   ..._idFields,
-  'status',
   'scope',
   'state',
   'rooms',
@@ -909,7 +1020,6 @@ const _publicFields = {
   'canonical_power',
   'light_readback',
   'verification',
-  'requires_confirmation',
   'plan',
   'cleared_offsets',
   'before_minutes',

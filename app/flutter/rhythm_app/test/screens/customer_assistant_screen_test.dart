@@ -1,8 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:rhythm_app/screens/hubs/assistant_chat_screen.dart';
 import 'package:rhythm_app/screens/hubs/customer_assistant_screen.dart';
 import 'package:rhythm_app/services/customer_assistant_service.dart';
+
+class _Hub extends Fake implements RhythmServerApi {
+  @override
+  Future<RhythmAssistantContract?> getAssistantContract() async => null;
+}
 
 class _Phone extends Fake implements ResidentAssistantDevice {
   @override
@@ -24,6 +32,49 @@ class _Phone extends Fake implements ResidentAssistantDevice {
 }
 
 void main() {
+  testWidgets('hub-first conversation ends when the signed-in account changes',
+      (tester) async {
+    final changes = StreamController<void>.broadcast();
+    addTearDown(changes.close);
+    var sameAccount = true;
+    final account = CustomerAssistantService((_) async => {}, () => sameAccount,
+        accountChanges: changes.stream);
+    final transcript = <AssistantMessage>[];
+    await tester.pumpWidget(MaterialApp(
+        home: AssistantChatScreen(
+            account: account,
+            api: () => _Hub(),
+            serverId: 'box',
+            isCurrentTarget: () => true,
+            targetChanges: ValueNotifier(true),
+            history: transcript,
+            openSetup: (_) async {},
+            openAccountTools: (context, messages) async {
+              messages.add((text: 'Sample Home membership', resident: false));
+            })));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Account and Home tools'));
+    await tester.enterText(find.byType(TextField), 'Private draft');
+    sameAccount = false;
+    changes.add(null);
+    await tester.pumpAndSettle();
+    expect(transcript, isEmpty);
+    expect(find.text('Private draft'), findsNothing);
+    expect(
+        tester
+            .widget<IconButton>(
+                find.widgetWithIcon(IconButton, Icons.home_outlined))
+            .onPressed,
+        isNull);
+
+    sameAccount = true;
+    changes.add(null);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    expect(find.text('Account changed. Open a new conversation to continue.'),
+        findsOneWidget);
+  });
+
   testWidgets(
       'resident selects an account Box and carries the same conversation into hub tools',
       (tester) async {

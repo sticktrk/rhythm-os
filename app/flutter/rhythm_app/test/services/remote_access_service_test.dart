@@ -172,6 +172,10 @@ void main() {
     test(
         'reviewed remote setup pins the physical Box and does not grant support',
         () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        _optOutPrefsKey: ['hub-1', 'srv-physical', 'local-alias', 'unrelated'],
+      });
+      final prefs = await SharedPreferences.getInstance();
       final calls = <_FakeRemoteAccessApi>[];
       var grants = 0;
       final supabase = _FakeSupabaseClient(responseData: {
@@ -204,16 +208,41 @@ void main() {
       );
       await expectLater(
           service.enableForHub(_serverHub(),
-              expectedServerInstanceId: 'srv-other', autoGrantSupport: false),
+              expectedServerInstanceId: 'srv-other',
+              assistantPlanId: 'mismatch',
+              explicitUserEnable: true,
+              autoGrantSupport: false),
           throwsStateError);
       expect(supabase.functions.invocations, isEmpty);
-      final result = await service.enableForHub(_serverHub(),
+      expect(prefs.getStringList(_optOutPrefsKey),
+          ['hub-1', 'srv-physical', 'local-alias', 'unrelated']);
+      final sharedBox = _serverHub().copyWith(id: 'local-alias');
+      final response = supabase.functions.responseData as Map<String, dynamic>;
+      response['hub_id'] = 'different';
+      await expectLater(
+          service.enableForHub(sharedBox,
+              expectedServerInstanceId: 'srv-physical',
+              reviewedCloudHubId: 'hub-1',
+              assistantPlanId: 'wrong-receipt',
+              explicitUserEnable: true,
+              autoGrantSupport: false),
+          throwsStateError);
+      expect(calls, isEmpty);
+      expect(prefs.getStringList(_optOutPrefsKey),
+          ['hub-1', 'srv-physical', 'local-alias', 'unrelated']);
+
+      response['hub_id'] = 'hub-1';
+      final result = await service.enableForHub(sharedBox,
           expectedServerInstanceId: 'srv-physical',
+          reviewedCloudHubId: 'hub-1',
           assistantPlanId: 'plan',
+          explicitUserEnable: true,
           autoGrantSupport: false,
           verifyRemoteRoute: true);
       expect(result.routeVerified, isTrue);
-      expect(supabase.functions.invocations.single.body, {
+      expect(result.updatedHub.id, sharedBox.id);
+      expect(prefs.getStringList(_optOutPrefsKey), ['unrelated']);
+      expect(supabase.functions.invocations.last.body, {
         'assistant_plan_id': 'plan',
         'home_id': 'home-1',
         'hub_id': 'hub-1',
@@ -222,15 +251,55 @@ void main() {
       });
       expect(calls.where((api) => api.putConfigCalls > 0), hasLength(1));
       expect(grants, 0);
-      (supabase.functions.responseData as Map<String, dynamic>)['hub_id'] =
-          'different';
-      await expectLater(
-          service.enableForHub(_serverHub(),
-              expectedServerInstanceId: 'srv-physical',
-              assistantPlanId: 'second',
-              autoGrantSupport: false),
-          throwsStateError);
-      expect(calls.where((api) => api.putConfigCalls > 0), hasLength(1));
+    });
+
+    test('a newer local disable wins over a reviewed setup on a shared Box',
+        () async {
+      final putStarted = Completer<void>(), finishPut = Completer<void>();
+      final device = _FakeRemoteAccessApi(
+          baseUrl: 'http://fixture.invalid',
+          onPut: () async {
+            putStarted.complete();
+            await finishPut.future;
+          });
+      final supabase = _FakeSupabaseClient(responseData: {
+        'hub_id': 'hub-1',
+        'requested_hub_id': 'hub-1',
+        'server_instance_id': 'srv-physical',
+        'remote_endpoint': {
+          'host': 'fixture.invalid',
+          'port': 443,
+          'useSsl': true
+        },
+        'connector_token': 'fixture-token',
+        'tunnel_id': 'fixture-route',
+        'tunnel_name': 'Fixture',
+      });
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required baseUrl, String? authToken}) => device,
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async =>
+            RhythmHello.fromJson({'server_instance_id': 'srv-physical'}),
+        canUseRemoteAccessOverride: true,
+      );
+      final box = _serverHub(serverInstanceId: 'srv-physical')
+          .copyWith(id: 'local-alias');
+      final enable = service.enableForHub(box,
+          assistantPlanId: 'plan',
+          reviewedCloudHubId: 'hub-1',
+          expectedServerInstanceId: 'srv-physical',
+          explicitUserEnable: true,
+          autoGrantSupport: false);
+      final failed =
+          expectLater(enable, throwsA(isA<RemoteAccessOptedOutException>()));
+      await putStarted.future.timeout(const Duration(seconds: 1));
+      await service.disableForHub(box);
+      finishPut.complete();
+      await failed;
+      expect(device.clearConfigCalls, 2);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(_optOutPrefsKey),
+          ['local-alias', 'srv-physical']);
     });
 
     test('enable falls back to the saved tunnel when LAN is unreachable',

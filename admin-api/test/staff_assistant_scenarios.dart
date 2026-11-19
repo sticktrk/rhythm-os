@@ -92,6 +92,90 @@ void _staffAssistantScenarios() {
       expect(service.legacyRequests, 0);
     });
 
+    test('returns an actionable owner handoff without forwarding hub prose',
+        () async {
+      final listed =
+          await service.call('staff_list_fleet', {'hub_id': 'hub-1'});
+      final hub = listed['hubs'].single['hub_ref'];
+      final handoff = await service.call('staff_call_hub_tool', {
+        'hub_ref': hub,
+        'operation_id': 'get_handoff',
+        'arguments': {'step': 'owner_access'}
+      });
+      expect(handoff['status'], 'handoff');
+      expect(handoff['actor'], 'owner');
+      expect(handoff['step'], 'owner_access');
+      expect(handoff['surface'], 'rhythm_app');
+      expect(handoff['instructions'], contains('hub'));
+      expect(handoff['hub_ref'], hub);
+      expect(handoff.containsKey('plan_id'), isFalse);
+    });
+
+    test('requires private review of portable settings before a staff write',
+        () async {
+      final listed =
+          await service.call('staff_list_fleet', {'hub_id': 'hub-1'});
+      final hub = listed['hubs'].single['hub_ref'];
+      final review = await service.call('staff_call_hub_tool', {
+        'hub_ref': hub,
+        'operation_id': 'plan_profile_bundle_reset',
+        'arguments': {}
+      });
+      expect(review['status'], 'handoff');
+      expect(review['surface'], 'staff_hub_console');
+      expect(review['hub_ref'], hub);
+      expect(review['pauses_adaptation'], true);
+      expect(review['affected_room_count'], 1);
+      expect(review.containsKey('plan_id'), isFalse);
+      expect(review.containsKey('apply_arguments'), isFalse);
+      expect(service.writes, 0);
+    });
+
+    test('hands off any truncated or partly hidden review', () async {
+      final listed =
+          await service.call('staff_list_fleet', {'hub_id': 'hub-1'});
+      final hub = listed['hubs'].single['hub_ref'];
+      for (final extra in [
+        {
+          'proposal': {
+            'custom_parameters': {'private_canary': 'sensitive'}
+          }
+        },
+        {'effect': 'private_canary'},
+        {'after_targets': List.generate(257, (i) => 'room-$i')},
+      ]) {
+        service.extraReview = extra;
+        final result = await service.call('staff_call_hub_tool', {
+          'hub_ref': hub,
+          'operation_id': 'plan_motion_target',
+          'arguments': {
+            'room_id': 'room',
+            'sensor_id': 'sensor',
+            'correlation_id': 'test'
+          }
+        });
+        expect(result['status'], 'handoff');
+        expect(result['surface'], 'staff_hub_console');
+        expect(result.containsKey('plan_id'), isFalse);
+        expect(result.containsKey('apply_arguments'), isFalse);
+      }
+      expect(service.writes, 0);
+    });
+
+    test('preserves a complete reviewed firmware change', () async {
+      final listed =
+          await service.call('staff_list_fleet', {'hub_id': 'hub-1'});
+      final result = await service.call('staff_call_hub_tool', {
+        'hub_ref': listed['hubs'].single['hub_ref'],
+        'operation_id': 'plan_hub_update',
+        'arguments': {}
+      });
+      expect(result['status'], 'review');
+      expect(result['scope']['before']['reason'], 'component_drift');
+      expect(result['scope']['before']['latest_version'], '1.2.4');
+      expect(result['apply_arguments']['plan_id'], startsWith('ref_'));
+    });
+
     test('checks role, actor, live identity and current grant at every call',
         () async {
       final hub =
@@ -218,6 +302,7 @@ class _StaffFixture {
   late final Map<String, dynamic> envelope;
   String role = 'admin', actor = 'staff-user', liveHub = 'srv-test';
   bool granted = true, rowChanged = false;
+  Map<String, dynamic> extraReview = {};
   int deviceCalls = 0, writes = 0, deleted = 0, legacyRequests = 0, uploads = 0;
 
   static Future<_StaffFixture> create() async {
@@ -390,6 +475,11 @@ class _StaffFixture {
       return _jsonResponse({
         'operations': [
           for (final op in operations.where((op) => [
+                'plan_hub_update',
+                'apply_device_plan',
+                'get_handoff',
+                'plan_profile_bundle_reset',
+                'apply_profile_bundle_reset',
                 'get_topology_snapshot',
                 'plan_motion_target',
                 'apply_motion_target',
@@ -415,6 +505,53 @@ class _StaffFixture {
         ]
       });
     }
+    if (path.endsWith('/plan_hub_update')) {
+      return _jsonResponse({
+        'server_instance_id': liveHub,
+        'plan_id': 'native-plan',
+        'status': 'ready',
+        'operation': 'apply_device_plan',
+        'change': 'plan_hub_update',
+        'before': {
+          'current_version': '1.2.3',
+          'latest_version': '1.2.4',
+          'current_package_version': '1.2.3',
+          'latest_package_version': '1.2.4',
+          'current_image_version': null,
+          'latest_image_version': null,
+          'update_available': true,
+          'reason': 'component_drift',
+          'review_revision': 'private_canary'
+        },
+        'requested': {},
+        'requires_confirmation': true,
+        'expires_in_seconds': 300,
+        'apply_arguments': {'plan_id': 'native-plan'}
+      });
+    }
+    if (path.endsWith('/get_handoff')) {
+      return _jsonResponse({
+        'status': 'handoff',
+        'actor': 'owner',
+        'step': 'owner_access',
+        'instructions': 'private_canary',
+        'resume_server_instance_id': liveHub
+      });
+    }
+    if (path.endsWith('/plan_profile_bundle_reset')) {
+      return _jsonResponse({
+        'server_instance_id': liveHub,
+        'plan_id': 'native-plan',
+        'operation': 'apply_profile_bundle_reset',
+        'requires_confirmation': true,
+        'potentially_affected_rooms': [
+          {'id': 'private_canary', 'name': 'Ada Home'}
+        ],
+        'pauses_adaptation': true,
+        'review': {'before': 'private_canary'},
+        'apply_arguments': {'plan_id': 'native-plan'}
+      });
+    }
     if (path.endsWith('/get_topology_snapshot')) {
       return _jsonResponse({
         'nodes': [
@@ -434,8 +571,18 @@ class _StaffFixture {
         'server_instance_id': 'srv-test',
         'operation': 'apply_motion_target',
         'status': 'ready',
+        'plan_id': 'native-plan',
+        'room_id': args['room_id'],
+        'sensor_id': args['sensor_id'],
+        'physical_room_id': null,
+        'control_targets': [],
         'before_targets': [],
         'after_targets': ['private_canary'],
+        'requires_confirmation': true,
+        'correlation_id': args['correlation_id'],
+        'topology_resource_sha256': 'private_canary',
+        'integrations': ['hue'],
+        ...extraReview,
         'apply_arguments': {
           'plan_id': 'native-plan',
           'server_instance_id': 'srv-test'
