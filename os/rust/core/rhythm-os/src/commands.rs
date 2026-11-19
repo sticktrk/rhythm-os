@@ -7914,10 +7914,22 @@ fn finish_scene_preview(
             return Err(error);
         }
     };
+    let restored = restoration == "restore_requested";
+    if expired_only {
+        crate::state::emit_server_event(
+            state,
+            crate::server_event::ServerEvent::ScenePreviewExpired {
+                trial_id: preview.id.clone(),
+                target_id: preview.target_node_id.clone(),
+                restoration: restoration.to_owned(),
+                restored,
+            },
+        );
+    }
     serde_json::to_string(&serde_json::json!({
         "preview_id": preview.id,
         "cancelled": true,
-        "restoration": restoration
+        "restoration": restoration, "restored":restored
     }))
     .map_err(|e| anyhow::anyhow!("serialize scene preview cancel: {}", e))
 }

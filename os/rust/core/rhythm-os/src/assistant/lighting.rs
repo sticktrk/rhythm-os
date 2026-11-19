@@ -871,6 +871,24 @@ fn preview_light_output(
     room: &NodeStateDto,
     args: &Value,
 ) -> Result<String> {
+    if room.disabled || !room.rhythm_enabled {
+        return Err(unavailable(
+            "Enable Rhythm adaptation for this target before starting a reversible trial.",
+        ));
+    }
+    {
+        let app = lock(state)?;
+        if !app.light_breaker_enabled {
+            return Err(unavailable(
+                "Enable the light breaker before starting a trial.",
+            ));
+        }
+        if !app.rhythm_automation_allowed_for_node(&room.id) {
+            return Err(unavailable(
+                "Select Rhythm as the automation owner before starting a trial.",
+            ));
+        }
+    }
     if id == "preview_room_scene_draft" {
         let scene: crate::scenes::SceneDefinition =
             serde_json::from_value(args["scene"].clone())
@@ -993,23 +1011,15 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
     }
     if id == "audition_light" {
         let light_id = string(args, "light_id")?;
-        {
-            let app = lock(state)?;
-            if !app.independently_managed_light(&light_id) {
-                return Err(unavailable("This light has no independently managed output route. Review its ownership or select its room for a room-wide test."));
-            }
-        }
         let started = current_epoch_ms();
         let mut receipt = json!({"light_id":light_id,"server_acknowledged":true,"physical_verification":"see_per_light_readback"});
         match (args.get("output"), args.get("trial_id")) {
             (Some(raw), None) => {
+                if !lock(state)?.independently_managed_light(&light_id) {
+                    return Err(unavailable("This light has no independently managed output route. Review its ownership or select its room for a room-wide test."));
+                }
                 let light = commands::build_node_state(state, &light_id)
                     .map_err(|_| unavailable("The selected light is unavailable."))?;
-                if light.disabled || !light.rhythm_enabled && light.state == RoomModeState::Active {
-                    return Err(unavailable(
-                        "Resume this light's Rhythm behavior before trying a reversible output.",
-                    ));
-                }
                 let output: crate::scenes::LightSceneOutput =
                     serde_json::from_value(raw.clone())
                         .map_err(|_| invalid("Supply a valid light output."))?;
@@ -1052,6 +1062,9 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     commands::do_scene_preview_cancel(state, &trial).map_err(|_| uncertain())?;
                 let result: Value = serde_json::from_str(&raw).map_err(|_| uncertain())?;
                 receipt["status"] = result["restoration"].clone();
+                receipt["restoration"] = result["restoration"].clone();
+                receipt["restored"] = result["restored"].clone();
+                receipt["server_acknowledged"] = result["restored"].clone();
             }
             _ => {
                 return Err(invalid(
@@ -1158,6 +1171,30 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         );
     }
     let room_id = string(args, "room_id")?;
+    if id == "undo_room_trial" {
+        let token = string(args, "trial_id")?;
+        if !lock(state)?
+            .light_scene_previews
+            .get(&token)
+            .is_some_and(|p| p.target_node_id == room_id)
+        {
+            return Err(stale());
+        }
+        let since = current_epoch_ms();
+        let raw = commands::do_scene_preview_cancel(state, &token).map_err(dispatch_error)?;
+        let result: Value = serde_json::from_str(&raw).map_err(|_| uncertain())?;
+        let mut receipt = if result["restoration"] == "skipped_missing_target" {
+            json!({"room_id":room_id})
+        } else {
+            let room = room_state(state, &room_id)?;
+            describe(state, &room, Some(since))?
+        };
+        receipt["restoration"] = result["restoration"].clone();
+        receipt["restored"] = result["restored"].clone();
+        receipt["server_acknowledged"] = result["restored"].clone();
+        receipt["physical_verification"] = json!("see_per_light_readback");
+        return Ok(receipt);
+    }
     if lock(state)?.topology.get(&room_id).is_none() {
         return Err(invalid("Select a discovered Rhythm room."));
     }
@@ -1291,17 +1328,6 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
             let offset = num(args, "offset_minutes", -720., 720.)?;
             commands::do_set_node_time_offset(state, &room_id, offset, true)
                 .map_err(|_| uncertain())?;
-        }
-        "undo_room_trial" => {
-            let token = string(args, "trial_id")?;
-            if !lock(state)?
-                .light_scene_previews
-                .get(&token)
-                .is_some_and(|p| p.target_node_id == room_id)
-            {
-                return Err(stale());
-            }
-            commands::do_scene_preview_cancel(state, &token).map_err(|_| uncertain())?;
         }
         _ => return Err(invalid("Unknown lighting operation.")),
     }

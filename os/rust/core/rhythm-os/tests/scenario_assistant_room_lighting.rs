@@ -298,6 +298,11 @@ async fn ending_a_trial_preserves_room_opt_out_and_child_power() {
         )
         .await;
         assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["restored"], !opt_out);
+        assert_eq!(receipt["server_acknowledged"], !opt_out);
+        if opt_out {
+            assert_eq!(receipt["restoration"], "skipped_paused_target");
+        }
         assert_eq!(
             runtime.engine_node_snapshot(&den).unwrap().rhythm_enabled,
             !opt_out
@@ -305,6 +310,35 @@ async fn ending_a_trial_preserves_room_opt_out_and_child_power() {
         assert!(runtime.engine_node_snapshot(&child).unwrap().hard_off);
         assert_eq!(spy.turn_on_calls().is_empty(), opt_out);
     }
+    spy.reset();
+    for (id, args) in [
+        (
+            "set_room_color",
+            json!({"room_id":den,"red":10,"green":20,"blue":200}),
+        ),
+        (
+            "try_room_offset",
+            json!({"room_id":den,"offset_minutes":-30}),
+        ),
+        (
+            "preview_room_scene",
+            json!({"room_id":den,"scene_id":"test"}),
+        ),
+        ("apply_room_scene", json!({"room_id":den,"scene_id":"test"})),
+        (
+            "preview_room_scene_draft",
+            json!({"room_id":den,"scene":{}}),
+        ),
+        (
+            "audition_light",
+            json!({"light_id":child,"output":{"brightness":30}}),
+        ),
+    ] {
+        let (status, error) = operation(&h, id, args).await;
+        assert_eq!(status, 400, "{id}: {error}");
+        assert_eq!(error["error"]["code"], "lighting_unavailable");
+    }
+    assert!(spy.turn_on_calls().is_empty() && spy.turn_off_calls().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
