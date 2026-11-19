@@ -11,8 +11,11 @@ import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import 'device_pairing_flow.dart';
 import 'assistant_tools_screen.dart';
+import 'customer_assistant_screen.dart';
+import '../../services/customer_assistant_service.dart';
 
 typedef _Args = Map<String, dynamic>;
+typedef AssistantMessage = ({String text, bool resident});
 
 /// A local, guided conversation. Replies, room names, and walk evidence stay
 /// in this screen. Every operation uses the selected hub's authenticated SDK.
@@ -24,15 +27,24 @@ class AssistantChatScreen extends StatefulWidget {
     required this.isCurrentTarget,
     required this.targetChanges,
     required this.openSetup,
+    this.history,
+    this.openAccountTools,
+    this.account,
   });
 
+  final List<AssistantMessage>? history;
+  final CustomerAssistantService? account;
+  final Future<void> Function(BuildContext, List<AssistantMessage>)?
+      openAccountTools;
   final RhythmServerApi Function() api;
   final String serverId;
   final bool Function() isCurrentTarget;
   final Listenable targetChanges;
   final Future<void> Function(BuildContext) openSetup;
 
-  static Future<void> show(BuildContext context) async {
+  static Future<void> show(BuildContext context,
+      {List<AssistantMessage>? history,
+      CustomerAssistantService? account}) async {
     final sync = context.read<ServerSyncProvider>();
     final homes = context.read<HomeProvider>();
     final identity = sync.connectedServerInstanceId;
@@ -40,8 +52,15 @@ class AssistantChatScreen extends StatefulWidget {
     final home = homes.currentHome?.id;
     final direct = DirectHubAccess.capture();
     if (identity == null || !sync.connection.connected) return;
+    final conversationAccount = account ?? CustomerAssistantService.signedIn();
     await Navigator.of(context).push<void>(MaterialPageRoute(
       builder: (_) => AssistantChatScreen(
+        history: history,
+        account: conversationAccount,
+        openAccountTools: history == null && conversationAccount != null
+            ? (ctx, messages) => CustomerAssistantScreen.show(ctx,
+                history: messages, account: conversationAccount)
+            : null,
         api: () => sync.connection.api,
         serverId: identity,
         isCurrentTarget: () =>
@@ -74,7 +93,7 @@ enum _Step {
 }
 
 class _AssistantChatScreenState extends State<AssistantChatScreen> {
-  final _messages = <({String text, bool resident})>[];
+  late final _messages = widget.history ?? <AssistantMessage>[];
   final _text = TextEditingController();
   final _scroll = ScrollController();
   late RhythmAssistantContract _contract;
@@ -92,7 +111,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   bool _phoneSetup = false;
   String _lightOperation = '';
 
-  bool get _active => mounted && widget.isCurrentTarget();
+  final _accountEnded = ValueNotifier(false);
+  StreamSubscription<void>? _accountSub;
+  bool get _active =>
+      mounted &&
+      !_accountEnded.value &&
+      (widget.account?.isCurrentAccount() ?? true) &&
+      widget.isCurrentTarget();
   Iterable<RhythmTopologyNode> get _rooms => _nodes.where((n) => n.isRoom);
   Iterable<RhythmTopologyNode> get _sensors =>
       _nodes.where((n) => n.kind == RhythmNodeKind.motionSensor);
@@ -101,6 +126,14 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   void initState() {
     super.initState();
     widget.targetChanges.addListener(_targetChanged);
+    final account = widget.account;
+    _accountSub = account?.accountChanges.listen((_) {
+      if (!mounted || account.isCurrentAccount()) return;
+      _accountEnded.value = true;
+      _messages.clear();
+      _text.clear();
+      setState(() {});
+    });
     unawaited(_run(_discover));
   }
 
@@ -110,6 +143,8 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
 
   @override
   void dispose() {
+    _accountSub?.cancel();
+    _accountEnded.dispose();
     widget.targetChanges.removeListener(_targetChanged);
     _text.dispose();
     _scroll.dispose();
@@ -755,6 +790,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     };
     return Scaffold(
       appBar: AppBar(title: const Text('Lighting assistant'), actions: [
+        if (widget.openAccountTools != null)
+          IconButton(
+              tooltip: 'Account and Home tools',
+              icon: const Icon(Icons.home_outlined),
+              onPressed: enabled
+                  ? () => widget.openAccountTools!(context, _messages)
+                  : null),
         if (enabled && _step != _Step.retry)
           IconButton(
               icon: const Icon(Icons.build_outlined),
@@ -766,8 +808,9 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                           contract: _contract,
                           call: _call,
                           serverId: widget.serverId,
-                          isCurrentTarget: widget.isCurrentTarget,
-                          targetChanges: widget.targetChanges)))),
+                          isCurrentTarget: () => _active,
+                          targetChanges: Listenable.merge(
+                              [widget.targetChanges, _accountEnded]))))),
       ]),
       body: SafeArea(
           child: Column(children: [
@@ -776,20 +819,23 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                 controller: _scroll,
                 padding: const EdgeInsets.all(16),
                 children: [
-              for (final message in _messages)
-                Align(
-                    alignment: message.resident
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
-                    child: Card(
-                        child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SelectableText(message.text))))
+              if (_active)
+                for (final message in _messages)
+                  Align(
+                      alignment: message.resident
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
+                      child: Card(
+                          child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: SelectableText(message.text))))
             ])),
         if (!_active)
-          const Padding(
-              padding: EdgeInsets.all(12),
-              child: Text('Reconnect to the same hub to continue.')),
+          Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(_accountEnded.value
+                  ? 'Account changed. Open a new conversation to continue.'
+                  : 'Reconnect to the same hub to continue.')),
         if (_busy) const LinearProgressIndicator(),
         if (enabled)
           ConstrainedBox(

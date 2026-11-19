@@ -1,3 +1,4 @@
+import { StaffHubDiagnostics } from './StaffHubDiagnostics';
 import { AssistantTools } from './AssistantTools';
 import { useEffect, useState } from 'react';
 import { SectionCard } from '../../components/ui/SectionCard';
@@ -156,6 +157,7 @@ export default function AssistantPage() {
 
   return <div className="consolePage">
     <header className="pageHeader"><h2>Lighting assistant</h2></header>
+    <StaffHubDiagnostics key={hub.id} hubId={hub.id}/>
     <SectionCard title="Motion walk test" subtitle={hub.name} busy={busy} error={error}
       actions={<button className="consoleButton" disabled={busy} onClick={() => setRefresh(v => v + 1)}>Refresh hub</button>}>
       {identity && has(walk) && <div className="deviceAdminGrid">

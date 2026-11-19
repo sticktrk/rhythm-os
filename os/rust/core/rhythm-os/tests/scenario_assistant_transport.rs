@@ -330,6 +330,18 @@ fn descriptor_projections_and_ledger_are_in_sync() {
             "Regenerate {name} with the assistant_read_policy example."
         );
     }
+    let catalog = include_str!("../../../../../admin-api/lib/src/staff_hub_catalog.dart");
+    let (_, json) = catalog.split_once("r'''").unwrap();
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(json.trim_end().strip_suffix("''';").unwrap()).unwrap();
+    let expected: Vec<_> = registry.iter().map(|op| serde_json::json!({
+        "id": op.id, "tier": op.tier, "description": op.description, "input_schema": op.input_schema,
+        "requires_owner_approval": op.requires_owner_approval, "observes_household": op.observes_household
+    })).collect();
+    assert_eq!(
+        rows, expected,
+        "Regenerate with assistant_read_policy -- --staff-catalog."
+    );
     let ledger = include_str!("../../../../../docs/architecture/assistant-route-coverage.tsv");
     for line in ledger.lines().skip(1) {
         let fields: Vec<_> = line.split('\t').collect();

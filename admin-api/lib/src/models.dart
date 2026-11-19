@@ -10,6 +10,37 @@ class AdminApiException implements Exception {
   String toString() => message;
 }
 
+/// A known hub outcome with staff-authored, model-safe guidance. Do not expose
+/// the free-form message from a device or an upstream HTTP failure.
+class AssistantDeviceRejection extends AdminApiException {
+  const AssistantDeviceRejection._(super.statusCode, super.message);
+  static AssistantDeviceRejection? fromEnvelope(int status, Object? body) {
+    if (body is! Map || body['error'] is! Map) return null;
+    final error = body['error'] as Map;
+    final message = switch (error['code']) {
+      'lighting_unavailable' =>
+        'This adjustment is unavailable in the current room state. Check the mode, profile, scene, and managed lights before choosing another adjustment.',
+      'walk_not_routed' =>
+        'Wait for the command stage of this walk before reporting a visual observation.',
+      'walk_expired' =>
+        'Start a fresh walk on this hub before checking the sensor again.',
+      'unknown_room' ||
+      'not_motion_sensor' =>
+        'Select the intended room and a discovered motion sensor, then start the walk again.',
+      'platform_action_unavailable' =>
+        'This platform does not offer that action. Review the appliance or Home Assistant system settings.',
+      'lighting_outcome_uncertain' ||
+      'device_outcome_uncertain' ||
+      'operation_interrupted' ||
+      'automation_edit_unverified' ||
+      'transfer_not_verified' =>
+        'The hub could not verify the outcome. Reread the affected state and device reports before trying another change.',
+      _ => null,
+    };
+    return message == null ? null : AssistantDeviceRejection._(status, message);
+  }
+}
+
 class AdminUser {
   const AdminUser({
     required this.id,

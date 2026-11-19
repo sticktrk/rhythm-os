@@ -67,3 +67,7 @@ verify_jwt = false
 # Retired endpoint returns 410 without reading or changing subscriptions.
 [functions.set-subscription-tier]
 verify_jwt = false
+
+[functions.customer-assistant]
+# The function checks the resident's token against Auth before every request.
+verify_jwt = false

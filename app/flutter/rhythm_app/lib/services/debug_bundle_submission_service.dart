@@ -400,6 +400,7 @@ class DebugBundleSubmissionService {
     Hub? serverHub,
     String? serverVersion,
     String? serverPlatformContext,
+    bool attachAppLogs = true,
   }) async {
     final auth = AuthService();
     final userId = auth.currentUserId;
@@ -413,16 +414,18 @@ class DebugBundleSubmissionService {
 
     final packageInfo = await _loadPackageInfo();
     _UploadedDebugBundle? uploadedBundle;
-    try {
-      uploadedBundle = await _uploadBundle(
-        client: client,
-        userId: userId,
-        submissionId: submissionId,
-        bundle: await _appOnlyBundle(),
-      );
-    } catch (error) {
-      debugPrint(
-          'DebugBundleSubmissionService: app log upload skipped: $error');
+    if (attachAppLogs) {
+      try {
+        uploadedBundle = await _uploadBundle(
+          client: client,
+          userId: userId,
+          submissionId: submissionId,
+          bundle: await _appOnlyBundle(),
+        );
+      } catch (error) {
+        debugPrint(
+            'DebugBundleSubmissionService: app log upload skipped: $error');
+      }
     }
 
     late final DebugBundleSubmission submission;

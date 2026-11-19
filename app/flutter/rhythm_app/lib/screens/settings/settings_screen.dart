@@ -11,6 +11,7 @@ import '../../providers/home_provider.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
 import '../power_usage_screen.dart';
+import '../hubs/customer_assistant_screen.dart';
 import '../../services/apple_health_service.dart';
 import 'apple_health_screen.dart';
 import 'sections/account_section.dart';
@@ -83,6 +84,12 @@ class SettingsScreen extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (caps.hasAccounts) AccountSection(user: user),
+        if (caps.hasAccounts)
+          SettingsGroup(children: [
+            SettingsRow(icon: Icons.chat_bubble_outline,
+              iconColor: CelestialColors.accentBlue, label: 'Rhythm assistant',
+              onTap: () => CustomerAssistantScreen.show(context)),
+          ]),
         // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
 
         // "Hardware" — the *physical devices* and their connections. The icon,

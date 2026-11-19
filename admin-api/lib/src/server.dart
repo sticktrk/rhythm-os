@@ -11,6 +11,7 @@ import 'fleet_report_service.dart';
 import 'models.dart';
 import 'supabase_rest_client.dart';
 import 'support_service.dart';
+import 'staff_assistant.dart';
 
 class AdminApiServer {
   AdminApiServer({
@@ -25,7 +26,9 @@ class AdminApiServer {
         _support = support,
         _probes = probes,
         _fleetReports = fleetReports,
-        _auditLog = auditLog ?? stdout.writeln;
+        _auditLog = auditLog ?? stdout.writeln,
+        _assistant = StaffAssistant(
+            support, probes, fleetReports, config.supportAccessEncryptionKey);
 
   final void Function(String) _auditLog;
   final AdminApiConfig _config;
@@ -33,12 +36,15 @@ class AdminApiServer {
   final SupportService _support;
   final DeviceProbeService _probes;
   final FleetReportService _fleetReports;
+  final StaffAssistant _assistant;
 
   Handler get handler {
     final router = Router()
       ..get('/health', _health)
       ..get('/ready', _ready)
       ..get('/api/me', _me)
+      ..get('/api/assistant/mcp', _staffAssistant)
+      ..post('/api/assistant/mcp', _staffAssistant)
       ..get('/api/support/snapshot', _supportSnapshot)
       ..get('/api/fleet/hubs', _fleetHubs)
       ..delete('/api/hubs/<hubId>', _deleteHub)
@@ -97,6 +103,35 @@ class AdminApiServer {
           'Customer-granted encrypted remote debugging requires SUPPORT_ACCESS_ENCRYPTION_KEY matching the Supabase support-access-grant function.',
       ],
     }, status: missing.isEmpty ? 200 : 503);
+  }
+
+  Future<Response> _staffAssistant(Request request) async {
+    final origin = request.headers['origin'];
+    if (origin != null && !_config.allowedOrigins.contains(origin)) {
+      return _json({
+        'error': 'Browser origin is not configured for the staff assistant.'
+      }, status: 403);
+    }
+    final version = request.headers['mcp-protocol-version'];
+    if (version != null &&
+        !StaffAssistant.supportedVersions.contains(version)) {
+      return _json({'error': 'Unsupported MCP protocol version.'}, status: 400);
+    }
+    final AdminSession session;
+    try {
+      session = await _requireStaff(request);
+    } on AdminApiException catch (error) {
+      return _json({'error': 'An enabled Rhythm staff session is required.'},
+          status: error.statusCode);
+    } catch (_) {
+      return _json({'error': 'The staff session could not be verified.'},
+          status: 503);
+    }
+    if (request.method != 'POST') {
+      return Response(405, headers: {'Allow': 'POST'});
+    }
+    final body = await _readJsonObject(request, 'Staff assistant request');
+    return _assistant.handle(session, body);
   }
 
   Future<Response> _me(Request request) async {
@@ -366,7 +401,8 @@ class AdminApiServer {
       headers: {
         'Access-Control-Allow-Origin': allowedOrigin,
         'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Authorization,Content-Type',
+        'Access-Control-Allow-Headers':
+            'Authorization,Content-Type,MCP-Protocol-Version',
         'Access-Control-Expose-Headers':
             'Content-Disposition,Content-Length,X-Rhythm-Route,X-Rhythm-Base-Url',
         'Access-Control-Max-Age': '86400',
