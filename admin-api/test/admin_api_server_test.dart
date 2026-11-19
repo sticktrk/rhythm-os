@@ -848,7 +848,9 @@ void main() {
       calls.add(path);
       return _jsonResponse({'status': 'ok'});
     });
-    final server = _testServer(client: client);
+    final audit = <Map<String, dynamic>>[];
+    final server = _testServer(
+        client: client, auditLog: (line) => audit.add(jsonDecode(line)));
     Future<int> proxy(String method, String path,
         {String? expected = 'srv-test'}) async {
       final response = await server.handler(Request('POST',
@@ -878,7 +880,17 @@ void main() {
     expect(await proxy('POST', plan, expected: 'previous-installation'), 409);
     expect(await proxy('POST', plan), 200);
     expect(await proxy('POST', 'api/assistant/plans/device-room-move'), 200);
+    expect(
+        await proxy('POST', 'api/assistant/operations/start_motion_walk'), 403);
+    expect(
+        await proxy('POST', 'api/assistant/operations/read_hub_status'), 200);
+    expect(audit.last, containsPair('status', 200));
+    expect(audit.last,
+        containsPair('operation', 'api/assistant/operations/read_hub_status'));
     expect(await proxy('POST', apply), 403);
+    expect(audit.last, containsPair('status', 403));
+    expect(audit.last, containsPair('operation', apply));
+    expect(jsonEncode(audit), isNot(contains('confirmed')));
     expect(await proxy('POST', 'api/assistant/operations/plan_unknown'), 403);
     role = 'admin';
     liveHub = 'wrong-hub';
@@ -903,6 +915,7 @@ void main() {
       '/$contract',
       '/$plan',
       '/api/assistant/plans/device-room-move',
+      '/api/assistant/operations/read_hub_status',
       '/$apply'
     ]);
   });
@@ -1431,6 +1444,7 @@ void main() {
 AdminApiServer _testServer({
   required http.Client client,
   String? serviceRoleKey = 'service-role-key',
+  void Function(String)? auditLog,
 }) {
   final config = AdminApiConfig(
     supabaseUrl: Uri.parse('https://supabase.test'),
@@ -1456,6 +1470,7 @@ AdminApiServer _testServer({
     httpClient: client,
   );
   return AdminApiServer(
+    auditLog: auditLog,
     config: config,
     supabase: supabase,
     support: support,

@@ -64,3 +64,9 @@ const assistantReadOperations = <String>{
   'sample_room_curve',
   'start_motion_walk',
 };
+const assistantHouseholdOperations = <String>{
+  'export_lighting_settings',
+  'inspect_motion_walk',
+  'read_lighting_history',
+  'start_motion_walk',
+};

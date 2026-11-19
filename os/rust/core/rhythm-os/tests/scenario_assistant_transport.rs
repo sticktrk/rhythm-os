@@ -289,19 +289,41 @@ async fn settings_preview_and_stale_transfer_never_mutate_the_hub() {
 fn descriptor_projections_and_ledger_are_in_sync() {
     let registry = operation_registry();
     let policy = include_str!("../../../../../admin-api/lib/src/assistant_read_operations.dart");
-    let shipped: std::collections::BTreeSet<_> = policy
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix('\'')?.strip_suffix("',"))
-        .collect();
-    let expected = registry
-        .iter()
-        .filter(|op| op.tier == OperationTier::Read)
-        .map(|op| op.id.as_str())
-        .collect();
-    assert_eq!(
-        shipped, expected,
-        "Regenerate the Dart policy with the assistant_read_policy example."
-    );
+    for (name, expected) in [
+        (
+            "assistantReadOperations",
+            registry
+                .iter()
+                .filter(|op| op.tier == OperationTier::Read)
+                .map(|op| op.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+        ),
+        (
+            "assistantHouseholdOperations",
+            registry
+                .iter()
+                .filter(|op| op.observes_household)
+                .map(|op| op.id.as_str())
+                .collect(),
+        ),
+    ] {
+        let header = format!("const {name} = <String>{{");
+        let section = policy
+            .split_once(&header)
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        let shipped: std::collections::BTreeSet<_> = section
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('\'')?.strip_suffix("',"))
+            .collect();
+        assert_eq!(
+            expected, shipped,
+            "Regenerate {name} with the assistant_read_policy example."
+        );
+    }
     let ledger = include_str!("../../../../../docs/architecture/assistant-route-coverage.tsv");
     for line in ledger.lines().skip(1) {
         let fields: Vec<_> = line.split('\t').collect();

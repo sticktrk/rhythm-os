@@ -360,6 +360,10 @@ class DeviceProbeService {
     required String hubId,
     required DeviceAdminProxyRequestDto request,
   }) async {
+    if (request.needsAdmin && !session.staff.isAdmin) {
+      throw const AdminApiException(403,
+          'An enabled admin account is required for this device operation.');
+    }
     final hub = await _loadHub(session: session, hubId: hubId);
     final candidates = _endpointCandidates(hub)
         .where(

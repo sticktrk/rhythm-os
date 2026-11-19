@@ -19,12 +19,15 @@ class AdminApiServer {
     required SupportService support,
     required DeviceProbeService probes,
     required FleetReportService fleetReports,
+    void Function(String)? auditLog,
   })  : _config = config,
         _supabase = supabase,
         _support = support,
         _probes = probes,
-        _fleetReports = fleetReports;
+        _fleetReports = fleetReports,
+        _auditLog = auditLog ?? stdout.writeln;
 
+  final void Function(String) _auditLog;
   final AdminApiConfig _config;
   final SupabaseRestClient _supabase;
   final SupportService _support;
@@ -220,16 +223,14 @@ class AdminApiServer {
     final session = await _requireStaff(request);
     final body = await _readJsonObject(request, 'Device admin request');
     final proxyRequest = DeviceAdminProxyRequestDto.fromJson(body);
-    if (proxyRequest.isMutation && !session.staff.isAdmin) {
-      throw const AdminApiException(
-        403,
-        'An enabled Rhythm admin account is required for device mutations.',
-      );
-    }
-    proxyRequest.validateMutationGuards();
     var status = 500;
     Object? receipt;
     try {
+      if (proxyRequest.needsAdmin && !session.staff.isAdmin) {
+        throw const AdminApiException(403,
+            'An enabled admin account is required for this device operation.');
+      }
+      proxyRequest.validateMutationGuards();
       final result = await _probes.proxyJson(
         session: session,
         hubId: hubId,
@@ -242,22 +243,23 @@ class AdminApiServer {
       status = error.statusCode;
       rethrow;
     } finally {
-      if (proxyRequest.isAssistant && proxyRequest.isMutation) {
+      if (proxyRequest.isAssistant) {
         // Staff audit only. Arguments, household evidence and grant tokens
         // must never enter either audit logs or model telemetry.
-        stdout.writeln(jsonEncode({
-          'event': 'staff_assistant_mutation',
+        _auditLog(jsonEncode({
+          'event': 'staff_assistant_proxy',
           'at': DateTime.now().toUtc().toIso8601String(),
           'actor': session.user.id,
           'hub_id': hubId,
           'operation': proxyRequest.path,
           'request_id': proxyRequest.requestId,
           'status': status,
-          ...await assistantAuditReceipt(
-              hubId: hubId,
-              secret: _config.supportAccessEncryptionKey,
-              arguments: proxyRequest.body,
-              receipt: receipt),
+          if (proxyRequest.isMutation && receipt != null)
+            ...await assistantAuditReceipt(
+                hubId: hubId,
+                secret: _config.supportAccessEncryptionKey,
+                arguments: proxyRequest.body,
+                receipt: receipt),
         }));
       }
     }

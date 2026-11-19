@@ -907,6 +907,10 @@ class DeviceAdminProxyRequestDto {
   final DeviceAdminResourcePreconditionDto? resourcePrecondition;
 
   bool get isAssistant => path.startsWith('api/assistant/');
+  bool get observesHousehold =>
+      path.startsWith('api/assistant/operations/') &&
+      assistantHouseholdOperations.contains(path.split('/').last);
+  bool get needsAdmin => isMutation || observesHousehold;
   bool get isReadOnly =>
       method == 'GET' ||
       (method == 'POST' &&
@@ -1056,6 +1060,8 @@ class DeviceAdminProxyRequestDto {
         path == 'api/auth/agent-tokens' ||
         path.startsWith('api/auth/agent-tokens/') ||
         path == 'api/auth/assistant-clients' ||
+        path == 'api/assistant/approvals' ||
+        path.startsWith('api/assistant/approvals/') ||
         path == 'api/assistant/mcp' ||
         path.startsWith('api/assistant/oauth/')) {
       throw const AdminApiException(
