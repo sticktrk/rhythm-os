@@ -67,6 +67,15 @@ followed by `::` as the test filter.
 cargo test --locked -p rhythm-os --test scenarios scenario_backup_nodes::
 ```
 
+On ARM64 GNU/Linux with 8 GiB of RAM, GNU ld.bfd can still run out of memory
+linking tests in other workspace crates. Install `lld` to run the full suite
+with Cargo's default parallelism and full debug information.
+
+```bash
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C link-arg=-fuse-ld=lld' \
+  cargo test --workspace --all-targets --all-features --locked
+```
+
 Push your branch to your fork and open a public PR. Include the intended
 behavior, focused tests and any outstanding hardware verification. See
 [CONTRIBUTING.md](../CONTRIBUTING.md).
