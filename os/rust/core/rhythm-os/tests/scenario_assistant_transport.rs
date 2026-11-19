@@ -116,6 +116,14 @@ async fn scoped_tools_resources_and_revocation() {
         let tool = tools.iter().find(|t| t["name"] == op.id).unwrap();
         assert_eq!(tool["inputSchema"], op.input_schema);
         assert_eq!(
+            tool["annotations"]["destructiveHint"],
+            op.tier == OperationTier::PersistentChange
+        );
+        assert_eq!(
+            tool["annotations"]["idempotentHint"],
+            op.tier == OperationTier::Read
+        );
+        assert_eq!(
             tool["annotations"]["readOnlyHint"],
             op.tier == OperationTier::Read
         );

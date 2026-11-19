@@ -291,7 +291,8 @@ pub(crate) async fn mcp(
         "tools/list" => {
             json!({"tools":operation_registry().iter().filter(|op|op.tier != OperationTier::OwnerOnly).map(|op|json!({
             "name":op.id,"description":op.description,"inputSchema":op.input_schema,
-            "annotations":{"readOnlyHint":op.tier==OperationTier::Read,"openWorldHint":false},
+            "annotations":{"readOnlyHint":op.tier==OperationTier::Read,"idempotentHint":op.tier==OperationTier::Read,
+                "destructiveHint":op.tier==OperationTier::PersistentChange,"openWorldHint":false},
         })).collect::<Vec<_>>()})
         }
         "tools/call" => {
