@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -139,6 +140,79 @@ void main() {
           'Selected Kitchen Box.',
           'Lighting tools'
         ]));
+  });
+
+  testWidgets(
+      'resident reviews retained device access before removing a member',
+      (tester) async {
+    final phone = _Phone();
+    final steps = <String>[];
+    const review = {
+      'status': 'awaiting_device',
+      'plan_id': 'review-1',
+      'change': 'remove_member',
+      'home_id': 'sample-home',
+      'member_id': 'sample-member',
+      'description':
+          'Remove this member’s account access to the home. Any credential on their phone still gives access to its hub until the owner revokes that credential on the hub.'
+    };
+    final service = CustomerAssistantService((body) async {
+      if (body['contract'] == true) {
+        return {
+          'operations': [
+            {'id': 'list_pending_actions', 'tier': 'read'}
+          ]
+        };
+      }
+      if (body['operation'] == 'list_pending_actions')
+        return {
+          'actions': [review]
+        };
+      if (body['device_claim'] == 'review-1') {
+        steps.add('claim');
+        return {...review, 'status': 'claimed'};
+      }
+      if (body['device_complete'] == 'review-1') {
+        steps.add('complete');
+        return {
+          'status': 'applied',
+          'plan_id': 'review-1',
+          'next_step': {
+            'surface': 'hub_device_credentials',
+            'hub_ids': ['sample-box'],
+            'instructions': 'Review the phone credential on each listed hub.'
+          }
+        };
+      }
+      throw StateError('Unexpected request');
+    }, () => true);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(412, 860);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: CustomerAssistantScreen(
+            service: service, device: phone, continueOnHub: (_, __) async {})));
+    await tester.pumpAndSettle();
+    Future<void> choose(String text) async {
+      final chip = find.widgetWithText(ActionChip, text);
+      await tester.ensureVisible(chip);
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+    }
+
+    await choose('Pending actions');
+    await choose('remove member · awaiting_device');
+    expect(find.textContaining('until the owner revokes'), findsOneWidget);
+    expect(steps, isEmpty);
+    final screenshot =
+        Platform.environment['RHYTHM_MEMBER_APPROVAL_SCREENSHOT'];
+    if (screenshot != null) {
+      await expectLater(find.byType(Overlay), matchesGoldenFile(screenshot));
+    }
+    await choose('Confirm reviewed change');
+    expect(steps, ['claim', 'complete']);
+    expect(find.textContaining('Box · sample-box'), findsOneWidget);
   });
 
   testWidgets(
