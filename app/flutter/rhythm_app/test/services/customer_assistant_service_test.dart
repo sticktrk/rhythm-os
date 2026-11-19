@@ -50,6 +50,48 @@ void main() {
     }
   });
 
+  for (final change in ['remove_member', 'revoke_support']) {
+    test('resident completes $change even when the target Box is offline',
+        () async {
+      final other = Hub.server(
+          id: 'other',
+          name: 'Other',
+          homeId: 'other-home',
+          host: 'fixture.invalid');
+      final device =
+          ResidentAssistantDevice(_Homes(other), _Sync(other), () => true);
+      final review = {
+        'status': 'review',
+        'change': change,
+        'plan_id': 'p',
+        'home_id': 'home'
+      };
+      final calls = <CustomerAction>[];
+      final service = CustomerAssistantService((body) async {
+        calls.add(body);
+        return {
+          ...review,
+          'status': body.containsKey('operation')
+              ? 'awaiting_device'
+              : body.containsKey('device_claim')
+                  ? 'claimed'
+                  : 'applied'
+        };
+      }, () => true);
+      final result = await service.confirm(review,
+          checkDevice: device.check, executeDevice: device.execute);
+      expect(result['status'], 'applied');
+      expect(calls, [
+        {
+          'operation': 'apply_customer_plan',
+          'arguments': {'plan_id': 'p', 'confirmed': true}
+        },
+        {'device_claim': 'p'},
+        {'device_complete': 'p', 'outcome': 'acknowledged'},
+      ]);
+    });
+  }
+
   const review = {
     'status': 'review',
     'plan_id': 'p',

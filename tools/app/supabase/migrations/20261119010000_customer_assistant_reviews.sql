@@ -86,14 +86,14 @@ BEGIN
     END IF;
     IF r.state='cancelled' OR (p_step='confirm' AND p_args->'confirmed' IS DISTINCT FROM 'true'::jsonb)
        OR (p_step='claim' AND r.state <> 'awaiting_device')
-       OR (p_step='complete' AND r.state <> 'claimed') THEN
+       OR (p_step='complete' AND r.state NOT IN ('claimed','applied')) THEN
       RAISE EXCEPTION 'review_state_changed' USING ERRCODE='P0001';
     END IF;
     change_type := r.change;
     current_args := r.arguments;
   END IF;
 
-  IF p_step='confirm' AND r.state='applied' AND change_type='remove_member'
+  IF p_step IN ('confirm','complete') AND r.state='applied' AND change_type='remove_member'
       AND current_args->>'member_id'=p_actor::text THEN
     -- Leaving the home removes the permission that was needed to perform the
     -- action. Its author can still retrieve their own unexpired receipt.
@@ -140,7 +140,7 @@ BEGIN
   IF p_step='plan' THEN
     INSERT INTO public.customer_assistant_reviews (actor_id,change,arguments,revision)
       VALUES(p_actor,change_type,current_args,rev) RETURNING * INTO r;
-  ELSIF p_step='confirm' AND r.state <> 'review' THEN
+  ELSIF (p_step='confirm' AND r.state <> 'review') OR (p_step='complete' AND r.state='applied') THEN
     -- A repeat can retrieve a receipt but never dispatch a second action.
     NULL;
   ELSIF p_step IN ('remote_dispatch','remote_provisioned') THEN
@@ -195,7 +195,18 @@ BEGIN
       RAISE EXCEPTION 'invalid_outcome' USING ERRCODE='22023'; END IF;
     -- A phone can report ambiguity. An acknowledgement must also agree
     -- with the service's durable record for this particular action.
-    IF p_args->>'outcome'='acknowledged' AND (CASE change_type
+    IF p_args->>'outcome'='acknowledged' AND change_type IN ('remove_member','revoke_support') THEN
+      IF r.revision IS DISTINCT FROM rev THEN RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001'; END IF;
+      IF change_type='remove_member' THEN
+        UPDATE public.homes SET member_ids=array_remove(member_ids, member) WHERE id=home.id;
+      ELSE
+        INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
+          ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
+        UPDATE public.hub_support_access_grants SET revoked_at=now(),
+          encrypted_token='{"version":"support_access_token_revoked_v1"}'::jsonb WHERE id=grant_id;
+      END IF;
+      p_args:=jsonb_build_object('outcome','applied');
+    ELSIF p_args->>'outcome'='acknowledged' AND (CASE change_type
       WHEN 'grant_support' THEN r.support_grant_id IS NOT NULL AND r.support_grant_id=grant_id
       WHEN 'enable_remote' THEN hub.remote_access_disabled_at IS NULL AND EXISTS (
         SELECT 1 FROM public.hub_remote_access m WHERE m.hub_id=hub.id AND m.home_id=home.id
@@ -219,14 +230,6 @@ BEGIN
     IF r.revision IS DISTINCT FROM rev THEN RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001'; END IF;
     IF p_step='claim' THEN
       UPDATE public.customer_assistant_reviews SET state='claimed' WHERE id=r.id RETURNING * INTO r;
-    ELSIF change_type='remove_member' THEN
-      UPDATE public.homes SET member_ids=array_remove(member_ids, member) WHERE id=home.id;
-      UPDATE public.customer_assistant_reviews SET state='applied' WHERE id=r.id RETURNING * INTO r;
-    ELSIF change_type='revoke_support' THEN
-      INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
-        ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
-      UPDATE public.hub_support_access_grants SET revoked_at=now(), encrypted_token='{"version":"support_access_token_revoked_v1"}'::jsonb WHERE id=grant_id;
-      UPDATE public.customer_assistant_reviews SET state='applied' WHERE id=r.id RETURNING * INTO r;
     ELSE
       UPDATE public.customer_assistant_reviews SET state='awaiting_device' WHERE id=r.id RETURNING * INTO r;
     END IF;

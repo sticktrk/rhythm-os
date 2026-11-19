@@ -316,6 +316,8 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
     _say(switch ((reviewed['change'], status)) {
       ('enable_remote', 'acknowledged') =>
         'Remote access is enabled. This phone verified that the reviewed Box is reachable remotely.',
+      ('remove_member', 'applied') => 'The member was removed from the Home.',
+      ('revoke_support', 'applied') => 'Support access was revoked.',
       ('grant_support', 'acknowledged') =>
         'Support access was granted. Choose Revoke support to remove it.',
       ('submit_report', 'acknowledged') =>

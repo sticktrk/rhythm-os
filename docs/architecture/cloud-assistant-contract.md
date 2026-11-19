@@ -20,9 +20,9 @@ older hub, or unavailable connection is reported at the step that needs it.
 ## Reviewed changes
 
 Resident previews are bound to a signed-in user, target, installation identity
-and resource revision. Reviews expire after ten minutes. Membership removal and
-support revocation run in a locked database transaction. Confirming a join,
-support grant, report or remote setup returns an awaiting-device receipt.
+and resource revision. Reviews expire after ten minutes. Confirming any proposed change returns an awaiting-device receipt. Membership
+removal and support revocation run in a locked database transaction only after
+the resident approves the reviewed scope in the app.
 The app checks the displayed scope and claims the action once. Device operations validate the live hub before dispatch. Text-only reports can be sent while the hub is offline. Cancelling an unclaimed review discards it across the resident’s devices. A repeated confirmation
 retrieves the current state. A lost response or interrupted device action
 requires checking the result before starting another proposal. Remote provisioning rechecks the reviewed resources under the database locks when it consumes the dispatch permission.

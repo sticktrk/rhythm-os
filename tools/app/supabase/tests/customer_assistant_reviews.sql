@@ -38,8 +38,12 @@ BEGIN
   ASSERT (SELECT member=ANY(member_ids) FROM public.homes WHERE id=home);
   plan:=public.customer_assistant_review(actor,'plan',arguments);
   receipt:=public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
-  ASSERT receipt->>'status'='applied';
+  ASSERT receipt->>'status'='awaiting_device';
+  ASSERT (SELECT member=ANY(member_ids) FROM public.homes WHERE id=home);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
   ASSERT NOT (SELECT member=ANY(member_ids) FROM public.homes WHERE id=home);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
   ASSERT public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid)->>'status'='applied';
 
   arguments:=jsonb_build_object('change','grant_support','home_id',home,'hub_id',hub);
@@ -63,9 +67,17 @@ BEGIN
     RAISE EXCEPTION 'device action dispatched twice' USING ERRCODE='XX000';
   EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
   -- A background sync from another phone cannot undo a reviewed revocation.
+  PERFORM public.store_customer_support_grant(actor,hub,'grant','{"token_id":"active","encrypted_token":{}}');
   arguments:=jsonb_build_object('change','revoke_support','home_id',home,'hub_id',hub);
   receipt:=public.customer_assistant_review(actor,'plan',arguments);
-  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(receipt->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(receipt->>'plan_id')::uuid)->>'status'='awaiting_device';
+  ASSERT EXISTS(SELECT 1 FROM public.hub_support_access_grants WHERE hub_id=hub AND revoked_at IS NULL);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(receipt->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(receipt->>'plan_id')::uuid)->>'status'='applied';
+  ASSERT NOT EXISTS(SELECT 1 FROM public.hub_support_access_grants WHERE hub_id=hub AND revoked_at IS NULL);
+  SELECT revision INTO policy_before FROM public.hub_support_review_policy WHERE hub_id=hub;
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(receipt->>'plan_id')::uuid)->>'status'='applied';
+  ASSERT (SELECT revision=policy_before FROM public.hub_support_review_policy WHERE hub_id=hub);
   BEGIN
     PERFORM public.store_customer_support_grant(actor,hub,'grant','{"token_id":"fixture","encrypted_token":{}}');
     RAISE EXCEPTION 'legacy automatic grant ignored resident choice' USING ERRCODE='XX000';
@@ -91,6 +103,8 @@ BEGIN
   arguments:=jsonb_build_object('change','remove_member','home_id',home,'member_id',other_user);
   plan:=public.customer_assistant_review(other_user,'plan',arguments);
   PERFORM public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(other_user,'claim','{}',(plan->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(other_user,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
   ASSERT NOT (SELECT other_user=ANY(member_ids) FROM public.homes WHERE id=home);
   ASSERT public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid)->>'status'='applied';
 

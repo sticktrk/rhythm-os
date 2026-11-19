@@ -11,6 +11,9 @@ import 'support_access_service.dart';
 
 typedef CustomerAction = Map<String, dynamic>;
 
+bool _accountChange(CustomerAction action) =>
+    action['change'] == 'remove_member' || action['change'] == 'revoke_support';
+
 /// Account-bound transport. Only the claim/complete calls coordinate local
 /// work. The owner key, signed LAN proof and diagnostic bytes stay with the
 /// services that already handle them.
@@ -107,17 +110,16 @@ class CustomerAssistantService {
         'device_complete': id,
         'outcome': acknowledged ? 'acknowledged' : 'uncertain'
       });
-      acknowledged = acknowledged &&
+      if (acknowledged &&
           receipt['plan_id'] == id &&
-          receipt['status'] == 'acknowledged';
+          receipt['status'] ==
+              (_accountChange(review) ? 'applied' : 'acknowledged')) {
+        return {...receipt, 'change': review['change']};
+      }
     } catch (_) {
-      acknowledged = false;
+      // The claim might have completed before the response was lost.
     }
-    return {
-      'status': acknowledged ? 'acknowledged' : 'uncertain',
-      'change': review['change'],
-      'plan_id': id
-    };
+    return {'status': 'uncertain', 'change': review['change'], 'plan_id': id};
   }
 }
 
@@ -260,7 +262,7 @@ class ResidentAssistantDevice {
 
   Future<void> check(CustomerAction review) async {
     if (!isCurrentAccount()) throw StateError('Account changed');
-    if (_textOnlyReport(review)) return;
+    if (_accountChange(review) || _textOnlyReport(review)) return;
     final hub = _matched(review);
     if (review['change'] == 'join_home') {
       final target = await joinTarget();
@@ -280,6 +282,7 @@ class ResidentAssistantDevice {
 
   Future<bool> execute(CustomerAction claim) async {
     if (!isCurrentAccount()) throw StateError('Account changed');
+    if (_accountChange(claim)) return true;
     if (_textOnlyReport(claim)) {
       await DebugBundleSubmissionService.instance.submitTextOnly(
           submissionId: claim['plan_id'] as String,

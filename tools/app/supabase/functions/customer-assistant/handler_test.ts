@@ -13,7 +13,9 @@ function equal(actual: unknown, expected: unknown) {
   }
 }
 
-function fixture() {
+function fixture(
+  reviewResponse?: (step: string, args: Record<string, unknown>) => unknown,
+) {
   let authCalls = 0;
   const seen: string[] = [];
   const backend = {
@@ -47,6 +49,9 @@ function fixture() {
         equal(bearer, "Bearer fixture-service");
         const body = await req.json();
         equal(body.p_actor, actor);
+        if (reviewResponse) {
+          return Response.json(reviewResponse(body.p_step, body.p_args));
+        }
         return Response.json({
           code: "P0001",
           message: "sensitive database context",
@@ -196,4 +201,32 @@ Deno.test("authentication, confirmation, payload bounds and stale receipts fail 
     403,
   );
   equal(authCalls(), 6);
+});
+
+Deno.test("MCP can hand a review to the resident but cannot claim or complete it", async () => {
+  const steps: string[] = [];
+  const { invoke } = fixture((step) => {
+    steps.push(step);
+    return {
+      change: "remove_member",
+      plan_id: hubId,
+      status: "awaiting_device",
+    };
+  });
+  const call = async (name: string, args: object) =>
+    (await invoke({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    })).json();
+  const result = await call("apply_customer_plan", {
+    plan_id: hubId,
+    confirmed: true,
+  });
+  equal(JSON.parse(result.result.content[0].text).status, "awaiting_device");
+  for (const name of ["device_claim", "device_complete"]) {
+    equal((await call(name, { plan_id: hubId })).error.code, -32602);
+  }
+  equal(steps, ["confirm"]);
 });
