@@ -146,7 +146,9 @@ class SupportAccessService {
     if (domain == null ||
         homeId == null ||
         instance == null ||
-        instance.isEmpty) return false;
+        instance.isEmpty) {
+      return false;
+    }
     final uri = Uri.tryParse(baseUrl);
     final host = '${hubId.toLowerCase()}.$domain';
     if (uri == null ||
@@ -156,7 +158,9 @@ class SupportAccessService {
         uri.userInfo.isNotEmpty ||
         uri.hasQuery ||
         uri.hasFragment ||
-        (uri.path.isNotEmpty && uri.path != '/')) return false;
+        (uri.path.isNotEmpty && uri.path != '/')) {
+      return false;
+    }
     final rows = await _supabase.select(
       table: 'hub_remote_access',
       select: 'hostname',
