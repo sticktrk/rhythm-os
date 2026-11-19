@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 82,
+  "head": "ab1763190235a1f9db460da7ba2d13596addfa6f",
+  "uses_mock_data": true,
+  "source_test": "app/flutter/rhythm_app/test/screens/customer_assistant_screen_test.dart",
+  "screenshots": [
+    {
+      "file": "review.png",
+      "caption": "Reviewing a text-only support report before sending"
+    }
+  ]
+}
