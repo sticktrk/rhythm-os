@@ -164,10 +164,11 @@ void main() {
           ]
         };
       }
-      if (body['operation'] == 'list_pending_actions')
+      if (body['operation'] == 'list_pending_actions') {
         return {
           'actions': [review]
         };
+      }
       if (body['device_claim'] == 'review-1') {
         steps.add('claim');
         return {...review, 'status': 'claimed'};
