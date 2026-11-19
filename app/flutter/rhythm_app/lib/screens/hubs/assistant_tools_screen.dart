@@ -37,6 +37,50 @@ class _AssistantToolsState extends State<AssistantToolsScreen> {
         _reviewed = false;
       });
 
+  Iterable<String> _types(Map schema) sync* {
+    final alternatives = schema['anyOf'] ?? schema['oneOf'];
+    if (alternatives is List) {
+      for (final alternative in alternatives.whereType<Map>()) {
+        yield* _types(alternative);
+      }
+    }
+    final type = schema['type'];
+    if (type is String) yield type;
+    if (type is List) yield* type.whereType<String>();
+  }
+
+  dynamic _parseArgument(String key, Map schema, String input) {
+    final options = schema['enum'];
+    if (options is List) {
+      return options.firstWhere((v) => v.toString() == input,
+          orElse: () =>
+              throw FormatException('Choose an advertised value for $key.'));
+    }
+    final types = _types(schema).toSet();
+    if (types.isEmpty || types.length == 1 && types.contains('string')) {
+      return input;
+    }
+    Object? parsed;
+    try {
+      parsed = jsonDecode(input);
+    } on FormatException {
+      if (types.contains('string')) return input;
+      throw FormatException('Enter ${types.join(' or ')} for $key.');
+    }
+    final matches = switch (parsed) {
+      null => types.contains('null'),
+      bool() => types.contains('boolean'),
+      int() => types.contains('integer') || types.contains('number'),
+      double() => types.contains('number'),
+      List() => types.contains('array'),
+      Map() => types.contains('object'),
+      _ => false,
+    };
+    if (matches) return parsed;
+    if (types.contains('string')) return input;
+    throw FormatException('Enter ${types.join(' or ')} for $key.');
+  }
+
   Future<void> _run({bool apply = false}) async {
     if (_busy || !widget.isCurrentTarget() || _selected == null) return;
     final selected = _selected!;
@@ -76,12 +120,7 @@ class _AssistantToolsState extends State<AssistantToolsScreen> {
             }
             continue;
           }
-          arguments[key] = switch (schema['type']) {
-            'integer' => int.parse(text),
-            'number' => double.parse(text),
-            'boolean' || 'object' || 'array' => jsonDecode(text),
-            _ => text,
-          };
+          arguments[key] = _parseArgument(key, schema, text);
         }
       }
       final result = await widget.call(id, arguments);

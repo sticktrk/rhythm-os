@@ -340,6 +340,7 @@ pub(crate) fn review_lighting_settings_import(
     }
     let profile_ids = profiles.keys().cloned().collect();
     let scene_ids = scenes.keys().cloned().collect();
+    let mut node_changes = BTreeMap::new();
     for (source, target) in &mappings {
         let imported = sources[source.as_str()];
         let snapshot = snapshots
@@ -403,6 +404,18 @@ pub(crate) fn review_lighting_settings_import(
             anyhow::ensure!(!app.topology.attached_light_uses_parent_dispatch(target, &app.canonical_registry),
                 "Individual preferences for '{}' are controlled by its room; skip this light and map its room", target);
         }
+        if preview {
+            let preference = |rhythm, disabled, standby, settings: &RoomProfileSettings| {
+                serde_json::json!({
+                    "rhythm_enabled":rhythm, "disabled":disabled, "standby_enabled":standby, "room_profile":settings
+                })
+            };
+            node_changes.insert(target.clone(), serde_json::json!({
+                "source_id":source, "name":snapshot.name,
+                "before":preference(snapshot.rhythm_enabled,snapshot.disabled,snapshot.standby_enabled,&snapshot.profile_settings),
+                "after":preference(imported.rhythm_enabled,imported.disabled,imported.standby_enabled,&profile)
+            }));
+        }
         snapshot.rhythm_enabled = imported.rhythm_enabled;
         snapshot.disabled = imported.disabled;
         snapshot.standby_enabled = imported.standby_enabled;
@@ -457,8 +470,14 @@ pub(crate) fn review_lighting_settings_import(
         check(&app)?;
         if preview {
             return Ok(serde_json::to_string(&serde_json::json!({
-                "mapped_nodes": mappings, "skipped_nodes":incoming.nodes.len()-mappings.len(),
-                "resulting_profiles": profiles, "resulting_scenes":scenes,
+                "mapped_nodes": mappings, "node_changes":node_changes, "skipped_nodes":incoming.nodes.len()-mappings.len(),
+                "resulting_transitions":rhythm_core::normalize_mode_transition_configs(incoming.profile.mode_transitions),
+                "resulting_power_save":incoming.profile.power_save,
+                "resulting_profiles": profiles, "resulting_scenes":scenes.values().filter(|s| !is_native_scene_id(&s.id) && !matches!(s.source, SceneSource::Imported{..})).map(|s| {
+                    let mut scene = s.clone();
+                    scene.extensions.clear();
+                    (scene.id.clone(), scene)
+                }).collect::<BTreeMap<_,_>>(),
                 "resulting_schedules": schedule_configs,"resulting_modes":modes,
                 "pauses_adaptation": app.platform_context == "ha_addon", "warnings":warnings
             }))?);

@@ -141,7 +141,11 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
             description,
             OperationTier::Read,
             schema,
-            json!({"type":"object","required":["plan_id","before","proposal","affected_rooms"]}),
+            if kind == "update_settings" {
+                json!({"type":"object","oneOf":[{"required":["plan_id","before","proposal","affected_rooms"]},{"required":["status","actor","instructions","server_instance_id"]}]})
+            } else {
+                json!({"type":"object","required":["plan_id","before","proposal","affected_rooms"]})
+            },
         ));
         out.push(operation(
             &format!("apply_{kind}_edit"),
@@ -304,11 +308,22 @@ impl Edit {
                     schedule,
                 }
             }
-            "schedule_override" => Self::ScheduleOverride {
-                node: str_arg(args, "node_id")?,
-                schedule: str_arg(args, "schedule_id")?,
-                value: parse(&args["override"])?,
-            },
+            "schedule_override" => {
+                let schedule = str_arg(args, "schedule_id")?;
+                let base = app
+                    .light_schedules
+                    .get(&schedule)
+                    .ok_or_else(|| invalid("Select an existing schedule."))?;
+                let value: Option<LightScheduleOverride> = parse(&args["override"])?;
+                if let Some(update) = &value {
+                    update.apply_to(base).map_err(invalid)?;
+                }
+                Self::ScheduleOverride {
+                    node: str_arg(args, "node_id")?,
+                    schedule,
+                    value,
+                }
+            }
             "node_preferences" => {
                 let profile = args.get("profile_settings").cloned();
                 if let Some(p) = profile.as_ref() {
@@ -351,15 +366,10 @@ impl Edit {
                         .into(),
                 )
             }
-            "update_settings" => {
-                if app.platform_context == "ha_addon" {
-                    return Err(invalid("Review add-on updates in Home Assistant."));
-                }
-                Self::Updates {
-                    auto: parse(&args["auto_update"])?,
-                    channel: parse(&args["update_channel"])?,
-                }
-            }
+            "update_settings" => Self::Updates {
+                auto: parse(&args["auto_update"])?,
+                channel: parse(&args["update_channel"])?,
+            },
             _ => return Err(invalid("Unknown lighting automation.")),
         };
         Ok(edit)
@@ -378,7 +388,7 @@ impl Edit {
             let runtime = app
                 .hub_runtime()
                 .ok_or_else(|| invalid("Lighting runtime is offline."))?;
-            if !app.topology.has_public_node(id) || !app.rhythm_automation_allowed_for_node(id) {
+            if !app.topology.has_public_node(id) || !app.assistant_lighting_target_allowed(id) {
                 return Err(invalid("Select a Rhythm-managed light or room."));
             }
             let n = runtime
@@ -428,6 +438,17 @@ impl Edit {
     }
     fn evidence(&self, app: &AppState) -> Result<Value> {
         let current = self.snapshot(app)?;
+        let schedule = match self {
+            Self::Assignment { schedule, .. } => schedule.as_ref(),
+            Self::ScheduleOverride { schedule, .. } => Some(schedule),
+            _ => None,
+        };
+        if let Some(id) = schedule {
+            let selected = app.light_schedules.get(id).ok_or_else(stale)?;
+            return Ok(
+                json!({"current":current,"schedule":selected,"modes":app.mode_configs(),"room_ids":self.affected_rooms(app)}),
+            );
+        }
         if let Self::KeepScene {
             room_id,
             preview_id,
@@ -442,7 +463,7 @@ impl Edit {
                         && p.expires_at_epoch_ms > crate::state::current_epoch_ms()
                 })
                 .ok_or_else(stale)?;
-            if !app.rhythm_automation_allowed_for_node(room_id) {
+            if !app.assistant_lighting_target_allowed(room_id) {
                 return Err(stale());
             }
             return Ok(
@@ -457,7 +478,7 @@ impl Edit {
                         if node.kind.is_light_addressable()
                             && !crate::topology::is_internal_light_node_id(&node.id) =>
                     {
-                        bindings.insert(node.id.clone(),json!({"parent_id":node.parent_id,"disabled":node.disabled,"managed":app.rhythm_automation_allowed_for_node(&node.id) && app.canonical_registry.get(&node.id).is_none_or(|light|app.ha_selection_allows_light(light)),"previous_scene":node.profile_settings.mood_scene_id,"mood_active":node.mood_active}));
+                        bindings.insert(node.id.clone(),json!({"parent_id":node.parent_id,"disabled":node.disabled,"managed":app.assistant_lighting_target_allowed(&node.id),"previous_scene":node.profile_settings.mood_scene_id,"mood_active":node.mood_active}));
                     }
                     Self::Scene { id, .. }
                         if node.profile_settings.mood_scene_id.as_ref() == Some(id) =>
@@ -535,11 +556,12 @@ impl Edit {
                 if let Some(schedule) = definition {
                     updated.push(schedule.clone());
                 }
-                commands::do_light_schedules_set_guarded_with_correlation(
+                commands::do_light_schedules_set_reviewed(
                     state,
                     updated,
                     before,
                     Some(token.into()),
+                    check,
                 )?
             }
             Self::Modes(modes) => commands::do_settings_set_internal_reviewed(
@@ -626,7 +648,7 @@ impl Edit {
                         .profile_settings
                         .light_schedule_overrides
                 };
-                commands::do_light_schedule_override_set(
+                commands::do_light_schedule_override_set_reviewed(
                     state,
                     node,
                     schedule,
@@ -634,6 +656,8 @@ impl Edit {
                     Some(expected),
                     Some(token.into()),
                     true,
+                    chrono::Utc::now().naive_utc(),
+                    check,
                 )?
             }
             Self::Preferences {
@@ -671,6 +695,12 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
     let mut app = state
         .lock()
         .map_err(|_| Error::internal("state_unavailable", "Hub state unavailable."))?;
+    if id == "plan_update_settings_edit" && app.platform_context == "ha_addon" {
+        return Ok(
+            json!({"status":"handoff","actor":"ha_administrator","surface":"home_assistant",
+            "server_instance_id":app.server_instance_id,"instructions":"Review automatic updates and versions in Home Assistant Settings > Apps > Rhythm.","resume_operation":"read_automation_settings"}),
+        );
+    }
     if id == "read_automation_settings" {
         return Ok(settings(&app));
     }

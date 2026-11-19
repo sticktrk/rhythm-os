@@ -27,6 +27,10 @@ pub struct SharedRoute {
 /// - Platform-specific OTA: `/api/ota/version`, `/api/ota/upload`, `/api/ota/capabilities`, `/api/ota/status`, `/api/ota/check`, `/api/ota/update`
 pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     SharedRoute {
+        path: "/.well-known/oauth-authorization-server/api/assistant/mcp",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/.well-known/oauth-authorization-server",
         methods: &["GET"],
     },

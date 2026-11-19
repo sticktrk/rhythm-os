@@ -56,6 +56,7 @@ struct DevicePlan {
     created: Instant,
     change: Change,
     before: Value,
+    bridge_credentials_revision: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +94,20 @@ enum Change {
     },
     Update(Value),
     Restart,
+}
+
+fn bridge_credentials_revision(s: &AppState, change: &Change) -> Option<String> {
+    let key = match change {
+        Change::PairBridge { bridge, .. }
+        | Change::HueAuthority { bridge, .. }
+        | Change::RetryBridge(bridge) => bridge,
+        _ => return None,
+    };
+    // Keep the credential fingerprint within this transient plan. Never
+    // serialize either credentials or their fingerprint in an agent response.
+    s.hub_credentials
+        .get(key)
+        .map(|cred| canonical_json_sha256(&json!(cred)))
 }
 
 fn invalid(message: &str) -> Error {
@@ -274,10 +289,12 @@ fn ha_area(s: &AppState) -> Value {
 }
 fn setup(s: &AppState, step: &str) -> Result<Value> {
     Ok(match step {
-        "ha_matter"=>handoff(s,"home_assistant","owner","Open Matter in the add-on panel to review HA-owned devices, scan a setup code, share a device or confirm removal."),
+        "ha_matter" if s.platform_context == "ha_addon"=>handoff(s,"home_assistant","owner","Open Matter in the add-on panel to review HA-owned devices, scan a setup code, share a device or confirm removal."),
+        "ha_matter"=>handoff(s,"rhythm_app","owner","Open this hub in the Rhythm app on the owner phone. Review its available pairing methods or the existing device in Add Device or device settings."),
         "pair" if s.platform_context=="ha_addon"=>handoff(s,"home_assistant","resident","Open Add Device on your phone for this hub, scan the code and complete the Home Assistant pairing step."),
         "pair"=>handoff(s,"rhythm_app","resident","Open Add Device on the phone for this hub. Scan the pairing code or use the device's nearby pairing flow, then refresh discovery here."),
-        "mobile_enrollment"=>handoff(s,"home_assistant_addon","owner","In the add-on panel, open Connect mobile app and scan the owner-issued enrollment code with the phone."),
+        "mobile_enrollment" if s.platform_context == "ha_addon"=>handoff(s,"home_assistant_addon","owner","In the add-on panel, open Connect mobile app and scan the owner-issued enrollment code with the phone."),
+        "mobile_enrollment"=>handoff(s,"rhythm_app","owner","Open the Rhythm app on the owner phone and select this Light Box to complete hub setup."),
         "bridge_authority" if s.platform_context=="ha_addon" => ha_area(s),
         "bridge_authority"=>json!({"status":"ready","server_instance_id":s.server_instance_id,"next_operation":"read_integrations","instructions":"Select the Hue bridge and review every room owner with plan_hue_authority."}),
         "bridge_credentials"=>handoff(s,"rhythm_app","owner","Open the hub's integration settings to connect or disconnect a bridge and authorize its credentials."),
@@ -292,7 +309,13 @@ fn room(s: &AppState, id: &str) -> Result<Value> {
         .get(id)
         .ok_or_else(|| invalid("Select an existing Rhythm room."))?;
     let devices: Vec<_> = r.devices.iter().map(|d| &d.device_id).collect();
-    let bindings:Vec<_>=r.hub_room_bindings.iter().map(|b|json!({"bridge_id":bridge_id(&b.hub_key),"integration":b.hub_key.hub_type.as_str(),"room_id":b.hub_room_id})).collect();
+    let bindings: Vec<_> = r.hub_room_bindings.iter().map(|b| {
+        let members: BTreeSet<_> = b.light_device_ids.iter().collect();
+        json!({"bridge_id":bridge_id(&b.hub_key),"integration":b.hub_key.hub_type.as_str(),"room_id":b.hub_room_id,
+            "rhythm_managed":s.topology.room_binding_is_managed(id,&b.hub_key,&b.hub_room_id),
+            "native_light_count":members.len(),"membership_revision":canonical_json_sha256(&json!([b.control_id,members])),
+            "topology_sync_enabled":s.topology.external_room_topology_sync_is_enabled(&b.hub_key)})
+    }).collect();
     Ok(json!({"room_id":r.id,"name":r.name,"devices":devices,"integration_rooms":bindings}))
 }
 fn endpoint_id(ep: &crate::canonical::identity::IntegrationEndpoint) -> String {
@@ -335,6 +358,7 @@ fn platform_handoff(s: &AppState, op: &str) -> Option<Value> {
         "plan_create_room"|"plan_rename_room"|"plan_merge_rooms"|"plan_delete_room"|"plan_rename_device"|"plan_remove_device"|"plan_preferred_endpoint"|"plan_unassign_device"|"plan_hue_authority" if addon =>Some(ha_area(s)),
         "plan_bridge_pairing"|"plan_nearby_hue_lights" if addon=>setup(s,"pair").ok(),
         "read_appliance_update_status"|"check_hub_update"|"plan_hub_restart"|"plan_hub_update" if addon=>Some(handoff(s,"home_assistant","ha_administrator","Open Settings > Apps > Rhythm to review the update or restart the add-on.")),
+        "read_appliance_update_status"|"check_hub_update"|"plan_hub_restart"|"plan_hub_update" if s.assistant_devices.platform.is_none()=>Some(handoff(s,"host","owner","Use this installation's host service manager to inspect its version, update or restart it.")),
         "read_managed_ha_lights"|"plan_managed_ha_lights" if !addon=>Some(handoff(s,"home_assistant","ha_administrator","Light delegation is managed on the Home Assistant add-on. Select that hub to review its lights.")),
         _=>None
     }
@@ -540,6 +564,7 @@ async fn preview(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
     let plan_id = uuid::Uuid::new_v4().to_string();
     let hub = s.server_instance_id.clone();
     let result = json!({"status":"ready","server_instance_id":hub,"plan_id":plan_id,"operation":"apply_device_plan","change":id,"before":before,"requested":args,"requires_confirmation":true,"expires_in_seconds":300});
+    let bridge_credentials_revision = bridge_credentials_revision(&s, &change);
     let plans = &mut s.assistant_devices.plans;
     plans.retain(|p| p.created.elapsed() < Duration::from_secs(300));
     if plans.len() >= 64 {
@@ -551,6 +576,7 @@ async fn preview(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         created: Instant::now(),
         change,
         before,
+        bridge_credentials_revision,
     });
     Ok(result)
 }
@@ -566,7 +592,21 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
         Change::CreateRoom(_) => {
             Ok(json!({"rooms":s.topology.room_count(),"effect":"create_empty_room"}))
         }
-        Change::RenameRoom(id, _) | Change::DeleteRoom(id) => room(s, id),
+        Change::RenameRoom(id, _) => room(s, id),
+        Change::DeleteRoom(id) => {
+            let mut review = room(s, id)?;
+            let source_rooms: Vec<_> = s.topology.get(id).unwrap().hub_room_bindings.iter().filter(|binding| {
+                !s.topology.room_binding_is_managed(id, &binding.hub_key, &binding.hub_room_id)
+            }).map(|binding| json!({"bridge_id":bridge_id(&binding.hub_key),"native_room_id":binding.hub_room_id})).collect();
+            if source_rooms.len() > 1
+                || (!source_rooms.is_empty() && s.delete_source_room_fn.is_none())
+            {
+                return Ok(handoff(s,"integration_settings","owner","Review this source-backed room in the integration that owns it. Refresh the selected hub after making a change."));
+            }
+            review["native_rooms_to_delete"] = json!(source_rooms);
+            review["effect"] = json!("remove_room_and_detach_devices");
+            Ok(review)
+        }
         Change::MergeRooms(a, b) => {
             if a == b {
                 return Err(invalid("Select two different rooms."));
@@ -645,6 +685,26 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
             if matches!(kind, Some(HubType::HA | "homeassistant")) {
                 return Ok(handoff(s,"home_assistant","ha_administrator","Review the device and its integration in Home Assistant under Settings > Devices & services."));
             }
+            if let Some(selected) = ep.filter(|ep| ep.hub_key.hub_type.as_str() == HubType::MATTER)
+            {
+                let Some((node, _)) = pairing::parse_matter_device_id(&selected.native_id) else {
+                    return Ok(handoff(s,"rhythm_app","owner","Open the selected Matter device in the owner app to verify its node before removal."));
+                };
+                let siblings = s
+                    .canonical_registry
+                    .all_devices_including_removed()
+                    .filter(|d| !d.is_removed())
+                    .flat_map(|d| &d.endpoints)
+                    .any(|other| {
+                        other.hub_key == selected.hub_key
+                            && other.native_id != selected.native_id
+                            && pairing::parse_matter_device_id(&other.native_id)
+                                .is_some_and(|(id, _)| id == node)
+                    });
+                if siblings {
+                    return Ok(handoff(s,"rhythm_app","owner","This Matter node has multiple endpoints. Removing it decommissions the entire node. Review all of its devices on the owner phone."));
+                }
+            }
             let native = matches!(
                 kind,
                 Some(HubType::MATTER | HubType::HUE | HubType::HUE_BLE | HubType::LOCAL_BLE)
@@ -666,7 +726,9 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
             if !unpairable && (native || d.endpoints.len() > 1) {
                 return Ok(handoff(s,"integration_settings","owner","Review this endpoint in its integration settings. Refresh the hub after removing it there."));
             }
-            info["effect"] = json!(if unpairable {
+            info["effect"] = json!(if unpairable && kind == Some(HubType::MATTER) {
+                "decommission_matter_node"
+            } else if unpairable {
                 "unpair_endpoint"
             } else {
                 "forget_rhythm_record"
@@ -686,8 +748,17 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
                     "Select rooms and a source under Rhythm automation authority.",
                 ));
             }
+            let after: Vec<_> = if rooms.is_empty() {
+                s.topology
+                    .device_parent_room_id(id)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            } else {
+                rooms.clone()
+            };
             Ok(
-                json!({"source":source,"kind":kind,"current_targets":s.topology.effective_control_targets(id,&kind),"requested_rooms":rooms.iter().map(|id|room(s,id)).collect::<Result<Vec<_>>>()?}),
+                json!({"source":source,"kind":kind,"current_targets":s.topology.effective_control_targets(id,&kind),"effective_after_targets":after,"requested_rooms":rooms.iter().map(|id|room(s,id)).collect::<Result<Vec<_>>>()?}),
             )
         }
         Change::Triage {
@@ -743,7 +814,15 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
             {
                 return Ok(ha_area(s));
             }
-            Ok(review_entry(e))
+            let mut reviewed = review_entry(e);
+            if let Some(id) = target {
+                reviewed["selected_target"] = if decision == "bind" {
+                    room(s, id)?
+                } else {
+                    device(s, id)?
+                };
+            }
+            Ok(reviewed)
         }
         Change::PairNearbyHue => {
             let supported = s.hub_capabilities.iter().any(|cap| {
@@ -827,6 +906,14 @@ fn result_body(response: handlers::ApiResponse) -> Result<Value> {
     }
 }
 
+fn verify_readback(matches: bool) -> Result<()> {
+    if matches {
+        Ok(())
+    } else {
+        Err(changed("The hub's current state differs from the reviewed change. Reread the affected resource before retrying."))
+    }
+}
+
 async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
     let id = field(args, "plan_id")?;
     let hub = field(args, "server_instance_id")?;
@@ -852,6 +939,7 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
     let check = |s: &AppState| -> anyhow::Result<()> {
         anyhow::ensure!(
             s.server_instance_id == plan.hub
+                && bridge_credentials_revision(s, &plan.change) == plan.bridge_credentials_revision
                 && review(s, &plan.change).ok().as_ref() == Some(&plan.before),
             "device_plan_changed"
         );
@@ -872,26 +960,61 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
         Change::CreateRoom(name) => {
             let output = commands::do_topology_create_room_reviewed(state, name, &check)
                 .map_err(map_write)?;
-            serde_json::from_str(&output).map_err(|_| changed("Refresh the list of rooms."))?
+            let created: Value =
+                serde_json::from_str(&output).map_err(|_| changed("Refresh the list of rooms."))?;
+            let id = created["id"]
+                .as_str()
+                .ok_or_else(|| changed("Refresh the list of rooms."))?;
+            let s = lock(state)?;
+            let actual = room(&s, id).map_err(|_| changed("Refresh the list of rooms."))?;
+            verify_readback(actual["name"] == *name)?;
+            json!({"id":id,"name":actual["name"],"room":actual,"canonical_readback_verified":true})
         }
         Change::RenameRoom(room, name) => {
             commands::do_topology_rename_room_reviewed(state, room, name, &check)
                 .map_err(map_write)?;
-            json!({"room_id":room})
+            let s = lock(state)?;
+            let actual = self::room(&s, room).map_err(|_| changed("Refresh the room."))?;
+            verify_readback(actual["name"] == *name)?;
+            json!({"room_id":room,"room":actual,"canonical_readback_verified":true})
         }
         Change::DeleteRoom(room) => {
             commands::do_topology_delete_room_reviewed(state, room, &check).map_err(map_write)?;
-            json!({"removed_room_id":room})
+            let s = lock(state)?;
+            let members = plan.before["devices"].as_array().ok_or_else(stale)?;
+            verify_readback(
+                s.topology.get(room).is_none()
+                    && members
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .all(|id| s.topology.device_parent_room_id(id).is_none()),
+            )?;
+            json!({"removed_room_id":room,"detached_device_ids":members,"canonical_readback_verified":true})
         }
         Change::MergeRooms(source, target) => {
             commands::do_topology_merge_rooms_reviewed(state, target, source, &check)
                 .map_err(map_write)?;
-            json!({"target_room_id":target})
+            let s = lock(state)?;
+            let members = plan.before["source"]["devices"]
+                .as_array()
+                .ok_or_else(stale)?;
+            verify_readback(
+                s.topology.get(source).is_none()
+                    && members
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .all(|id| s.topology.device_parent_room_id(id) == Some(target.as_str())),
+            )?;
+            let actual = room(&s, target).map_err(|_| changed("Refresh the merged room."))?;
+            json!({"removed_room_id":source,"target_room_id":target,"target":actual,"canonical_readback_verified":true})
         }
         Change::RenameDevice(device, name) => {
             commands::do_canonical_rename_device_reviewed(state, device, name, &check)
                 .map_err(map_write)?;
-            json!({"device_id":device})
+            let s = lock(state)?;
+            let actual = self::device(&s, device).map_err(|_| changed("Refresh the device."))?;
+            verify_readback(actual["name"] == name.trim())?;
+            json!({"device_id":device,"device":actual,"canonical_readback_verified":true})
         }
         Change::ControlTargets(source, rooms) => {
             let gate = lock(state)?.external_topology_transaction_lock.clone();
@@ -901,7 +1024,9 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
             let kind = control_kind(&s, source)?;
             commands::set_topology_control_targets_locked(&mut s, source, kind.clone(), rooms)
                 .map_err(map_write)?;
-            json!({"device_id":source,"control_targets":s.topology.effective_control_targets(source,&kind)})
+            let actual = s.topology.effective_control_targets(source, &kind);
+            verify_readback(json!(actual) == plan.before["effective_after_targets"])?;
+            json!({"device_id":source,"control_targets":actual,"canonical_readback_verified":true})
         }
         Change::UnassignDevice(id) => {
             let guard = commands::TopologyAssignmentPrecondition {
@@ -959,7 +1084,7 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
             rooms,
             sync,
         } => {
-            let result = commands::do_hue_authority_update(
+            let result = commands::do_hue_authority_update_reviewed(
                 state,
                 crate::api_types::HueAuthorityUpdateRequest {
                     address: bridge.address.clone(),
@@ -968,6 +1093,7 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
                     topology_sync_enabled: Some(*sync),
                     rooms: rooms.clone(),
                 },
+                &check,
             )
             .map_err(|e| {
                 if e.to_string().contains("changed while") {
@@ -985,7 +1111,11 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
         }
         Change::RemoveDevice(id, _) if plan.before["effect"] == "forget_rhythm_record" => {
             commands::do_active_device_forget_reviewed(state, id, &check).map_err(map_write)?;
-            json!({"removed_device_id":id,"scope":"rhythm_record"})
+            let s = lock(state)?;
+            verify_readback(
+                s.canonical_registry.get(id).is_none() && !s.topology.has_public_node(id),
+            )?;
+            json!({"removed_device_id":id,"scope":"rhythm_record","canonical_readback_verified":true})
         }
         Change::RemoveDevice(id, selected) => {
             let endpoint = {
@@ -1013,7 +1143,14 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
                     "Removal was not verified. Reread the integration before retrying.",
                 ));
             }
-            json!({"device_id":id,"scope":result["completion_scope"],"integration_status":result["status"]})
+            let s = lock(state)?;
+            let remaining = s.canonical_registry.get(id).filter(|d| !d.is_removed());
+            verify_readback(remaining.is_none_or(|d| {
+                !d.endpoints.iter().any(|other| {
+                    other.hub_key == endpoint.hub_key && other.native_id == endpoint.native_id
+                })
+            }))?;
+            json!({"device_id":id,"scope":result["completion_scope"],"integration_status":result["status"],"device_still_present":remaining.is_some(),"canonical_readback_verified":true})
         }
         Change::Triage {
             entry,
@@ -1044,15 +1181,38 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
                 }
                 "snooze" | "still_installed" | "select_removal" => {
                     let action = match decision.as_str() {
-                        "snooze" => commands::do_device_attention_snooze,
-                        "select_removal" => commands::do_device_attention_removal_selected,
-                        _ => commands::do_device_attention_still_installed,
+                        "snooze" => commands::do_device_attention_snooze_reviewed,
+                        "select_removal" => commands::do_device_attention_removal_selected_reviewed,
+                        _ => commands::do_device_attention_still_installed_reviewed,
                     };
-                    action(state, entry, plan.before["journey"].as_str()).map_err(|_| stale())?;
+                    action(state, entry, plan.before["journey"].as_str(), &check).map_err(|error| match error {
+                        commands::DeviceAttentionError::JourneyMismatch | commands::DeviceAttentionError::NotFound => stale(),
+                        _ => changed("The hub could not save this device review. Reread the entry before retrying."),
+                    })?;
                 }
                 _ => return Err(invalid("Unknown device review action.")),
             }
             let mut receipt = json!({"entry_id":entry,"decision":decision});
+            let s = lock(state)?;
+            if matches!(
+                decision.as_str(),
+                "snooze" | "still_installed" | "select_removal"
+            ) {
+                let current = s
+                    .device_health
+                    .records()
+                    .find(|record| record.entry_id.as_deref() == Some(entry))
+                    .ok_or_else(|| changed("Refresh the device review."))?;
+                receipt["attention_status"] = json!(current.status);
+            } else {
+                let current = s
+                    .canonical_registry
+                    .triage()
+                    .get(entry)
+                    .ok_or_else(|| changed("Refresh the device review."))?;
+                verify_readback(current.status != TriageStatus::Pending)?;
+                receipt["review_status"] = json!(current.status);
+            }
             if decision == "select_removal" {
                 receipt["next_operation"] = json!("plan_remove_device");
                 receipt["device_id"] = plan.before["device_id"].clone();
@@ -1219,6 +1379,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(preview["before"]["name"], name);
+        assert_eq!(receipt["result"]["room"]["name"], name);
+        assert_eq!(receipt["result"]["canonical_readback_verified"], true);
         lock(&state)
             .unwrap()
             .topology
@@ -1233,6 +1395,85 @@ mod tests {
         assert_eq!(
             room(&lock(&state).unwrap(), room_id).unwrap()["name"],
             "Other name"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_backed_room_deletion_reviews_the_external_effect_and_liveness() {
+        let state = state();
+        let key = HubKey::new(HubType::new(HubType::HUE), "test.bridge");
+        {
+            let mut s = lock(&state).unwrap();
+            let mut room = crate::topology::TopologyRoom::new("office", "Office");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: key,
+                hub_room_id: "native".into(),
+                control_id: "group".into(),
+                light_device_ids: vec![],
+            });
+            s.topology.insert_room(room);
+        }
+        let args = json!({"room_id":"office"});
+        assert_eq!(
+            call(&state, "plan_delete_room", args.clone())
+                .await
+                .unwrap()["status"],
+            "handoff"
+        );
+        lock(&state).unwrap().delete_source_room_fn = Some(Arc::new(|_, _| Ok(())));
+        let ready = call(&state, "plan_delete_room", args).await.unwrap();
+        assert_eq!(
+            ready["before"]["native_rooms_to_delete"][0]["native_room_id"],
+            "native"
+        );
+        lock(&state).unwrap().delete_source_room_fn = None;
+        assert_eq!(
+            call(&state, "apply_device_plan", confirm(&ready))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert!(lock(&state).unwrap().topology.get("office").is_some());
+    }
+
+    #[tokio::test]
+    async fn replacing_bridge_credentials_invalidates_a_retry_without_exposing_secrets() {
+        let state = state();
+        let key = HubKey::new(HubType::new(HubType::HUE), "fixture.bridge");
+        {
+            let mut s = lock(&state).unwrap();
+            s.hub_credentials.insert(
+                key.clone(),
+                crate::hub::HubCredentials::new(
+                    HubType::HUE,
+                    &key.address,
+                    json!({"key":"first-fixture-secret"}),
+                ),
+            );
+            s.hub_capabilities
+                .push(crate::hub::HubIntegrationCapability::new(HubType::HUE));
+        }
+        let plan = call(
+            &state,
+            "plan_bridge_retry",
+            json!({"bridge_id":bridge_id(&key)}),
+        )
+        .await
+        .unwrap();
+        assert!(!plan.to_string().contains("first-fixture-secret"));
+        lock(&state)
+            .unwrap()
+            .hub_credentials
+            .get_mut(&key)
+            .unwrap()
+            .data = json!({"key":"second-fixture-secret"});
+        assert_eq!(
+            call(&state, "apply_device_plan", confirm(&plan))
+                .await
+                .unwrap_err()
+                .code,
+            "device_plan_changed"
         );
     }
 
@@ -1362,6 +1603,34 @@ mod tests {
             call(&state, "plan_remove_device", args(2)).await.unwrap()["surface"],
             "home_assistant"
         );
+        {
+            let mut s = lock(&state).unwrap();
+            let mut capability = s.hub_capabilities[0].clone();
+            capability.hub_type = HubType::MATTER.into();
+            s.hub_capabilities.push(capability);
+            let key = HubKey::new(HubType::new(HubType::MATTER), "local");
+            s.canonical_registry
+                .get_mut(&ids[1])
+                .unwrap()
+                .upsert_endpoint(key.clone(), "matter-28".into(), 1, None);
+            s.canonical_registry
+                .get_mut(&ids[0])
+                .unwrap()
+                .upsert_endpoint(key, "matter-28-2".into(), 1, None);
+        }
+        let matter_endpoint = call(&state, "read_device_connections", args(1))
+            .await
+            .unwrap()["endpoints"][1]["endpoint_id"]
+            .clone();
+        let matter = call(
+            &state,
+            "plan_remove_device",
+            json!({"device_id":ids[1],"endpoint_id":matter_endpoint}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(matter["status"], "handoff");
+        assert!(matter.get("plan_id").is_none());
         lock(&state).unwrap().hub_capabilities.clear();
         assert_eq!(
             call(&state, "apply_device_plan", confirm(&plan))
@@ -1439,6 +1708,14 @@ mod tests {
         .unwrap();
         assert_eq!(request["server_instance_id"], owner["server_instance_id"]);
         assert_eq!(owner["actor"], "owner");
+        lock(&state).unwrap().platform_context = "rpiz";
+        for step in ["mobile_enrollment", "ha_matter"] {
+            let handoff = call(&state, "guide_device_setup", json!({"step":step}))
+                .await
+                .unwrap();
+            assert_eq!(handoff["surface"], "rhythm_app");
+            assert_eq!(owner["server_instance_id"], handoff["server_instance_id"]);
+        }
         assert_eq!(lock(&state).unwrap().topology.room_count(), 0);
     }
 

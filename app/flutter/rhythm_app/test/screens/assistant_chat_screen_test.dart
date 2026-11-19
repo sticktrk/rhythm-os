@@ -7,21 +7,53 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 class _Hub extends RhythmServerApi {
   _Hub() : super(Dio());
   final calls = <(String, Map<String, dynamic>)>[];
-  bool linked = false, missing = false;
+  bool linked = false, missing = false, legacy = false;
+  bool? sawPower;
+  Map<String, dynamic> current = {
+    'room_id': 'hall',
+    'state': 'active',
+    'scheduled_default_state': 'active',
+    'mode': 'day',
+    'profile_id': 'default',
+    'canonical_brightness': 36,
+    'canonical_kelvin': 2700,
+    'time_offset_minutes': 0,
+    'brightness_offset': 0,
+    'adaptation_enabled': true
+  };
   @override
   Future<RhythmAssistantContract?> getAssistantContract() async =>
       RhythmAssistantContract.fromJson({
         'operations': [
-          for (final op in [
-            'start_motion_walk',
-            'inspect_motion_walk',
-            'plan_motion_target',
-            'apply_motion_target'
-          ])
+          for (final op in legacy
+              ? ['get_topology_snapshot']
+              : [
+                  'explain_room_output',
+                  'adjust_room_brightness',
+                  'adjust_room_warmth',
+                  'return_room_to_schedule',
+                  'try_room_offset',
+                  'undo_room_trial',
+                  'identify_device',
+                  'start_motion_walk',
+                  'inspect_motion_walk',
+                  'plan_motion_target',
+                  'apply_motion_target'
+                ])
             {
               'id': op,
-              'tier':
-                  op == 'apply_motion_target' ? 'persistent_change' : 'read',
+              'tier': op == 'apply_motion_target'
+                  ? 'persistent_change'
+                  : {
+                      'adjust_room_brightness',
+                      'adjust_room_warmth',
+                      'return_room_to_schedule',
+                      'try_room_offset',
+                      'undo_room_trial',
+                      'identify_device'
+                    }.contains(op)
+                      ? 'temporary_light_output'
+                      : 'read',
               'invocation_path': '/api/assistant/operations/$op'
             }
         ]
@@ -45,7 +77,34 @@ class _Hub extends RhythmServerApi {
       String id,
       Map<String, dynamic> args) async {
     calls.add((id, args));
+    if (id == 'inspect_motion_walk' &&
+        args.containsKey('resident_observations')) {
+      sawPower = args['resident_observations'][0]['power_on'] as bool;
+    }
     return switch (id) {
+      'explain_room_output' => current,
+      'adjust_room_brightness' ||
+      'adjust_room_warmth' ||
+      'return_room_to_schedule' ||
+      'try_room_offset' ||
+      'undo_room_trial' =>
+        {
+          ...current,
+          if (id == 'try_room_offset') 'trial_id': 'trial',
+          'server_acknowledged': true,
+          'light_readback': [
+            {
+              'light_id': 'bulb',
+              'availability': 'available',
+              'verification': 'fresh_device_readback',
+              'observed': {'on': true, 'brightness': 41, 'kelvin': 2700}
+            }
+          ]
+        },
+      'identify_device' => {
+          'server_acknowledged': true,
+          'physical_verification': 'ask_resident'
+        },
       'start_motion_walk' when args['sensor_id'] == '' => {
           'status': 'handoff',
           'server_instance_id': 'hub1',
@@ -70,7 +129,8 @@ class _Hub extends RhythmServerApi {
               'device_id': 'bulb',
               'readback': 'no_fresh_readback',
               'availability': 'unavailable',
-              'power_on': null
+              'power_on': null,
+              'resident_power_on': sawPower
             }
           ]
         },
@@ -148,5 +208,81 @@ void main() {
         find.textContaining(
             'Hall lamp · unavailable · no fresh device readback'),
         findsWidgets);
+    await choose('I saw Hall lamp off');
+    expect(hub.sawPower, false);
+    expect(find.textContaining('resident saw it off'), findsOneWidget);
+    await choose('Identify Hall lamp');
+    expect(hub.calls[hub.calls.length - 2].$1, 'identify_device');
+    expect(hub.calls[hub.calls.length - 2].$2, {'device_id': 'bulb'});
+    expect(hub.calls.last.$1, 'start_motion_walk');
+  });
+
+  testWidgets(
+      'guided lighting reads the room, limits the adjustment and restores the right behavior',
+      (tester) async {
+    final hub = _Hub();
+    await tester.pumpWidget(MaterialApp(
+        home: AssistantChatScreen(
+            api: () => hub,
+            serverId: 'hub1',
+            isCurrentTarget: () => true,
+            targetChanges: ValueNotifier(true),
+            openSetup: (_) async {})));
+    await tester.pumpAndSettle();
+    Future<void> request(String value) async {
+      await tester.enterText(find.byType(TextField), value);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> choose(String label) async {
+      final chip = find.widgetWithText(ActionChip, label);
+      await tester.ensureVisible(chip);
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+    }
+
+    await request('A little brighter in the downstairs hall');
+    expect(hub.calls.last.$1, 'explain_room_output');
+    await choose('Adjust brightness by +5 points');
+    expect(hub.calls.last.$1, 'adjust_room_brightness');
+    expect(hub.calls.last.$2, {'room_id': 'hall', 'delta_percent': 5});
+    expect(find.textContaining('41% brightness'), findsOneWidget);
+    await request('Warmer, but keep this brightness');
+    await choose('Try 2500 K at this brightness');
+    expect(hub.calls.last.$1, 'adjust_room_warmth');
+    expect(hub.calls.last.$2, {'room_id': 'hall', 'kelvin': 2500});
+    await request('Show me the downstairs hall an hour earlier');
+    await choose('Try 60 minutes earlier');
+    await request('Go back to normal');
+    await choose('End this trial');
+    expect(hub.calls.last.$1, 'undo_room_trial');
+    expect(hub.calls.last.$2, {'room_id': 'hall', 'trial_id': 'trial'});
+    hub.current['scheduled_default_state'] = 'hard_off';
+    await request('Go back to normal');
+    expect(find.textContaining('turns the room off'), findsOneWidget);
+    await choose('Restore scheduled default');
+    expect(hub.calls.last.$1, 'return_room_to_schedule');
+    expect(hub.calls.last.$2,
+        {'room_id': 'hall', 'behavior': 'scheduled_default'});
+  });
+
+  testWidgets(
+      'previous hub explains unavailable diagnostics before offering a workflow',
+      (tester) async {
+    final hub = _Hub()..legacy = true;
+    await tester.pumpWidget(MaterialApp(
+        home: AssistantChatScreen(
+            api: () => hub,
+            serverId: 'hub1',
+            isCurrentTarget: () => true,
+            targetChanges: ValueNotifier(true),
+            openSetup: (_) async {})));
+    await tester.pumpAndSettle();
+    expect(
+        find.textContaining(
+            'does not advertise guided lighting or motion tests'),
+        findsOneWidget);
+    expect(hub.calls, isEmpty);
   });
 }

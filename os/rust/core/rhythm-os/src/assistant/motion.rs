@@ -74,6 +74,7 @@ struct Walk {
     started: Instant,
     server_instance_id: String,
     target: Target,
+    initial_context: Value,
     detection: Option<Detection>,
     lights: BTreeMap<String, WalkLight>,
 }
@@ -83,6 +84,7 @@ struct WalkLight {
     availability: &'static str,
     readback: &'static str,
     power_on: Option<bool>,
+    resident_power_on: Option<bool>,
     observed_at_epoch_ms: Option<u64>,
 }
 
@@ -250,6 +252,20 @@ fn busy() -> Error {
     }
 }
 
+fn walk_lights<'a>(
+    s: &'a AppState,
+    room_id: &str,
+) -> impl Iterator<Item = &'a crate::canonical::identity::CanonicalDevice> {
+    s.topology
+        .get(room_id)
+        .into_iter()
+        .flat_map(|r| &r.devices)
+        .filter_map(|d| s.canonical_registry.get(&d.device_id))
+        .filter(|d| {
+            !d.is_removed() && d.device_type == DeviceType::Light && s.ha_selection_allows_light(d)
+        })
+}
+
 fn start(state: &SharedState, t: Target) -> Result<Value, Error> {
     let mut s = state.lock().map_err(|_| unavailable())?;
     if let Some(handoff) = check_target(&s, &t, false)? {
@@ -262,21 +278,22 @@ fn start(state: &SharedState, t: Target) -> Result<Value, Error> {
         return Err(busy());
     }
     let mut result = context(&s, &t);
-    let lights = s
-        .topology
-        .get(&t.room_id)
-        .into_iter()
-        .flat_map(|r| &r.devices)
-        .filter_map(|d| s.canonical_registry.get(&d.device_id))
-        .filter(|d| !d.is_removed() && d.device_type == DeviceType::Light)
+    let initial_context = result.clone();
+    let lights = walk_lights(&s, &t.room_id)
         .map(|d| {
             let offline = d
                 .active_endpoints()
                 .all(|ep| s.hub_connection_status.get(&ep.hub_key) == Some(&false));
-            let reported_offline = s
-                .light_observations
-                .get(&d.id)
-                .is_some_and(|o| o.availability == "unavailable");
+            let reported_offline = s.light_observations.get(&d.id).is_some_and(|o| {
+                let source_ms = o
+                    .source_at_epoch_ms
+                    .map(|t| t.max(0) as u64)
+                    .unwrap_or(o.received_at_epoch_ms)
+                    .min(o.received_at_epoch_ms);
+                o.availability == "unavailable"
+                    && current_epoch_ms().saturating_sub(source_ms)
+                        <= WALK_WINDOW.as_millis() as u64
+            });
             (
                 d.id.clone(),
                 WalkLight {
@@ -287,6 +304,7 @@ fn start(state: &SharedState, t: Target) -> Result<Value, Error> {
                     },
                     readback: "no_fresh_readback",
                     power_on: None,
+                    resident_power_on: None,
                     observed_at_epoch_ms: None,
                 },
             )
@@ -304,6 +322,7 @@ fn start(state: &SharedState, t: Target) -> Result<Value, Error> {
             started: Instant::now(),
             server_instance_id,
             target: t,
+            initial_context,
             detection: None,
             lights,
         },
@@ -348,6 +367,28 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
         .get(&request.walk_id)
         .filter(|w| w.server_instance_id == s.server_instance_id)
         .ok_or_else(|| Error::conflict("walk_expired", "Start a new walk on the same hub."))?;
+    // A selection, placement or routing edit invalidates this trial. In
+    // particular, a light removed from HA delegation must disappear from
+    // agent-visible evidence immediately.
+    let same_lights = walk_lights(&s, &walk.target.room_id)
+        .map(|d| d.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .eq(walk.lights.keys().map(String::as_str));
+    if !same_lights
+        || (walk.detection.is_none() && context(&s, &walk.target) != walk.initial_context)
+        || check_target(&s, &walk.target, false)?.is_some()
+    {
+        return Err(Error::conflict(
+            "walk_scope_changed",
+            "The sensor, room or managed lights changed. Start a new walk.",
+        ));
+    }
+    let walk = s
+        .assistant_motion
+        .walks
+        .get_mut(&request.walk_id)
+        .expect("walk checked under the same lock");
     let active = walk.started.elapsed() < WALK_WINDOW;
     let (stage, reason, next) = walk
         .detection
@@ -385,14 +426,18 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
             "Wait until motion reaches the room before reporting the visual result.",
         ));
     }
-    let mut result = context(&s, &walk.target);
+    for (id, power) in confirmed {
+        if let Some(light) = walk.lights.get_mut(id) {
+            light.resident_power_on = Some(power);
+        }
+    }
+    let mut result = walk.initial_context.clone();
     let lights: Vec<_> = walk
         .lights
         .iter()
         .map(|(id, light)| {
             let mut item = json!(light);
             item["device_id"] = json!(id);
-            item["resident_power_on"] = json!(confirmed.get(id));
             item
         })
         .collect();
@@ -408,11 +453,14 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
     result["detected_at_epoch_ms"] = json!(walk.detection.as_ref().map(|d| d.epoch_ms));
     result["routed_targets"] = json!(walk.detection.as_ref().map(|d| &d.routed_targets));
     result["lights"] = json!(lights);
-    result["resident_confirmation"] = json!(if confirmed.is_empty() {
-        "not_recorded"
-    } else {
-        "reported"
-    });
+    result["resident_confirmation"] =
+        json!(
+            if walk.lights.values().all(|l| l.resident_power_on.is_none()) {
+                "not_recorded"
+            } else {
+                "reported"
+            }
+        );
     Ok(result)
 }
 
@@ -480,7 +528,7 @@ pub(crate) fn record_step(state: &SharedState, event: Option<u64>, room: &str, s
 pub(crate) fn record_light_report(
     s: &mut AppState,
     light: &str,
-    available: bool,
+    availability: &str,
     power: Option<bool>,
     source_ms: u64,
 ) {
@@ -508,12 +556,16 @@ pub(crate) fn record_light_report(
         {
             continue;
         }
-        item.availability = if available {
-            "available"
-        } else {
-            "unavailable"
+        item.availability = match availability {
+            "available" => "available",
+            "unavailable" => "unavailable",
+            _ => "unknown",
         };
-        item.power_on = if available { power } else { None };
+        item.power_on = if item.availability == "available" {
+            power
+        } else {
+            None
+        };
         item.readback = if item.power_on.is_some() {
             "fresh_device_readback"
         } else {

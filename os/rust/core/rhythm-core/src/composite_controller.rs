@@ -1383,7 +1383,7 @@ impl CompositeController {
             .and_then(|controllers| controllers.get(hub_key).cloned())
             .map(|dispatcher| dispatcher.controller())
             .ok_or_else(|| {
-                LightControlError::RoomNotFound(format!(
+                LightControlError::NotDispatched(format!(
                     "No controller registered for hub {}",
                     hub_key
                 ))

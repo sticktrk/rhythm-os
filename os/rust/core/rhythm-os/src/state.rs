@@ -1604,13 +1604,21 @@ impl AppState {
         light: &crate::canonical::identity::CanonicalDevice,
     ) -> bool {
         self.platform_context != "ha_addon"
-            || light.active_endpoints().any(|ep| {
-                matches!(ep.hub_key.hub_type.as_str(), HubType::HA | "homeassistant")
-                    && self
-                        .managed_ha_lights
-                        .as_ref()
-                        .is_some_and(|ids| ids.contains(&ep.native_id))
-            })
+            || light
+                .active_endpoints()
+                .any(|ep| self.ha_selection_allows_endpoint(ep))
+    }
+
+    pub(crate) fn ha_selection_allows_endpoint(
+        &self,
+        ep: &crate::canonical::identity::IntegrationEndpoint,
+    ) -> bool {
+        self.platform_context != "ha_addon"
+            || (matches!(ep.hub_key.hub_type.as_str(), HubType::HA | "homeassistant")
+                && self
+                    .managed_ha_lights
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&ep.native_id)))
     }
 
     /// Effective unattended-output admission combines the durable room choice

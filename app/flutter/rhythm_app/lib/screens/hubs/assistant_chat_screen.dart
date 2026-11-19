@@ -106,8 +106,9 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   RhythmMotionDiagnosis? _diagnosis;
   String? _lightPlan, _lightApply, _lightActionLabel;
   _Args _lightArguments = {};
+  bool _phoneSetup = false;
   String _lightOperation = '';
-  int _trialMinutes = -60;
+  num? _trialMinutes;
 
   bool get _active => mounted && widget.isCurrentTarget();
   Iterable<RhythmTopologyNode> get _rooms => _nodes.where((n) => n.isRoom);
@@ -148,6 +149,12 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     setState(() => _busy = true);
     try {
       await action();
+    } on UnsupportedError catch (error) {
+      if (_active) {
+        _say(
+            'This hub does not advertise ${error.message}. Its usual controls are still available.');
+        _step = _Step.request;
+      }
     } on DioException catch (error) {
       if (_active) {
         final body = error.response?.data;
@@ -177,7 +184,8 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     final contract = await widget.api().getAssistantContract();
     if (!_active) return;
     if (contract == null ||
-        !contract.operations.any((op) => op.tier == RhythmAssistantTier.read)) {
+        !['explain_room_output', RhythmAssistantOperationId.startMotionWalk]
+            .any((id) => _callable(contract, id))) {
       _say(
           'This hub does not advertise guided lighting or motion tests. You can still use its usual controls.');
       _step = _Step.retry;
@@ -191,6 +199,15 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
         'What would you like to try? You can check why a room stayed dark, connect a motion sensor, or adjust the light in a room.');
   }
 
+  bool _callable(RhythmAssistantContract contract, String id) {
+    final op = contract.operation(id);
+    return op != null &&
+        op.location == 'hub' &&
+        op.tier != RhythmAssistantTier.unknown &&
+        op.tier != RhythmAssistantTier.ownerOnly &&
+        op.invocationPath == '/api/assistant/operations/$id';
+  }
+
   Future<void> _readTopology() async {
     if (!_active) throw StateError('Hub selection changed');
     final snapshot = await widget.api().getAssistantTopologySnapshot();
@@ -202,6 +219,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
 
   Future<_Args> _call(String id, _Args args) async {
     if (!_active) throw StateError('Hub selection changed');
+    if (!_callable(_contract, id)) throw UnsupportedError(id);
     final result =
         await widget.api().callAssistantOperation(_contract, id, args);
     if (!_active ||
@@ -249,10 +267,19 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             if (result['trial_id'] is String) {
               _trial = result['trial_id'] as String;
               _trialRoom = _room!.id;
+              _trialMinutes = _lightArguments['offset_minutes'] as int?;
             } else if (_lightOperation == 'undo_room_trial') {
               _trial = null;
             }
             _say('The hub acknowledged the request.');
+            if (result['requested_kelvin'] is num) {
+              _say(
+                  'Requested ${result['requested_kelvin']} K. The hub target is ${result['canonical_kelvin']} K at ${result['canonical_brightness']}%.');
+            }
+            if (result['canonical_power'] is bool) {
+              _say(
+                  'The room power target is ${result['canonical_power'] == true ? "on" : "off"}.');
+            }
             _reportLights(result);
             _step = _Step.request;
           } else {
@@ -268,6 +295,11 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             _lightPlan = null;
             final result =
                 await _call(_lightApply!, {'plan_id': plan, 'confirmed': true});
+            if (_lightApply == 'apply_absorb_offset' &&
+                result['canonical_readback_verified'] == true) {
+              _trial = null;
+              _trialMinutes = null;
+            }
             _say(result['canonical_readback_verified'] == true
                 ? 'The hub verified the saved change.'
                 : 'Read the profile again to verify the saved change.');
@@ -284,12 +316,16 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                 'Try “a little brighter”, “why is it dim?”, “one hour earlier”, or “hook up this sensor”.');
             return;
           }
+          final previousRoom = _room;
           _room = _match(lower, _rooms);
-          if (_room == null &&
-              (_intent == 'undo trial' ||
-                  _intent == 'undo' ||
-                  _intent == 'save this look')) {
-            _room = _nodes.where((n) => n.id == _trialRoom).firstOrNull;
+          if (_room == null) {
+            if ({'undo trial', 'undo', 'save this look'}.contains(lower)) {
+              _room = _nodes.where((n) => n.id == _trialRoom).firstOrNull;
+            } else if (RegExp(
+              r'^(go back to normal|back to normal|a little (brighter|dimmer)( in here)?|warmer(,? but keep this brightness)?|why is it dim)[?.!]*$',
+            ).hasMatch(lower)) {
+              _room = previousRoom;
+            }
           }
           if (_room != null) {
             await _roomSelected();
@@ -313,7 +349,9 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
           _sensor = node?.id ?? '';
           await _startWalk();
         case _Step.handoff:
-          if (lower == 'open device setup') await widget.openSetup(context);
+          if (_phoneSetup && lower == 'open device setup') {
+            await widget.openSetup(context);
+          }
           if (!_active) return;
           await _readTopology();
           _say('Which sensor is visible now?');
@@ -356,8 +394,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   Future<void> _roomSelected() async {
     if (RegExp('motion|sensor|walk|stayed (off|dark)|didn.t turn on')
         .hasMatch(_intent)) {
-      if (!_contract
-          .supportsOperation(RhythmAssistantOperationId.startMotionWalk)) {
+      if (!_callable(_contract, RhythmAssistantOperationId.startMotionWalk)) {
         _say('This hub does not advertise the motion walk test.');
         _step = _Step.request;
         return;
@@ -367,14 +404,35 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       return;
     }
     final room = {'room_id': _room!.id};
+    if (!_callable(_contract, 'explain_room_output')) {
+      _say(
+          'This hub cannot explain room output. Its usual lighting controls are available.');
+      _step = _Step.request;
+      return;
+    }
     final current = await _call('explain_room_output', room);
+    if (current.containsKey('active_trial')) {
+      final active = current['active_trial'];
+      final id = active is Map ? active['trial_id'] : null;
+      if (id is String && active is Map) {
+        final sameTrial = id == _trial && _room!.id == _trialRoom;
+        _trialMinutes = active.containsKey('offset_minutes')
+            ? active['offset_minutes'] as num?
+            : (sameTrial ? _trialMinutes : null);
+        _trial = id;
+        _trialRoom = _room!.id;
+      } else if (id == null && _trialRoom == _room!.id) {
+        _trial = null;
+        _trialMinutes = null;
+      }
+    }
     final mode = current['mode'],
         state = current['state'],
         profile = current['profile_id'];
     _say('${_room!.name} is in $mode mode ($state) using $profile. '
         'The current target is ${current['canonical_brightness']}% at ${current['canonical_kelvin']} K.');
     if (_intent.contains('save this look') || _intent.contains('absorb')) {
-      if (_trialRoom != _room!.id || _trial == null) {
+      if (_trialRoom != _room!.id || _trial == null || _trialMinutes == null) {
         _say('Try a time-shifted look in this room before saving it.');
         _step = _Step.request;
         return;
@@ -393,8 +451,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       }
       // Suggest a slower brightness-only ramp. Inspect both samples before
       // offering to save it: the room may already have a slower ramp.
-      await _planLighting('plan_room_tuning',
-          {...room, 'setting': 'evening_brightness_width', 'value': 0.2});
+      if (current['has_evening_brightness_ramp'] == false) {
+        await _previewMinimum(room, current);
+      } else {
+        await _planLighting('plan_room_tuning',
+            {...room, 'setting': 'evening_brightness_width', 'value': 0.2},
+            fallback: () => _previewMinimum(room, current));
+      }
       return;
     }
     if (_intent.contains('why') ||
@@ -410,12 +473,12 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     _Args args;
     if (_intent.contains('earlier')) {
       final minutes = RegExp(r'(\d+)\s*(minute|hour)').firstMatch(_intent);
-      _trialMinutes = minutes == null
+      final shiftMinutes = minutes == null
           ? -60
           : -int.parse(minutes[1]!) * (minutes[2] == 'hour' ? 60 : 1);
       op = 'try_room_offset';
-      args = {...room, 'offset_minutes': _trialMinutes};
-      label = 'Try ${_trialMinutes.abs()} minutes earlier';
+      args = {...room, 'offset_minutes': shiftMinutes};
+      label = 'Try ${shiftMinutes.abs()} minutes earlier';
     } else if (_intent.contains('normal') || _intent.contains('undo')) {
       if (_trial != null && _trialRoom == _room!.id) {
         op = 'undo_room_trial';
@@ -423,8 +486,25 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
         label = 'End this trial';
       } else {
         op = 'return_room_to_schedule';
-        args = {...room, 'behavior': 'resume'};
-        label = 'Resume adaptation';
+        final scheduled = current['scheduled_default_state'];
+        if (scheduled is String &&
+            (state != scheduled || _intent.contains('scheduled'))) {
+          args = {...room, 'behavior': 'scheduled_default'};
+          label = 'Restore scheduled default';
+          _say('The scheduled default is ${scheduled.replaceAll('_', ' ')}. '
+              'Restoring it clears manual offsets and ${scheduled == 'hard_off' ? 'turns the room off' : 'can change light power and brightness'}.');
+        } else if (current['adaptation_enabled'] == true &&
+            (current['time_offset_minutes'] != 0 ||
+                current['brightness_offset'] != 0)) {
+          args = {...room, 'behavior': 'reset_offsets'};
+          label = 'Clear manual offsets';
+          _say('Return to the current curve brightness and warmth.');
+        } else {
+          args = {...room, 'behavior': 'resume'};
+          label = 'Resume adaptation';
+          _say(
+              'Resume the room’s current lighting behavior. Its light output may change.');
+        }
       }
     } else if (_intent.contains('warmer') &&
         current['canonical_kelvin'] is num) {
@@ -462,6 +542,10 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     for (final entry in entries) {
       final observed = entry['observed'];
       final name = _name(entry['light_id'] as String?);
+      if (result['requested_kelvin'] is num &&
+          entry['warmth_capability'] == 'unsupported') {
+        _say('$name · does not support adjustable warmth');
+      }
       if (entry['control_scope'] == 'outside_ha_selection') {
         _say('$name · controlled by Home Assistant');
       } else if (entry['verification'] == 'fresh_device_readback' &&
@@ -478,12 +562,28 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
         _say(
             '$name · ${details.isEmpty ? 'no fresh device readback' : details.join(', ')}');
       } else {
-        _say('$name · no fresh device readback');
+        _say(
+            '$name · ${entry['availability'] ?? 'availability unknown'} · no fresh device readback');
       }
     }
   }
 
-  Future<void> _planLighting(String id, _Args args) async {
+  Future<void> _previewMinimum(_Args room, _Args current) async {
+    final minimum = current['minimum_brightness'],
+        maximum = current['maximum_brightness'];
+    if (minimum is! num || maximum is! num || minimum >= maximum) {
+      _say('The hub could not offer a higher minimum for this room.');
+      _step = _Step.request;
+      return;
+    }
+    final value = (minimum.round() + 5).clamp(1, maximum.round());
+    _say('Preview a minimum brightness of $value% for this room.');
+    await _planLighting('plan_room_tuning',
+        {...room, 'setting': 'minimum_brightness', 'value': value});
+  }
+
+  Future<void> _planLighting(String id, _Args args,
+      {Future<void> Function()? fallback}) async {
     final preview = await _call(id, args);
     final rooms = (preview['affected_rooms'] as List)
         .whereType<Map>()
@@ -510,6 +610,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       _say(
           'This preview does not make the sampled evening times brighter. The room setting is unchanged.');
       _step = _Step.request;
+      if (fallback != null) await fallback();
       return;
     }
     _lightApply =
@@ -545,6 +646,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   bool _showHandoff(_Args result) {
     if (result['status'] == 'handoff') {
       final handoff = result['handoff'] as Map;
+      _phoneSetup = handoff['surface'] == 'rhythm_app';
       _say(
           '${handoff['actor']} · ${handoff['surface']}\n${handoff['instruction']}');
       _step = _Step.handoff;
@@ -553,13 +655,26 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     return false;
   }
 
-  Future<void> _inspect({String? confirmedLight}) async {
+  Future<void> _identify(RhythmMotionWalkLight light) async {
+    final name = _name(light.deviceId);
+    _say('Identify $name', resident: true);
+    final result =
+        await _call('identify_device', {'device_id': light.deviceId});
+    if (result['server_acknowledged'] != true) {
+      throw StateError('Identify was not acknowledged');
+    }
+    _say(
+        'The hub acknowledged Identify for $name. Look for its brief flash. A new walk will test motion separately.');
+    await _startWalk();
+  }
+
+  Future<void> _inspect({String? confirmedLight, bool powerOn = true}) async {
     final result = RhythmMotionDiagnosis.fromJson(
         await _call(RhythmAssistantOperationId.inspectMotionWalk, {
       'walk_id': _walk,
       if (confirmedLight != null)
         'resident_observations': [
-          {'device_id': confirmedLight, 'power_on': true}
+          {'device_id': confirmedLight, 'power_on': powerOn}
         ],
     }));
     _diagnosis = result;
@@ -577,7 +692,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
           ? 'reported ${light.powerOn! ? 'on' : 'off'}'
           : 'no fresh device readback';
       _say(
-          '${_name(light.deviceId)} · ${light.availability} · $observation${light.residentPowerOn == true ? ' · resident saw it turn on' : ''}');
+          '${_name(light.deviceId)} · ${light.availability} · $observation${light.residentPowerOn == null ? '' : (light.residentPowerOn! ? ' · resident saw it on' : ' · resident saw it off')}');
     }
   }
 
@@ -615,10 +730,14 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       _Step.request => [
           'Check a motion sensor',
           'A little brighter',
-          if (_trial != null) ...['Undo trial', 'Save this look']
+          if (_trial != null) 'Undo trial',
+          if (_trial != null && _trialMinutes != null) 'Save this look'
         ],
       _Step.walk => ['Check walk', 'Review room link', 'Walk again'],
-      _Step.handoff => ['Open device setup', 'Check discovery'],
+      _Step.handoff => [
+          if (_phoneSetup) 'Open device setup',
+          'Check discovery'
+        ],
       _Step.lightingAction => [_lightActionLabel!, 'Cancel'],
       _Step.lightingReview => ['Save reviewed change', 'Cancel'],
       _Step.review => ['Confirm room link', 'Cancel'],
@@ -694,12 +813,19 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                       'command_not_needed',
                       'command_uncertain'
                     }.contains(_diagnosis!.stage))
-                  for (final light in _diagnosis!.lights
-                      .where((l) => l.residentPowerOn != true))
-                    ActionChip(
-                        label: Text('I saw ${_name(light.deviceId)} turn on'),
-                        onPressed: () => _run(
-                            () => _inspect(confirmedLight: light.deviceId))),
+                  for (final light in _diagnosis!.lights) ...[
+                    if (light.residentPowerOn == null)
+                      for (final on in [true, false])
+                        ActionChip(
+                            label: Text(
+                                'I saw ${_name(light.deviceId)} ${on ? 'on' : 'off'}'),
+                            onPressed: () => _run(() => _inspect(
+                                confirmedLight: light.deviceId, powerOn: on))),
+                    if (_callable(_contract, 'identify_device'))
+                      ActionChip(
+                          label: Text('Identify ${_name(light.deviceId)}'),
+                          onPressed: () => _run(() => _identify(light))),
+                  ],
                 for (final choice in choices)
                   ActionChip(
                       label: Text(choice), onPressed: () => _reply(choice)),

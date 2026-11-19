@@ -2104,7 +2104,7 @@ fn node_metadata_from_topology(
     )
 }
 
-fn known_light_capabilities_for_device(
+pub(crate) fn known_light_capabilities_for_device(
     device: &crate::canonical::identity::CanonicalDevice,
 ) -> Option<LightCapabilitiesDto> {
     if device.is_removed() || device.device_type != DeviceType::Light {
@@ -7666,6 +7666,8 @@ fn record_scene_preview_session(
             scene_id: response.scene_id.clone(),
             target_node_id: target_id,
             affected_node_ids: response.affected_node_ids.clone(),
+            assistant_individual_audition: false,
+            assistant_time_offset_minutes: None,
             previous_mood_scene_id,
             draft_scene,
             started_at_epoch_ms: now,
@@ -7832,9 +7834,18 @@ pub(crate) fn do_scene_preview_commit_reviewed(
 pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<String> {
     let preview = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.light_scene_previews
+        let preview = s
+            .light_scene_previews
             .remove(preview_id)
-            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
+            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?;
+        if preview.assistant_individual_audition
+            && !s.independently_managed_light(&preview.target_node_id)
+        {
+            return Ok(serde_json::json!({
+                "preview_id": preview.id, "cancelled":true, "restoration":"skipped_changed_ownership"
+            }).to_string());
+        }
+        preview
     };
 
     // Reconcile to the live room behavior. A dormant saved Mood binding is
@@ -7867,7 +7878,8 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
 
     serde_json::to_string(&serde_json::json!({
         "preview_id": preview.id,
-        "cancelled": true
+        "cancelled": true,
+        "restoration": "restore_requested"
     }))
     .map_err(|e| anyhow::anyhow!("serialize scene preview cancel: {}", e))
 }
@@ -13353,7 +13365,7 @@ pub fn do_light_schedules_set(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, true, None)
+    do_light_schedules_set_internal(state, schedules, true, None, &|_| Ok(()))
 }
 
 /// Replace the reusable schedule registry only when the caller reviewed the
@@ -13373,6 +13385,22 @@ pub fn do_light_schedules_set_guarded_with_correlation(
     expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
     correlation_id: Option<String>,
 ) -> Result<String> {
+    do_light_schedules_set_reviewed(
+        state,
+        schedules,
+        expected_schedules,
+        correlation_id,
+        &|_| Ok(()),
+    )
+}
+
+pub(crate) fn do_light_schedules_set_reviewed(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+    expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
+    correlation_id: Option<String>,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -13390,7 +13418,7 @@ pub fn do_light_schedules_set_guarded_with_correlation(
             "light schedule registry precondition failed: live schedules changed"
         ));
     }
-    do_light_schedules_set_internal(state, schedules, true, correlation_id)
+    do_light_schedules_set_internal(state, schedules, true, correlation_id, check)
 }
 
 /// Backup restore replaces the topology and room manager after applying the
@@ -13408,7 +13436,7 @@ fn do_light_schedules_set_for_backup_restore(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, false, None)
+    do_light_schedules_set_internal(state, schedules, false, None, &|_| Ok(()))
 }
 
 fn do_light_schedules_set_internal(
@@ -13416,6 +13444,7 @@ fn do_light_schedules_set_internal(
     schedules: Vec<rhythm_core::LightScheduleConfig>,
     validate_current_references: bool,
     correlation_id: Option<String>,
+    check: ReviewCheck<'_>,
 ) -> Result<String> {
     let ids = validate_light_schedule_definitions(&schedules)?;
     let assigned_roots = if validate_current_references {
@@ -13427,6 +13456,7 @@ fn do_light_schedules_set_internal(
     };
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        check(&s)?;
         s.set_light_schedule_configs(schedules);
         persist_settings_locked(&s);
         for (node_id, _) in &assigned_roots {
@@ -13574,6 +13604,31 @@ fn do_light_schedule_override_set_at(
     persist: bool,
     current_utc: chrono::NaiveDateTime,
 ) -> Result<String> {
+    do_light_schedule_override_set_reviewed(
+        state,
+        node_id,
+        schedule_id,
+        schedule_override,
+        expected_effective_overrides,
+        correlation_id,
+        persist,
+        current_utc,
+        &|_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn do_light_schedule_override_set_reviewed(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    schedule_override: Option<rhythm_core::LightScheduleOverride>,
+    expected_effective_overrides: Option<BTreeMap<String, rhythm_core::LightScheduleOverride>>,
+    correlation_id: Option<String>,
+    persist: bool,
+    current_utc: chrono::NaiveDateTime,
+    check: ReviewCheck<'_>,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -13649,7 +13704,7 @@ fn do_light_schedule_override_set_at(
         expected_effective_light_schedule_overrides: expected_effective_overrides,
         ..RoomProfileSettingsPatch::default()
     };
-    do_node_preferences_set(
+    do_node_preferences_set_inner_reviewed(
         state,
         node_id,
         None,
@@ -13658,6 +13713,8 @@ fn do_light_schedule_override_set_at(
         None,
         Some(&patch),
         persist,
+        true,
+        check,
     )?;
     let mut activity =
         crate::activity::LightActivityRecord::app(node_id, "light_schedule_override_updated");
@@ -16410,6 +16467,14 @@ fn do_device_remove_with_retention_reviewed(
             ));
         }
     };
+    if let Err(error) = check(&s) {
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            error,
+        ));
+    }
     if let Some(canonical_id) = canonical_id.as_deref() {
         let unchanged = s
             .canonical_registry
@@ -16635,7 +16700,26 @@ pub fn do_device_endpoint_remove(
 
     if endpoint_count <= 1 {
         drop(transaction);
-        return do_device_hard_remove(state, &canonical_id, Some(hub_key));
+        // The full removal path reacquires the topology transaction. Discovery
+        // can attach another integration meanwhile or during native I/O.
+        return do_device_remove_with_retention_reviewed(
+            state,
+            &canonical_id,
+            Some(hub_key),
+            false,
+            DeviceRemovalStateRequirement::Active,
+            &|s| {
+                let d = s
+                    .canonical_registry
+                    .get(&canonical_id)
+                    .ok_or_else(|| anyhow::anyhow!("Device identity changed during removal"))?;
+                anyhow::ensure!(
+                    matches!(d.endpoints.as_slice(), [ep] if ep.hub_key == *hub_key && ep.native_id == native_id),
+                    "Device connections changed during removal; refresh discovery"
+                );
+                Ok(())
+            },
+        );
     }
 
     let prepared_assignments =
@@ -17593,6 +17677,14 @@ pub fn do_hue_authority_update(
     state: &SharedState,
     request: crate::api_types::HueAuthorityUpdateRequest,
 ) -> Result<crate::api_types::HueAuthorityResponse> {
+    do_hue_authority_update_reviewed(state, request, &|_| Ok(()))
+}
+
+pub(crate) fn do_hue_authority_update_reviewed(
+    state: &SharedState,
+    request: crate::api_types::HueAuthorityUpdateRequest,
+    check: ReviewCheck<'_>,
+) -> Result<crate::api_types::HueAuthorityResponse> {
     use crate::api_types::HueRoomAuthorityOwnerDto;
     use crate::topology::ExternalRoomAutomationOwner;
 
@@ -17636,6 +17728,7 @@ pub fn do_hue_authority_update(
             .lock()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        check(&s)?;
         let known = s.hub_credentials.contains_key(&key)
             || s.hubs.contains_key(&key)
             || s.topology.references_hub_key(&key);
@@ -19864,7 +19957,18 @@ pub fn do_flash_canonical_device(state: &SharedState, device_id: &str) -> Result
 
         let endpoint = device
             .preferred_endpoint()
-            .ok_or_else(|| anyhow::anyhow!("Device has no active endpoint: {}", device_id))?;
+            .filter(|ep| s.ha_selection_allows_endpoint(ep))
+            .or_else(|| {
+                device
+                    .active_endpoints()
+                    .find(|ep| s.ha_selection_allows_endpoint(ep))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Device has no active endpoint under this hub's light selection: {}",
+                    device_id
+                )
+            })?;
 
         (
             device.name.clone(),
@@ -19909,7 +20013,7 @@ pub fn do_flash_canonical_device(state: &SharedState, device_id: &str) -> Result
     );
 
     futures::executor::block_on(composite.flash_target(&hub_key_label, target))
-        .map_err(|e| anyhow::anyhow!("Failed to flash device {}: {}", device_id, e))
+        .with_context(|| format!("Failed to flash device {}", device_id))
 }
 
 /// Per-device synthetic hub-registry rooms.
@@ -21114,6 +21218,7 @@ fn mutate_device_attention(
     entry_id: &str,
     action_id: &str,
     correlation_id: Option<&str>,
+    check: ReviewCheck<'_>,
     mutate: impl FnOnce(&mut crate::device_health::DeviceHealthLedger, u64) -> bool,
 ) -> std::result::Result<String, DeviceAttentionError> {
     let correlation_id = correlation_id
@@ -21125,6 +21230,7 @@ fn mutate_device_attention(
         .as_secs();
     {
         let mut s = state.lock().map_err(|_| DeviceAttentionError::Lock)?;
+        check(&s).map_err(|_| DeviceAttentionError::JourneyMismatch)?;
         let before = s.device_health.clone();
         let expected_correlation = s
             .device_health
@@ -21148,11 +21254,21 @@ pub fn do_device_attention_snooze(
     entry_id: &str,
     correlation_id: Option<&str>,
 ) -> std::result::Result<String, DeviceAttentionError> {
+    do_device_attention_snooze_reviewed(state, entry_id, correlation_id, &|_| Ok(()))
+}
+
+pub(crate) fn do_device_attention_snooze_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+    check: ReviewCheck<'_>,
+) -> std::result::Result<String, DeviceAttentionError> {
     mutate_device_attention(
         state,
         entry_id,
         "unreachable_device_snoozed",
         correlation_id,
+        check,
         |health, now| health.snooze(entry_id, now),
     )
 }
@@ -21162,11 +21278,21 @@ pub fn do_device_attention_still_installed(
     entry_id: &str,
     correlation_id: Option<&str>,
 ) -> std::result::Result<String, DeviceAttentionError> {
+    do_device_attention_still_installed_reviewed(state, entry_id, correlation_id, &|_| Ok(()))
+}
+
+pub(crate) fn do_device_attention_still_installed_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+    check: ReviewCheck<'_>,
+) -> std::result::Result<String, DeviceAttentionError> {
     mutate_device_attention(
         state,
         entry_id,
         "unreachable_device_still_installed",
         correlation_id,
+        check,
         |health, _| health.await_recovery(entry_id),
     )
 }
@@ -21176,11 +21302,21 @@ pub fn do_device_attention_removal_selected(
     entry_id: &str,
     correlation_id: Option<&str>,
 ) -> std::result::Result<String, DeviceAttentionError> {
+    do_device_attention_removal_selected_reviewed(state, entry_id, correlation_id, &|_| Ok(()))
+}
+
+pub(crate) fn do_device_attention_removal_selected_reviewed(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+    check: ReviewCheck<'_>,
+) -> std::result::Result<String, DeviceAttentionError> {
     mutate_device_attention(
         state,
         entry_id,
         "unreachable_device_removal_selected",
         correlation_id,
+        check,
         // Removal itself is the existing guarded unpair; this only records
         // the user's explicit choice on the journey's activity trail.
         |health, _| health.is_actionable(entry_id),
@@ -21465,11 +21601,12 @@ pub(crate) fn do_triage_new_device_reviewed(
             }
         }
         TriageKind::RoomBinding => {
+            let before = s.canonical_registry.triage().clone();
             if s.canonical_registry
                 .triage_mut()
                 .resolve_keep_separate(entry_id, now)
             {
-                persist_canonical(&s);
+                save_review_queue(&mut s, before)?;
                 drop(s);
                 emit_triage_changed(state);
                 Ok(r#"{"status":"kept_separate"}"#.to_string())
@@ -21478,6 +21615,7 @@ pub(crate) fn do_triage_new_device_reviewed(
             }
         }
         TriageKind::UnassignedDevice => {
+            let before = s.canonical_registry.triage().clone();
             let canonical_id = entry.canonical_id.clone().ok_or_else(|| {
                 anyhow::anyhow!("Triage entry '{}' is missing canonical_id", entry_id)
             })?;
@@ -21487,7 +21625,7 @@ pub(crate) fn do_triage_new_device_reviewed(
                 "api",
                 now,
             ) {
-                persist_canonical(&s);
+                save_review_queue(&mut s, before)?;
                 drop(s);
                 let name_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
                 reconcile_automatic_light_names_best_effort(state, &name_scope);
@@ -21539,6 +21677,17 @@ pub fn do_triage_assign_room(state: &SharedState, entry_id: &str, room_id: &str)
     do_canonical_assign_room(state, &canonical_id, Some(&resolved_room_id))
 }
 
+fn save_review_queue(
+    s: &mut AppState,
+    previous: crate::canonical::triage::TriageQueue,
+) -> Result<()> {
+    if let Err(error) = save_canonical(s) {
+        *s.canonical_registry.triage_mut() = previous;
+        return Err(error.context("Persisting device review"));
+    }
+    Ok(())
+}
+
 /// Dismiss a triage entry.
 pub fn do_triage_dismiss(state: &SharedState, entry_id: &str) -> Result<()> {
     do_triage_dismiss_reviewed(state, entry_id, &|_| Ok(()))
@@ -21549,6 +21698,14 @@ pub(crate) fn do_triage_dismiss_reviewed(
     entry_id: &str,
     check: ReviewCheck<'_>,
 ) -> Result<()> {
+    let gate = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _guard = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     check(&s)?;
     let kind = s
@@ -21561,8 +21718,9 @@ pub(crate) fn do_triage_dismiss_reviewed(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let before = s.canonical_registry.triage().clone();
     if s.canonical_registry.triage_mut().dismiss(entry_id, now) {
-        persist_canonical(&s);
+        save_review_queue(&mut s, before)?;
         drop(s);
         if kind == crate::canonical::triage::TriageKind::UnassignedDevice {
             reconcile_runtime_from_state(state)?;
@@ -40854,6 +41012,54 @@ mod tests {
     }
 
     #[test]
+    fn last_endpoint_removal_keeps_a_new_connection_discovered_during_native_io() {
+        let (state, device, room, _, hub) = setup_native_room_move();
+        let updated_device = device.clone();
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let rollback = rolled_back.clone();
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.set_grouped_room_control_required(&hub, true);
+            s.prepare_hub_device_room_assignment_fn = Some(Arc::new(move |state, _| {
+                state
+                    .lock()
+                    .unwrap()
+                    .canonical_registry
+                    .get_mut(&updated_device)
+                    .unwrap()
+                    .upsert_endpoint(
+                        HubKey::new(HubType::new("matter"), "local"),
+                        "matter-17".into(),
+                        2,
+                        None,
+                    );
+                let completed = rollback.clone();
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: None,
+                        managed_by_rhythm: true,
+                        rollback: Box::new(move || {
+                            completed.store(true, Ordering::SeqCst);
+                            Ok(())
+                        }),
+                    },
+                )
+            }));
+        }
+        assert!(do_device_endpoint_remove(&state, &device, &hub).is_err());
+        assert!(rolled_back.load(Ordering::SeqCst));
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.canonical_registry.get(&device).unwrap().endpoints.len(),
+            2
+        );
+        assert_eq!(
+            s.topology.device_parent_room_id(&device),
+            Some(room.as_str())
+        );
+    }
+
+    #[test]
     fn required_group_endpoint_remove_confirms_native_standalone_before_forgetting_endpoint() {
         let (state, device_id, source_room_id, _target_room_id, hub_key) = setup_native_room_move();
         let secondary_hub = HubKey::new(HubType::new("matter"), "local");
@@ -41265,6 +41471,45 @@ mod tests {
     }
 
     #[test]
+    fn addon_identify_dispatches_only_to_the_selected_ha_endpoint() {
+        let (state, _runtime) = setup_state(vec![]);
+        let matter = HubKey::new(HubType::new("matter"), "local");
+        let ha = HubKey::new(HubType::new(HubType::HA), "ha");
+        let device_id =
+            insert_canonical_device(&state, matter.clone(), "matter-2", "Light", "", "");
+        let composite = Arc::new(rhythm_core::CompositeController::new());
+        let ha_controller = Arc::new(RecordingFlashController::new());
+        let matter_controller = Arc::new(RecordingFlashController::new());
+        composite.register_controller(&ha.to_string(), ha_controller.clone());
+        composite.register_controller(&matter.to_string(), matter_controller.clone());
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_context = "ha_addon";
+            s.composite_controller = Some(composite);
+            s.canonical_registry
+                .get_mut(&device_id)
+                .unwrap()
+                .upsert_endpoint(ha, "light.selected".into(), 1, None);
+            s.managed_ha_lights = Some(Default::default());
+        }
+        assert!(do_flash_canonical_device(&state, &device_id).is_err());
+        assert!(ha_controller.calls().is_empty());
+        state
+            .lock()
+            .unwrap()
+            .managed_ha_lights
+            .as_mut()
+            .unwrap()
+            .insert("light.selected".into());
+        do_flash_canonical_device(&state, &device_id).unwrap();
+        assert_eq!(
+            ha_controller.calls(),
+            vec![("RecordingFlash".into(), "light.selected".into())]
+        );
+        assert!(matter_controller.calls().is_empty());
+    }
+
+    #[test]
     fn flash_canonical_light_dispatches_to_preferred_endpoint() {
         let (state, _runtime) = setup_state(vec![]);
         let hub_key = HubKey::new(HubType::new("matter"), "local");
@@ -41281,6 +41526,40 @@ mod tests {
         assert_eq!(
             controller.calls(),
             vec![("RecordingFlash".to_string(), "matter-100".to_string())]
+        );
+    }
+
+    #[test]
+    fn dismissing_device_review_restores_the_pending_entry_if_persistence_fails() {
+        let (state, _runtime, hub) = setup_state_with_deferred_runtime();
+        let storage = Arc::new(TestStorage::default());
+        add_device_merge_triage_entry(&state, "pending", hub, "light", "room", "Room", None);
+        state.lock().unwrap().storage = Some(storage.clone());
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+        assert!(do_triage_dismiss(&state, "pending").is_err());
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .triage()
+                .get("pending")
+                .unwrap()
+                .status,
+            crate::canonical::triage::TriageStatus::Pending
+        );
+        storage.inner.lock().unwrap().fail_save_authority_state = false;
+        do_triage_dismiss(&state, "pending").unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .triage()
+                .get("pending")
+                .unwrap()
+                .status,
+            crate::canonical::triage::TriageStatus::Dismissed
         );
     }
 

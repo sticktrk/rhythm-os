@@ -63,6 +63,7 @@ fn revision(s: &AppState) -> String {
         s.light_schedule_configs(),
         s.power_save,
         s.light_breaker_enabled,
+        s.managed_ha_lights,
         commands::build_topology_node_dtos(s),
         nodes
     ]))
@@ -79,6 +80,7 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
         operation("plan_lighting_transfer","Preview merging a portable bundle. Review the destination mapping, resulting definitions, skipped nodes and whether adaptation will pause. Only explicitly mapped source nodes transfer their preferences.",OperationTier::Read,
             object_schema(&["settings","node_mappings"],json!({"settings":settings,"node_mappings":{"type":"object","additionalProperties":{"type":"string"},"description":"Map source node IDs to existing destination IDs. Use an empty object to transfer definitions alone."}})),object()),
         operation("plan_profile_bundle_reset","Review replacement of the hub's profile bundle with factory profiles, scenes, schedules and transitions. This changes shared behavior across rooms.",OperationTier::Read,object_schema(&[],json!({})),object()),
+        operation("plan_profile_edit","Review changes to one existing shared lighting profile. Supply its full definition. Use read_profile_curve to audition the calculation and plan_room_tuning for a room-specific preference.",OperationTier::Read,object_schema(&["profile_id","profile"],json!({"profile_id":{"type":"string"},"profile":{"type":"object"}})),object()),
         operation("plan_profile_reset","Review restoring one factory profile on every room using it.",OperationTier::Read,object_schema(&["profile_id"],json!({"profile_id":{"type":"string"}})),object()),
     ];
     for (id, desc) in [
@@ -93,6 +95,10 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
         (
             "apply_profile_bundle_reset",
             "Replace the reviewed profile bundle with factory lighting behavior.",
+        ),
+        (
+            "apply_profile_edit",
+            "Save the reviewed definition of one shared lighting profile.",
         ),
         (
             "apply_profile_reset",
@@ -184,6 +190,17 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
             let payload = json!({"settings":normalized,"node_mappings":args["node_mappings"]});
             let transfer: LightingSettingsImportPayload =
                 serde_json::from_value(payload.clone()).map_err(|_| invalid())?;
+            {
+                let app = state.lock().map_err(|_| unavailable())?;
+                if transfer.node_mappings.values().any(|id| {
+                    !app.topology.has_public_node(id) || !app.assistant_lighting_target_allowed(id)
+                }) {
+                    return Err(LightAssistantError::bad_request(
+                        "unmanaged_destination",
+                        "Map settings only to public lights or rooms delegated to Rhythm.",
+                    ));
+                }
+            }
             let preview =
                 commands::review_lighting_settings_import(state, transfer, true, &|_| Ok(()))
                     .map_err(|_| invalid())?;
@@ -198,25 +215,64 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
                 &commands::build_factory_default_profile_bundle().map_err(|_| unavailable())?,
             )
             .map_err(|_| unavailable())?;
+            let app = state.lock().map_err(|_| unavailable())?;
+            let defaults = commands::build_factory_default_profile_bundle_dto();
+            let removed_scene_ids = app
+                .scenes
+                .keys()
+                .filter(|id| !defaults.profile.scenes.iter().any(|scene| &scene.id == *id))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let bound_nodes: Vec<_> = app
+                .hub_runtime()
+                .into_iter()
+                .flat_map(|runtime| runtime.engine_all_node_snapshots())
+                .filter(|node| {
+                    node.profile_settings
+                        .mood_scene_id
+                        .as_ref()
+                        .is_some_and(|id| removed_scene_ids.contains(id))
+                })
+                .map(|node| node.id)
+                .collect();
+            if !bound_nodes.is_empty() {
+                return Err(LightAssistantError::bad_request(
+                    "scene_bindings_in_use",
+                    format!("Reset would remove saved scenes used by these nodes: {}. Change their Mood bindings before reviewing a reset.", bound_nodes.join(", ")),
+                ));
+            }
             (
                 "apply_profile_bundle_reset",
                 Value::Null,
-                json!({"before":before["profile"], "after":bundle["profile"]}),
+                json!({"before":before["profile"], "after":bundle["profile"],"removed_scene_ids":removed_scene_ids}),
             )
         }
-        "plan_profile_reset" => {
+        "plan_profile_edit" | "plan_profile_reset" => {
             let profile = args["profile_id"].as_str().ok_or_else(invalid)?;
             let current = commands::build_config(state, Some(profile)).map_err(|_| invalid())?;
             let current: Value = serde_json::from_str(&current).map_err(|_| unavailable())?;
-            let default =
-                crate::factory_default_config::factory_default_light_profile_config(profile)
-                    .ok_or_else(invalid)?;
-            let default =
-                commands::light_profile_config_resource(&default).map_err(|_| unavailable())?;
+            let (action, mut updated) = if id == "plan_profile_reset" {
+                (
+                    "apply_profile_reset",
+                    crate::factory_default_config::factory_default_light_profile_config(profile)
+                        .ok_or_else(invalid)?,
+                )
+            } else {
+                let config: rhythm_core::LightProfileConfig =
+                    serde_json::from_value(args["profile"].clone()).map_err(|_| invalid())?;
+                if config.id != profile {
+                    return Err(invalid());
+                }
+                ("apply_profile_edit", config)
+            };
+            rhythm_core::normalize_builtin_state_profile_config(&mut updated);
+            updated.normalize_float_precision();
+            let updated =
+                commands::light_profile_config_resource(&updated).map_err(|_| unavailable())?;
             (
-                "apply_profile_reset",
-                default.clone(),
-                json!({"before":current,"after":default}),
+                action,
+                updated.clone(),
+                json!({"before":current,"after":updated}),
             )
         }
         _ => return Err(invalid()),
@@ -246,7 +302,7 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
     });
     Ok(
         json!({"plan_id":token,"server_instance_id":installation,"operation":action,"requires_confirmation":true,"potentially_affected_rooms":rooms,"review":review,
-        "pauses_adaptation":s.platform_context=="ha_addon" && action!="apply_profile_reset"}),
+        "pauses_adaptation":s.platform_context=="ha_addon" && matches!(action,"apply_lighting_transfer"|"apply_profile_bundle_reset")}),
     )
 }
 
@@ -285,7 +341,13 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         anyhow::ensure!(
             plan.created.elapsed() < Duration::from_secs(300)
                 && s.server_instance_id == plan.installation
-                && revision(s) == plan.revision,
+                && revision(s) == plan.revision
+                && plan.payload["node_mappings"]
+                    .as_object()
+                    .is_none_or(|mappings| mappings.values().all(|id| id
+                        .as_str()
+                        .is_some_and(|id| s.topology.has_public_node(id)
+                            && s.assistant_lighting_target_allowed(id)))),
             "transfer_changed"
         );
         Ok(())
@@ -302,7 +364,7 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
             ProfileBundleImportPayload::Bundle(commands::build_factory_default_profile_bundle_dto()),
             &check,
         ),
-        "apply_profile_reset" => {
+        "apply_profile_edit" | "apply_profile_reset" => {
             let config = serde_json::from_value(plan.payload.clone()).map_err(|_| invalid())?;
             commands::do_config_set_reviewed(state, config, false, &check)
                 .and_then(|_| commands::build_config(state, plan.payload["id"].as_str()))

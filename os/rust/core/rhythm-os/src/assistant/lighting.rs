@@ -26,6 +26,7 @@ pub struct LightPlan {
     contract: String,
     operation: &'static str,
     room_id: String,
+    trial_id: Option<String>,
     room_mode: RhythmMode,
     global_mode: RhythmMode,
     modes: Vec<rhythm_core::ModeConfig>,
@@ -290,6 +291,19 @@ pub fn operations() -> Vec<LightAssistantOperationDto> {
     ] {
         ops.push(operation(id,desc,TemporaryLightOutput,schema,json!({"type":"object","required":["server_acknowledged","physical_verification"]})));
     }
+    ops.push(operation("audition_light",
+        "Try one physical light for one minute. Supply a managed independently addressable light_id and output, for example {power:on,brightness:50,color:{kind:kelvin,kelvin:3000}} or {power:off}. To restore its current Rhythm behavior early, send the same light_id and the returned trial_id instead of output.",
+        TemporaryLightOutput,object_schema(&["light_id"],json!({
+            "light_id":str_schema(), "trial_id":str_schema(),
+            "output":{"type":"object","description":"One Rhythm light output. A powered-on output requires a kelvin, rgb or xy color and brightness from 1 to 100."}
+        })),json!({"type":"object","required":["light_id","server_acknowledged","light_readback"]})));
+    ops.push(operation("read_profile_curve",
+        "Read a profile at one hour (now), read sunrise and sunset for a date (solar), or sample an entire day and its curve steps (day). The day view can preview an unsaved profile definition. For current room overrides use sample_room_curve.",
+        Read, object_schema(&["view"],json!({
+            "view":{"enum":["day","now","solar"]}, "profile_id":str_schema(), "profile":{"type":"object"},
+            "date":{"type":"string","minLength":10,"maxLength":10}, "hour":number_schema(0.,23.999),
+            "samples_per_hour":int_schema(1,12), "max_steps":int_schema(1,24)
+        })), json!({"type":"object"})));
     ops.push(operation("set_house_lighting_mode","Switch the whole hub to Day or Sleep now. Configured transitions and room power defaults can take effect. Report the global scope before use.",TemporaryLightOutput,object_schema(&["mode"],json!({"mode":{"enum":["day","sleep"]}})),json!({"type":"object"})));
     ops
 }
@@ -313,14 +327,17 @@ fn context(app: &AppState, id: &str, room_state: RoomModeState) -> Result<Lighti
         .engine_effective_node_snapshot(id)
         .filter(|n| n.kind == LightNodeKind::Room)
         .ok_or_else(|| unavailable("Room is unavailable in the lighting engine."))?;
-    let mut clock = rhythm_core::curve_context_for_local_datetime(
-        app.solar_noon_hour(),
-        app.latitude,
-        app.longitude,
-        app.timezone_name.as_deref(),
-        commands::current_local_datetime(app.utc_offset_hours),
-    );
-    clock.current_hour = runtime.current_hour();
+    let clock = runtime.current_curve_context().unwrap_or_else(|| {
+        let mut clock = rhythm_core::curve_context_for_local_datetime(
+            app.solar_noon_hour(),
+            app.latitude,
+            app.longitude,
+            app.timezone_name.as_deref(),
+            commands::current_local_datetime(app.utc_offset_hours),
+        );
+        clock.current_hour = runtime.current_hour();
+        clock
+    });
     let mode = room
         .profile_settings
         .schedule_mode(app.active_mode, clock.current_hour);
@@ -338,14 +355,51 @@ fn context(app: &AppState, id: &str, room_state: RoomModeState) -> Result<Lighti
     })
 }
 
+impl AppState {
+    pub(crate) fn independently_managed_light(&self, id: &str) -> bool {
+        self.canonical_registry.get(id).is_some_and(|light| {
+            !light.is_removed()
+                && light.device_type == rhythm_core::runtime::hub_registry::DeviceType::Light
+        }) && self.assistant_lighting_target_allowed(id)
+            && self
+                .topology
+                .light_node_uses_device_dispatch(id, &self.canonical_registry)
+    }
+
+    /// Only the delegated lights in an HA area participate in assistant edits.
+    pub(crate) fn assistant_lighting_target_allowed(&self, id: &str) -> bool {
+        if !self.rhythm_automation_allowed_for_node(id) {
+            return false;
+        }
+        if self.platform_context != "ha_addon" {
+            return true;
+        }
+        let selected = |id: &str| {
+            self.canonical_registry.get(id).is_some_and(|d| {
+                !d.is_removed()
+                    && d.device_type == rhythm_core::runtime::hub_registry::DeviceType::Light
+                    && self.ha_selection_allows_light(d)
+            })
+        };
+        match self.topology.get(id) {
+            Some(room) => room
+                .devices
+                .iter()
+                .any(|member| selected(&member.device_id)),
+            None => selected(id),
+        }
+    }
+}
+
 fn light_reports(app: &AppState, id: &str, since: Option<u64>) -> Vec<Value> {
-    let Some(room) = app.topology.get(id) else {
-        return Vec::new();
+    let ids = match app.topology.get(id) {
+        Some(room) => room.devices.iter().map(|d| d.device_id.as_str()).collect(),
+        None => vec![id],
     };
     let now = current_epoch_ms();
     let mut reports = Vec::new();
-    for binding in &room.devices {
-        let Some(light) = app.canonical_registry.get(&binding.device_id) else {
+    for device_id in ids {
+        let Some(light) = app.canonical_registry.get(device_id) else {
             continue;
         };
         if light.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
@@ -354,6 +408,10 @@ fn light_reports(app: &AppState, id: &str, since: Option<u64>) -> Vec<Value> {
             continue;
         }
         let observation = app.light_observations.get(&light.id);
+        let capabilities = commands::known_light_capabilities_for_device(light);
+        let node = app
+            .hub_runtime()
+            .and_then(|rt| rt.engine_effective_node_snapshot(&light.id));
         let offline = light
             .active_endpoints()
             .all(|ep| app.hub_connection_status.get(&ep.hub_key) == Some(&false));
@@ -392,6 +450,13 @@ fn light_reports(app: &AppState, id: &str, since: Option<u64>) -> Vec<Value> {
             "light_id": light.id,
             "availability": availability,
             "control_scope": scope,
+            "adaptation_enabled":node.map(|n| n.rhythm_enabled && !n.disabled && app.light_breaker_enabled && app.assistant_lighting_target_allowed(&light.id)),
+            "warmth_capability": match &capabilities {
+                None => "unknown",
+                Some(c) if c.color_temperature.is_none() => "unsupported",
+                Some(_) => "supported",
+            },
+            "supported_kelvin":capabilities.and_then(|c| c.color_temperature),
             "verification": if since.is_some() && scope == "outside_ha_selection" { "outside_control_scope" } else if readback.is_some() { "fresh_device_readback" } else { "no_fresh_readback" },
             "observed": readback.map(|o| json!({
                 "on": o.lights_on, "brightness": o.brightness, "kelvin": o.kelvin,
@@ -417,19 +482,49 @@ fn guard_adaptive(room: &NodeStateDto) -> Result<()> {
     Ok(())
 }
 
+fn room_state(state: &SharedState, id: &str) -> Result<NodeStateDto> {
+    let mut room = commands::build_node_state(state, id)
+        .map_err(|_| unavailable("Room unavailable in the lighting engine."))?;
+    if room.state == RoomModeState::Active {
+        let app = lock(state)?;
+        let ctx = context(&app, id, room.state)?;
+        let values = commands::light_profile_registry_from_state(&app).calculate_room_values(
+            ctx.mode,
+            room.state,
+            Some(&ctx.room.profile_settings),
+            &ctx.clock,
+            ctx.room.time_offset_minutes,
+        );
+        room.brightness =
+            (f32::from(values.brightness) + ctx.room.brightness_offset).clamp(1., 100.) as u8;
+        room.kelvin = values.kelvin;
+    }
+    Ok(room)
+}
+
 fn describe(state: &SharedState, room: &NodeStateDto, since: Option<u64>) -> Result<Value> {
     let app = lock(state)?;
     let ctx = context(&app, &room.id, room.state)?;
+    let now = current_epoch_ms();
+    let trial = app
+        .light_scene_previews
+        .values()
+        .find(|p| p.target_node_id == room.id && p.expires_at_epoch_ms > now);
     Ok(json!({
         "room_id":room.id,
         "mode":ctx.mode,
         "state":room.state,
+        "active_trial":trial.map(|p| json!({"trial_id":p.id,"scene_id":p.scene_id,"offset_minutes":p.assistant_time_offset_minutes,"expires_at_epoch_ms":p.expires_at_epoch_ms})),
+        "scheduled_default_state":commands::light_profile_registry_from_state(&app).room_default_for_mode(&room.id, ctx.mode),
         "profile_id":ctx.config.id,
+        "minimum_brightness":ctx.config.brightness_range().0,
+        "maximum_brightness":ctx.config.brightness_range().1,
+        "has_evening_brightness_ramp":matches!(ctx.config.curve, LightCurveShape::SuperGaussian{..}),
         "schedule":room.profile_settings.light_schedule,
         "legacy_schedule":room.profile_settings.room_schedule,
         "profile_override":room.profile_settings.profile_overrides.get(&ctx.config.id),
         "mood_scene_id":room.profile_settings.mood_scene_id,
-        "adaptation_enabled":room.rhythm_enabled && !room.disabled && app.light_breaker_enabled && app.rhythm_automation_allowed_for_node(&room.id),
+        "adaptation_enabled":room.rhythm_enabled && !room.disabled && app.light_breaker_enabled && app.assistant_lighting_target_allowed(&room.id),
         "light_breaker_enabled":app.light_breaker_enabled,
         "canonical_power":room.lights_on,
         "canonical_brightness":room.brightness,
@@ -467,7 +562,7 @@ fn setup(state: &SharedState, room: &NodeStateDto) -> Result<Value> {
 fn plan(state: &SharedState, room: &NodeStateDto, id: &str, args: &Value) -> Result<Value> {
     guard_adaptive(room)?;
     let mut app = lock(state)?;
-    if !app.rhythm_automation_allowed_for_node(&room.id) {
+    if !app.assistant_lighting_target_allowed(&room.id) {
         return Err(unavailable(
             "This room's automation is managed by another integration.",
         ));
@@ -479,8 +574,23 @@ fn plan(state: &SharedState, room: &NodeStateDto, id: &str, args: &Value) -> Res
         .ok_or_else(stale)?;
     let mut next = ctx.config.clone();
     let mut next_offset = ctx.room.time_offset_minutes;
+    let mut trial_id = None;
     let (edit, apply_id) = if id == "plan_absorb_offset" {
         let offset = num(args, "offset_minutes", -720., 720.)?;
+        if let Some(trial) = app
+            .light_scene_previews
+            .values()
+            .find(|p| p.target_node_id == room.id && p.expires_at_epoch_ms > current_epoch_ms())
+        {
+            if trial.assistant_time_offset_minutes != Some(offset) {
+                return Err(unavailable("The active trial is not a matching time shift. Audition the intended offset first."));
+            }
+            trial_id = Some(trial.id.clone());
+        } else if (ctx.room.time_offset_minutes - offset).abs() > 0.001 {
+            return Err(unavailable(
+                "Audition this offset or set it on the selected room before reviewing Absorb.",
+            ));
+        }
         if base.curve != ctx.config.curve || offset.abs() < 0.001 {
             return Err(unavailable("Absorb needs a nonzero shift on a shared adaptive curve without a room curve override."));
         }
@@ -602,7 +712,7 @@ fn plan(state: &SharedState, room: &NodeStateDto, id: &str, args: &Value) -> Res
     let token = uuid::Uuid::new_v4().to_string();
     let expires = now + PLAN_LIFETIME_MS;
     let contract = super::light_assistant_contract_sha256();
-    let preview = json!({"plan_id":token,"operation":apply_id,"contract_sha256":contract,"server_instance_id":app.server_instance_id,"expires_at_epoch_ms":expires,"requires_confirmation":true,"room_id":room.id,"profile_id":base.id,"scope":if id=="plan_absorb_offset"{"shared_profile"}else{"room_profile_override"},"affected_rooms":affected_rooms,"cleared_offsets":offsets,"before_profile":ctx.config,"after_profile":next,"samples":samples});
+    let preview = json!({"plan_id":token,"operation":apply_id,"contract_sha256":contract,"server_instance_id":app.server_instance_id,"expires_at_epoch_ms":expires,"requires_confirmation":true,"room_id":room.id,"profile_id":base.id,"trial_id":trial_id,"scope":if id=="plan_absorb_offset"{"shared_profile"}else{"room_profile_override"},"affected_rooms":affected_rooms,"cleared_offsets":offsets,"before_profile":ctx.config,"after_profile":next,"samples":samples});
     let proposal = LightPlan {
         id: token,
         expires_ms: expires,
@@ -610,6 +720,7 @@ fn plan(state: &SharedState, room: &NodeStateDto, id: &str, args: &Value) -> Res
         contract,
         operation: apply_id,
         room_id: room.id.clone(),
+        trial_id,
         room_mode: ctx.mode,
         global_mode: app.active_mode,
         modes: app.mode_configs(),
@@ -648,7 +759,7 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
     {
         return Err(stale());
     }
-    if !app.rhythm_automation_allowed_for_node(&plan.room_id) {
+    if !app.assistant_lighting_target_allowed(&plan.room_id) {
         return Err(stale());
     }
     let ctx = context(&app, &plan.room_id, RoomModeState::Active)?;
@@ -657,6 +768,14 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         || ctx.clock.sun_times.map(|s| (s.sunrise, s.sunset)) != plan.solar_times
     {
         return Err(stale());
+    }
+    if matches!(&plan.edit, ReviewedLightEdit::Absorb { .. }) {
+        let live_trial = app.light_scene_previews.values().find(|p| {
+            p.target_node_id == plan.room_id && p.expires_at_epoch_ms > current_epoch_ms()
+        });
+        if live_trial.map(|p| &p.id) != plan.trial_id.as_ref() {
+            return Err(stale());
+        }
     }
     // Runtime sources (buttons, integrations and ticks) can mutate offsets
     // without acquiring AppState. Compare and commit under the engine lock too.
@@ -672,6 +791,9 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         if config.id == app.active_mode_profile_id() {
             app.sync_active_mode_runtime_overrides();
         }
+    }
+    if let Some(trial) = &plan.trial_id {
+        app.light_scene_previews.remove(trial);
     }
     app.invalidate_queued_light_dispatches();
     if let Some(storage) = &app.storage {
@@ -856,6 +978,142 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
     {
         return Err(invalid("Unrecognized lighting argument."));
     }
+    if id == "audition_light" {
+        let light_id = string(args, "light_id")?;
+        {
+            let app = lock(state)?;
+            if !app.independently_managed_light(&light_id) {
+                return Err(unavailable("This light has no independently managed output route. Review its ownership or select its room for a room-wide test."));
+            }
+        }
+        let started = current_epoch_ms();
+        let mut receipt = json!({"light_id":light_id,"server_acknowledged":true,"physical_verification":"see_per_light_readback"});
+        match (args.get("output"), args.get("trial_id")) {
+            (Some(raw), None) => {
+                let light = commands::build_node_state(state, &light_id)
+                    .map_err(|_| unavailable("The selected light is unavailable."))?;
+                if light.disabled || !light.rhythm_enabled && light.state == RoomModeState::Active {
+                    return Err(unavailable(
+                        "Resume this light's Rhythm behavior before trying a reversible output.",
+                    ));
+                }
+                let output: crate::scenes::LightSceneOutput =
+                    serde_json::from_value(raw.clone())
+                        .map_err(|_| invalid("Supply a valid light output."))?;
+                if !(1..=100).contains(&output.brightness) {
+                    return Err(invalid("Brightness must be from 1 to 100."));
+                }
+                output.to_command(None).map_err(invalid)?;
+                let scene = json!({"id":format!("trial-{}",uuid::Uuid::new_v4()),"name":"Single light trial","light":{"default_output":output}});
+                let raw = preview_light_output(
+                    state,
+                    "preview_room_scene_draft",
+                    &light,
+                    &json!({"scene":scene}),
+                )?;
+                let result: SceneApplyResponse =
+                    serde_json::from_str(&raw).map_err(|_| uncertain())?;
+                let trial = result.preview_id.ok_or_else(uncertain)?;
+                let mut app = lock(state)?;
+                let live = app
+                    .light_scene_previews
+                    .get_mut(&trial)
+                    .ok_or_else(uncertain)?;
+                live.assistant_individual_audition = true;
+                receipt["trial_id"] = json!(trial);
+                receipt["expires_at_epoch_ms"] = json!(live.expires_at_epoch_ms);
+                receipt["status"] = json!("trial");
+            }
+            (None, Some(_)) => {
+                let trial = string(args, "trial_id")?;
+                if !lock(state)?
+                    .light_scene_previews
+                    .get(&trial)
+                    .is_some_and(|p| {
+                        p.target_node_id == light_id && p.assistant_individual_audition
+                    })
+                {
+                    return Err(stale());
+                }
+                let raw =
+                    commands::do_scene_preview_cancel(state, &trial).map_err(|_| uncertain())?;
+                let result: Value = serde_json::from_str(&raw).map_err(|_| uncertain())?;
+                receipt["status"] = result["restoration"].clone();
+            }
+            _ => {
+                return Err(invalid(
+                    "Choose either one output to audition or a trial ID to undo.",
+                ))
+            }
+        }
+        receipt["light_readback"] = json!(light_reports(&*lock(state)?, &light_id, Some(started)));
+        return Ok(receipt);
+    }
+    if id == "read_profile_curve" {
+        let view = enum_arg(args, "view", &["day", "now", "solar"])?;
+        let allowed: &[&str] = match view {
+            "day" => &[
+                "view",
+                "profile_id",
+                "profile",
+                "date",
+                "samples_per_hour",
+                "hour",
+                "max_steps",
+            ],
+            "now" => &["view", "profile_id", "hour"],
+            _ => &["view", "date"],
+        };
+        if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(invalid(
+                "Choose parameters supported by the selected curve view.",
+            ));
+        }
+        let date = args["date"].as_str();
+        if date.is_some_and(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err()) {
+            return Err(invalid("Choose a valid local date in YYYY-MM-DD format."));
+        }
+        let hour = args
+            .get("hour")
+            .map(|_| num(args, "hour", 0., 23.999))
+            .transpose()?;
+        let id = args["profile_id"].as_str();
+        let raw = match view {
+            "solar" => commands::build_curve_solar(state, date),
+            "now" => commands::build_curve_now(state, id, hour),
+            _ => {
+                let profile = args
+                    .get("profile")
+                    .map(|value| serde_json::from_value::<LightProfileConfig>(value.clone()))
+                    .transpose()
+                    .map_err(|_| invalid("Choose a complete Rhythm lighting profile."))?;
+                if profile
+                    .as_ref()
+                    .is_some_and(|profile| id.is_some_and(|id| id != profile.id))
+                {
+                    return Err(invalid(
+                        "The draft profile must match the selected profile ID.",
+                    ));
+                }
+                commands::build_curve(
+                    state,
+                    profile,
+                    id,
+                    date,
+                    args.get("samples_per_hour")
+                        .map(|_| int(args, "samples_per_hour", 1, 12).map(|v| v as u32))
+                        .transpose()?,
+                    hour,
+                    args.get("max_steps")
+                        .map(|_| int(args, "max_steps", 1, 24).map(|v| v as u8))
+                        .transpose()?,
+                )
+            }
+        }
+        .map_err(|_| unavailable("The selected profile or solar calculation is unavailable."))?;
+        return serde_json::from_str(&raw)
+            .map_err(|_| unavailable("Could not read the calculated curve."));
+    }
     if matches!(id, "apply_room_tuning" | "apply_absorb_offset") {
         return apply(state, id, args);
     }
@@ -891,14 +1149,13 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         return Err(invalid("Select a discovered Rhythm room."));
     }
     if descriptor.tier != OperationTier::Read
-        && !lock(state)?.rhythm_automation_allowed_for_node(&room_id)
+        && !lock(state)?.assistant_lighting_target_allowed(&room_id)
     {
         return Err(unavailable(
             "Review ownership in the controlling integration before operating this room.",
         ));
     }
-    let room = commands::build_node_state(state, &room_id)
-        .map_err(|_| unavailable("Room unavailable in the lighting engine."))?;
+    let room = room_state(state, &room_id)?;
     if id == "explain_room_output" {
         return describe(state, &room, None);
     }
@@ -967,8 +1224,33 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     (i64::from(room.brightness) + delta).clamp(1, 100) as u8,
                 )
             } else {
+                let kelvin = int(args, "kelvin", 500, 25000)? as u16;
+                let app = lock(state)?;
+                let ctx = context(&app, &room_id, room.state)?;
+                if ctx.config.curve.is_direct_color() {
+                    return Err(unavailable("This profile uses direct color. Select a white-temperature profile before adjusting warmth."));
+                }
+                let reports = light_reports(&app, &room_id, None);
+                let mut managed = reports
+                    .iter()
+                    .filter(|r| r["control_scope"] != "outside_ha_selection")
+                    .peekable();
+                if managed.peek().is_some()
+                    && managed.all(|r| r["warmth_capability"] == "unsupported")
+                {
+                    return Err(unavailable(
+                        "The managed lights in this room do not support adjustable warmth.",
+                    ));
+                }
+                let (minimum, maximum) = ctx.config.color_temp_range();
+                if !(minimum..=maximum).contains(&kelvin) {
+                    return Err(unavailable(format!(
+                        "This profile supports {} to {} K. Choose a temperature in that range.",
+                        minimum, maximum
+                    )));
+                }
                 commands::NodeCurveModifier::ColorTemperature {
-                    kelvin: int(args, "kelvin", 500, 25000)? as u16,
+                    kelvin,
                     preserve_brightness: true,
                 }
             };
@@ -1010,16 +1292,29 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
         }
         _ => return Err(invalid("Unknown lighting operation.")),
     }
-    let updated = commands::build_node_state(state, &room_id).map_err(|_| uncertain())?;
+    let updated = room_state(state, &room_id).map_err(|_| uncertain())?;
     let mut response = describe(state, &updated, Some(since))?;
+    if id == "adjust_room_warmth" {
+        response["requested_kelvin"] = args["kelvin"].clone();
+        response["brightness_preserved_by_hub"] = json!(updated.brightness == room.brightness);
+        response["temperature_difference_kelvin"] =
+            json!(i64::from(updated.kelvin) - args["kelvin"].as_i64().unwrap_or_default());
+    }
     response["server_acknowledged"] = json!(true);
     response["physical_verification"] = json!("see_per_light_readback");
     response["unresolved_node_ids"] = json!(unresolved);
     if let Some(token) = trial {
-        response["expires_at_epoch_ms"] = json!(lock(state)?
+        let mut app = lock(state)?;
+        let preview = app
             .light_scene_previews
-            .get(&token)
-            .map(|p| p.expires_at_epoch_ms));
+            .get_mut(&token)
+            .ok_or_else(uncertain)?;
+        if id == "try_room_offset" {
+            preview.assistant_time_offset_minutes = Some(num(args, "offset_minutes", -720., 720.)?);
+            response["active_trial"]["offset_minutes"] =
+                json!(preview.assistant_time_offset_minutes);
+        }
+        response["expires_at_epoch_ms"] = json!(preview.expires_at_epoch_ms);
         response["trial_id"] = json!(token);
     }
     Ok(response)

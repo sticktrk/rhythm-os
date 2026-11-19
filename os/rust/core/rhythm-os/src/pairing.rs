@@ -1782,6 +1782,22 @@ pub fn record_pairing_history(state: &crate::state::SharedState, mut entry: Pair
     crate::activity_cloud::enqueue_recent_activity_upload(state);
 }
 
+/// Parse a device ID string back into `(node_id, endpoint)`.
+pub fn parse_matter_device_id(device_id: &str) -> Option<(u64, u16)> {
+    let rest = device_id.strip_prefix("matter-")?;
+    match rest.split_once('-') {
+        Some((node_str, endpoint_str)) => {
+            let node_id = node_str.parse::<u64>().ok()?;
+            let endpoint = endpoint_str.parse::<u16>().ok()?;
+            Some((node_id, endpoint))
+        }
+        None => {
+            let node_id = rest.parse::<u64>().ok()?;
+            Some((node_id, 1))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

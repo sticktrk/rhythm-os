@@ -41,6 +41,10 @@ def main():
                             if not (root / 'state').is_dir():
                                 raise RuntimeError('Server did not initialize its data directory.')
                             if args.assistant_contract:
+                                discovery = f'http://127.0.0.1:{port}/.well-known/oauth-authorization-server/api/assistant/mcp'
+                                with urllib.request.urlopen(discovery, timeout=3) as api:
+                                    if json.load(api).get('authorization_endpoint') != '/api/assistant/oauth/authorize':
+                                        raise RuntimeError('HA Assist could not discover OAuth from the configured MCP URL.')
                                 uri = f'http://127.0.0.1:{port}/api/assistant/contract'
                                 with urllib.request.urlopen(uri, timeout=3) as api:
                                     contract = json.load(api)

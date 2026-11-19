@@ -27,6 +27,10 @@ pub enum LightControlError {
     #[error("Connection error: {0}")]
     ConnectionError(String),
 
+    /// The controller rejected the request before sending a physical command.
+    #[error("Command not dispatched: {0}")]
+    NotDispatched(String),
+
     /// Failed to send a command to the lights.
     #[error("Command failed: {0}")]
     CommandFailed(String),

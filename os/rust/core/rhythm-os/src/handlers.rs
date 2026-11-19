@@ -855,10 +855,33 @@ fn perform_unpair_device_reviewed(
     } else if let Some(device_id) = requested_device_id {
         commands::validate_active_device_removal_target(state, device_id, &requested_hub_key)?;
     }
-    let start_unpairing = {
+    let (start_unpairing, expected_endpoint) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         check(&s)?;
-        s.start_unpairing_fn.clone()
+        let expected_device = requested_device_id.and_then(|id| {
+            s.canonical_registry.get(id).or_else(|| {
+                s.canonical_registry
+                    .find_by_native_id(&requested_hub_key, id)
+            })
+        });
+        let expected_endpoint =
+            if let (Some(requested), Some(device)) = (requested_device_id, expected_device) {
+                let mut matches = device.endpoints.iter().filter(|ep| {
+                    ep.hub_key == requested_hub_key
+                        && (ep.native_id == requested || device.id == requested)
+                });
+                let exact = matches
+                    .next()
+                    .map(|ep| (device.id.clone(), ep.native_id.clone()));
+                anyhow::ensure!(
+                    matches.next().is_none(),
+                    "Choose the exact native endpoint on this integration before removing it"
+                );
+                exact
+            } else {
+                None
+            };
+        (s.start_unpairing_fn.clone(), expected_endpoint)
     };
 
     let Some(start_fn) = start_unpairing else {
@@ -897,6 +920,43 @@ fn perform_unpair_device_reviewed(
         result.error
     );
     if result.status == crate::pairing::PairingStatus::Complete {
+        let scoped_request =
+            expected_endpoint.is_some() || request.params["hub_address"].is_string();
+        if let Some(requested) = requested_device_id.filter(|_| scoped_request) {
+            let matches_id = result.device_id.as_deref().is_some_and(|reported| {
+                reported == requested
+                    || expected_endpoint
+                        .as_ref()
+                        .is_some_and(|(canonical, native)| {
+                            reported == native || reported == canonical
+                        })
+            });
+            let same_hub = result.hub_type == request.hub_type
+                && !result
+                    .hub_address
+                    .as_deref()
+                    .zip(
+                        request
+                            .params
+                            .get("hub_address")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                    .is_some_and(|(reported, requested)| reported != requested);
+            if !matches_id || !same_hub {
+                let message = "The integration did not confirm the selected device and bridge. Verify removal before retrying.";
+                crate::pairing::record_pairing_history(
+                    state,
+                    crate::pairing::pairing_history_entry_for_unpair(
+                        &request.hub_type,
+                        &request.params,
+                        &crate::pairing::PairingStatus::Failed,
+                        None,
+                        Some(message),
+                    ),
+                );
+                anyhow::bail!(message);
+            }
+        }
         if archive && result.device_id.is_none() {
             let error = anyhow::anyhow!("Completed archive did not identify the removed device");
             crate::pairing::record_pairing_history(
@@ -912,6 +972,10 @@ fn perform_unpair_device_reviewed(
             return Err(error);
         }
         if let Some(device_id) = &result.device_id {
+            let device_id = expected_endpoint
+                .as_ref()
+                .map(|(_, native)| native)
+                .unwrap_or(device_id);
             let hub_address = result
                 .hub_address
                 .as_deref()
@@ -10680,6 +10744,51 @@ mod tests {
         let device = state.canonical_registry.get(&canonical_id).unwrap();
         assert!(device.endpoint_for_hub(&hue_key).is_some());
         assert!(device.endpoint_for_hub(&inactive_key).is_some());
+    }
+
+    #[test]
+    fn unpair_rejects_an_acknowledgement_for_a_different_device_or_bridge_before_cleanup() {
+        for (reported_id, address) in [("different", "bridge"), ("selected", "other-bridge")] {
+            let (state, _registry, canonical, _room, key) =
+                handler_state_with_canonical_light_for_hub_at("hue", "bridge", "selected");
+            let other_bridge = HubKey::new(HubType::new("hue"), "other-bridge");
+            {
+                let mut s = state.lock().unwrap();
+                let d = s.canonical_registry.get_mut(&canonical).unwrap();
+                d.upsert_endpoint(key.clone(), "different".into(), 2, None);
+                d.upsert_endpoint(other_bridge, "selected".into(), 2, None);
+                s.start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+                    Ok(UnpairingResult {
+                        hub_type: "hue".into(),
+                        hub_address: Some(address.into()),
+                        status: PairingStatus::Complete,
+                        device_id: Some(reported_id.into()),
+                        error: None,
+                        completion_scope: None,
+                        warning: None,
+                    })
+                }));
+            }
+            let response = handle_unpair_device(
+                &state,
+                &UnpairingRequest {
+                    hub_type: "hue".into(),
+                    params: serde_json::json!({"device_id":"selected","hub_address":"bridge"}),
+                },
+            );
+            assert_eq!(response.status, 500);
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .canonical_registry
+                    .get(&canonical)
+                    .unwrap()
+                    .endpoints
+                    .len(),
+                3
+            );
+        }
     }
 
     #[test]

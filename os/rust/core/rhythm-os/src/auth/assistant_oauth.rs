@@ -31,7 +31,9 @@ pub fn public_route(method: &Method, path: &str) -> bool {
         (method, path),
         (
             &Method::GET,
-            "/.well-known/oauth-authorization-server" | "/api/assistant/oauth/authorize"
+            "/.well-known/oauth-authorization-server"
+                | "/.well-known/oauth-authorization-server/api/assistant/mcp"
+                | "/api/assistant/oauth/authorize"
         ) | (
             &Method::POST,
             "/api/assistant/oauth/authorize" | "/api/assistant/oauth/token"
