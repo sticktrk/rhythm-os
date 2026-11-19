@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/assistant_access_screen.dart';
@@ -60,6 +62,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('low'), findsOneWidget);
       expect(find.text('medium'), findsOneWidget);
+      final screenshot =
+          Platform.environment['RHYTHM_AGENT_APPROVAL_SCREENSHOT'];
+      if (approve && screenshot != null) {
+        await expectLater(find.byType(Overlay), matchesGoldenFile(screenshot));
+      }
       final decision = find.text(approve ? 'Approve' : 'Decline');
       await tester.ensureVisible(decision);
       await tester.tap(decision);
