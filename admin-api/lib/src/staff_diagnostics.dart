@@ -29,25 +29,55 @@ final _atStart = RegExp(
     r'^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))(?=\s|\]|$)');
 DateTime? staffDiagnosticTime(Object? value) {
   if (value is! String || !_iso.hasMatch(value)) return null;
+  final year = int.parse(value.substring(0, 4)),
+      month = int.parse(value.substring(5, 7)),
+      day = int.parse(value.substring(8, 10));
+  final localDate = DateTime.utc(year, month, day);
+  if (localDate.year != year ||
+      localDate.month != month ||
+      localDate.day != day ||
+      int.parse(value.substring(11, 13)) > 23 ||
+      int.parse(value.substring(14, 16)) > 59 ||
+      int.parse(value.substring(17, 19)) > 59) {
+    return null;
+  }
+  final offset = RegExp(r'[+-](\d{2}):?(\d{2})$').firstMatch(value);
+  if (offset != null &&
+      (int.parse(offset.group(1)!) > 23 || int.parse(offset.group(2)!) > 59)) {
+    return null;
+  }
   final parsed = DateTime.tryParse(value)?.toUtc();
   if (parsed == null || parsed.year < 2000 || parsed.year > 2100) return null;
   return DateTime.fromMillisecondsSinceEpoch(parsed.millisecondsSinceEpoch,
       isUtc: true);
 }
 
+final _householdEvent = RegExp(
+    r'\b(?:motion|occupancy|presence)\b|motion_(?:sensor|node|detected)|light_command');
 String? _category(String line) {
-  if (RegExp(
-          r'\b(?:motion|occupancy|presence)\b|motion_(?:sensor|node|detected)|light_command')
-      .hasMatch(line)) {
-    return null;
+  if (_householdEvent.hasMatch(line)) return null;
+  if (line.contains('wifi: no wireless interface appeared')) {
+    return 'wifi_interface_unavailable';
+  }
+  if (line.contains('wifi: no ip yet') ||
+      line.contains('wifi: udhcpc failed to start')) {
+    return 'wifi_address_unavailable';
+  }
+  if (line.contains('wifi: no configured network') ||
+      line.contains('wifi: wpa_supplicant failed to start')) {
+    return 'wifi_configuration_unavailable';
+  }
+  if (line.contains('wifi: connected with ip') ||
+      line.contains("wifi: connected to '")) {
+    return 'network_restored';
   }
   if (RegExp(
-          r'network (?:is )?(?:unreachable|down)|link (?:is )?down|wifi.*(?:disconnected|disassociated)|tunnel.*(?:disconnect|closed|down)|failed to serve (?:tunnel|quic)|connection reset by peer')
+          r'network (?:is )?(?:unreachable|down)|link (?:is )?down|wi-?fi.*(?:disconnected|disassociated)|tunnel.*(?:disconnect|closed|down)|failed to serve (?:tunnel|quic)|connection reset by peer')
       .hasMatch(line)) {
     return 'network_offline';
   }
   if (RegExp(
-          r'registered tunnel connection|tunnel.*(?:reconnected|connection established)|link (?:is )?up|wifi.*(?:reconnected|connection established)')
+          r'registered tunnel connection|tunnel.*(?:reconnected|connection established)|link (?:is )?up|wi-?fi.*(?:reconnected|connection established)')
       .hasMatch(line)) {
     return 'network_restored';
   }
@@ -80,6 +110,15 @@ Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
         final event = jsonDecode(message);
         if (event is! Map) continue;
         final fields = event['fields'];
+        if ([
+          event['event'],
+          event['target'],
+          if (fields is Map) fields['event']
+        ]
+            .whereType<String>()
+            .any((v) => _householdEvent.hasMatch(v.toLowerCase()))) {
+          continue;
+        }
         final msg = event['message'] ??
             event['msg'] ??
             (fields is Map ? fields['message'] : null);

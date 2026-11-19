@@ -3,6 +3,33 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+      'classifies appliance Wi-Fi boot messages without exporting SSIDs or assigning a time',
+      () {
+    final result = staffLogDiagnostics([
+      {
+        'line_number': 1,
+        'text': "wifi: no IP yet; state=SCANNING ssid='private_canary'"
+      },
+      {
+        'line_number': 2,
+        'text': "wifi: connected to 'private_canary' with IP 192.168.0.1"
+      },
+      {
+        'line_number': 3,
+        'text':
+            '{"time":"2026-11-19T05:01:00Z","fields":{"event":"motion_node_control_suppressed","message":"integration offline"}}'
+      }
+    ]);
+    expect(result['diagnostics'], [
+      {'line': 1, 'category': 'wifi_address_unavailable'},
+      {'line': 2, 'category': 'network_restored'}
+    ]);
+    expect(result['undated_diagnostics'], 2);
+    expect(staffDiagnosticTime('2026-02-31T01:00:00Z'), isNull);
+    expect(staffDiagnosticTime('2026-11-19T03:00:00+25:40'), isNull);
+  });
+
+  test(
       'local wall-clock times and unrelated log lines do not establish an outage time',
       () {
     final lines = [

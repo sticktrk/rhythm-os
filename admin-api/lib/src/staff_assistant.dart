@@ -32,6 +32,9 @@ const _version = '2025-06-18';
 const _categories = [
   'network_offline',
   'network_restored',
+  'wifi_interface_unavailable',
+  'wifi_address_unavailable',
+  'wifi_configuration_unavailable',
   'authentication',
   'timeout',
   'restart',
