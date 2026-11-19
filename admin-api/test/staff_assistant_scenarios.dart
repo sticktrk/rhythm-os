@@ -299,6 +299,7 @@ class _StaffFixture {
         if (granted)
           {
             'id': 'grant1',
+            'home_id': 'home-1',
             'hub_id': 'hub-1',
             'token_id': 't1',
             'scope': 'beta_admin',
@@ -317,6 +318,18 @@ class _StaffFixture {
         {'id': 'hub-1', 'home_id': 'home-1', 'name': 'private_canary'}
       ]);
     }
+    if (path == '/rest/v1/hub_remote_access') {
+      expect(request.url.queryParameters['home_id'], 'eq.home-1');
+      expect(request.url.queryParameters['server_instance_id'], 'eq.srv-test');
+      return _jsonResponse([
+        {'hostname': 'hub-1.relay.test'}
+      ]);
+    }
+    if (path == '/rest/v1/hubs' && request.method == 'GET') {
+      final rows = jsonDecode(_supabaseResponse(request).body) as List;
+      rows.first['remote_endpoint']['host'] = 'hub-1.relay.test';
+      return _jsonResponse(rows);
+    }
     if (path == '/rest/v1/support_debug_bundle_submissions') {
       final body = jsonDecode((request as http.Request).body) as Map;
       expect(body['summary'], contains('network_offline'));
@@ -326,6 +339,7 @@ class _StaffFixture {
       ]);
     }
     if (request.url.host == 'supabase.test') return _supabaseResponse(request);
+    expect(request.url.host, 'hub-1.relay.test');
     if (path == '/api/auth/support-session-token') {
       expect(request.headers['Authorization'], 'Bearer synthetic-support');
       return _jsonResponse({'token': 'synthetic-short-session'});

@@ -386,13 +386,12 @@ class DeviceProbeService {
     request.validateMutationGuards();
     final hub = await _loadHub(session: session, hubId: hubId);
     final candidates = _endpointCandidates(hub)
-        .where(
-            (candidate) => !request.isAssistant || candidate.route == 'remote')
+        .where((candidate) => !grantRequired || candidate.route == 'remote')
         .toList();
     if (candidates.isEmpty) {
       throw AdminApiException(
-        request.isAssistant ? 403 : 400,
-        request.isAssistant
+        grantRequired ? 403 : 400,
+        grantRequired
             ? 'This hub needs a verified remote support route.'
             : 'No endpoint is configured for this Light Box.',
       );

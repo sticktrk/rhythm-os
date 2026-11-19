@@ -3,6 +3,7 @@
 CREATE ROLE authenticated;
 CREATE ROLE anon;
 CREATE ROLE service_role BYPASSRLS;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO service_role;
 CREATE SCHEMA auth;
 CREATE TABLE auth.users (id uuid PRIMARY KEY);
 CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS $$ SELECT NULL::uuid $$;
@@ -25,5 +26,6 @@ CREATE FUNCTION storage.foldername(text) RETURNS text[] LANGUAGE sql AS $$ SELEC
 \ir ../app/supabase/migrations/20260808000000_add_support_report_kind.sql
 \ir ../app/supabase/migrations/20260809010000_add_async_support_bundle_collection.sql
 \ir ../app/supabase/migrations/20260809040000_allow_pending_support_bundle_size.sql
+\ir ../app/supabase/migrations/20261119000000_protect_assistant_relay_routes.sql
 \ir ../app/supabase/migrations/20261119010000_customer_assistant_reviews.sql
 \ir ../app/supabase/tests/customer_assistant_reviews.sql

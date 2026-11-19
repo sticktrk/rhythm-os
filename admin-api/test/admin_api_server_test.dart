@@ -881,7 +881,7 @@ void main() {
     expect(await proxy('POST', apply), 200);
     // Same staff identity, endpoint and unexpired device session.
     pinned = false;
-    expect(await proxy('POST', plan), 403);
+    expect(await proxy('POST', plan), 503);
     pinned = true;
     granted = false;
     expect(await proxy('POST', apply), 403);

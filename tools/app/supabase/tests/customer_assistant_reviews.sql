@@ -8,6 +8,8 @@ BEGIN
   INSERT INTO auth.users(id) VALUES (actor),(member),(other_user);
   INSERT INTO public.homes(id,name,owner_id,member_ids) VALUES(home,'Fixture home',actor,ARRAY[actor,member]);
   INSERT INTO public.hubs(id,home_id,type,name,endpoint,server_instance_id) VALUES(hub,home,'server','Fixture hub','{}','fixture-instance');
+  SET LOCAL ROLE service_role;
+  ASSERT NOT has_table_privilege('authenticated','public.hub_remote_access','update');
   ASSERT NOT has_function_privilege('authenticated','public.customer_assistant_review(uuid,text,jsonb,uuid)','execute');
   ASSERT NOT has_table_privilege('authenticated','public.customer_assistant_reviews','select');
   arguments:=jsonb_build_object('change','remove_member','home_id',home,'member_id',member);
