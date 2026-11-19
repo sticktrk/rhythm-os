@@ -1,6 +1,12 @@
 // Model-bound data uses explicit projections. Resident display names, report
 // text, endpoint URLs and household activity remain on the human-facing path.
-import { changes, type Fields, object, uuid } from "./contract.ts";
+import {
+  changes,
+  credentialNextStep,
+  type Fields,
+  object,
+  uuid,
+} from "./contract.ts";
 const oneOf = (v: unknown, choices: string[]) =>
   typeof v === "string" && choices.includes(v) ? v : undefined;
 const pickId = (v: unknown) => uuid(v) ? v : undefined;
@@ -35,6 +41,7 @@ function projected(action: Fields): Fields {
     plan_id: pickId(action.plan_id),
     include_bundle: bool(action.include_bundle),
     previous_grant_active: bool(action.previous_grant_active),
+    next_step: credentialNextStep(action),
     operation: "apply_customer_plan",
     requires_confirmation: bool(action.requires_confirmation),
     expires_at: iso(action.expires_at),

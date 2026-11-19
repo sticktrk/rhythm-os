@@ -251,3 +251,40 @@ Deno.test("support revocation and remote setup disclose future support approval"
     );
   }
 });
+
+Deno.test("membership removal explains device access and hands off each hub to the owner", async () => {
+  const { invoke } = fixture((step) => ({
+    change: "remove_member",
+    plan_id: actor,
+    status: step === "plan" ? "review" : "applied",
+    ...(step === "complete"
+      ? {
+        next_step: {
+          actor: "home_owner",
+          surface: "hub_device_credentials",
+          hub_ids: [hubId],
+        },
+      }
+      : {}),
+  }));
+  const plan = await invoke({
+    operation: "plan_customer_change",
+    arguments: { change: "remove_member", home_id: homeId, member_id: actor },
+  });
+  equal(
+    (await plan.json()).description,
+    "Remove this member’s account access to the home. Any credential on their phone still gives access to its hub until the owner revokes that credential on the hub.",
+  );
+  const receipt =
+    await (await invoke({ device_complete: actor, outcome: "acknowledged" }))
+      .json();
+  equal([
+    receipt.next_step.actor,
+    receipt.next_step.surface,
+    receipt.next_step.hub_ids,
+  ], ["home_owner", "hub_device_credentials", [hubId]]);
+  equal(
+    receipt.next_step.instructions.includes("Authorized credentials"),
+    true,
+  );
+});

@@ -41,7 +41,8 @@ BEGIN
   ASSERT receipt->>'status'='awaiting_device';
   ASSERT (SELECT member=ANY(member_ids) FROM public.homes WHERE id=home);
   PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
-  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
+  receipt:=public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid);
+  ASSERT receipt->>'status'='applied' AND receipt->'next_step'->'hub_ids'=jsonb_build_array(hub);
   ASSERT NOT (SELECT member=ANY(member_ids) FROM public.homes WHERE id=home);
   ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
   ASSERT public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid)->>'status'='applied';
@@ -106,7 +107,8 @@ BEGIN
   PERFORM public.customer_assistant_review(other_user,'claim','{}',(plan->>'plan_id')::uuid);
   ASSERT public.customer_assistant_review(other_user,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='applied';
   ASSERT NOT (SELECT other_user=ANY(member_ids) FROM public.homes WHERE id=home);
-  ASSERT public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid)->>'status'='applied';
+  receipt:=public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  ASSERT receipt->>'status'='applied' AND receipt->'next_step'->'hub_ids'='[]'::jsonb;
 
   SELECT revision INTO policy_before FROM public.hub_support_review_policy WHERE hub_id=hub;
   target:=jsonb_build_object('home_id',home,'hub_id',hub,'server_instance_id','changed-instance');

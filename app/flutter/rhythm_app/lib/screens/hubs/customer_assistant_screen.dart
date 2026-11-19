@@ -326,6 +326,15 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
         'The device outcome is uncertain. Check its current state before making another request.',
       _ => 'Account response · ${status ?? 'unknown'}',
     });
+    final next = result['next_step'];
+    if (next is Map &&
+        next['surface'] == 'hub_device_credentials' &&
+        next['hub_ids'] is List) {
+      _say([
+        next['instructions'],
+        for (final id in next['hub_ids']) 'Box · $id',
+      ].join('\n'));
+    }
   }
 
   Future<void> _send(String message) async {

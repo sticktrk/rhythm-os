@@ -15,7 +15,7 @@ export const changes = {
   revoke_support:
     "Revoke the active Rhythm staff support grant for this hub. After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
   remove_member:
-    "Remove this member from the home. Their access to the home and its hubs ends.",
+    "Remove this member’s account access to the home. Any credential on their phone still gives access to its hub until the owner revokes that credential on the hub.",
   enable_remote:
     "Set up remote access to this hub. The phone will configure the device and check reachability. After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
   submit_report:
@@ -179,11 +179,29 @@ export function validated(name: string, args: unknown): Fields {
   }
   return args;
 }
+export function credentialNextStep(row: Fields) {
+  if (
+    row.change !== "remove_member" || row.status !== "applied" ||
+    !object(row.next_step)
+  ) {
+    return undefined;
+  }
+  const ids = row.next_step.hub_ids;
+  if (!Array.isArray(ids) || !ids.every(uuid)) return undefined;
+  return {
+    actor: "home_owner",
+    surface: "hub_device_credentials",
+    hub_ids: ids,
+    instructions:
+      "Review this phone’s credential separately on each listed hub. In the Home Assistant add-on, open Connect mobile app → Authorized credentials. For a standalone Box without a device-credential list, contact Rhythm support for help revoking the phone’s access.",
+  };
+}
 export function reviewCopy(row: Fields): Fields {
   const change = row.change as keyof typeof changes;
   return {
     ...row,
     description: changes[change],
+    next_step: credentialNextStep(row),
     apply_arguments: { plan_id: row.plan_id },
   };
 }

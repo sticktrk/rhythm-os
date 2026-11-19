@@ -242,6 +242,13 @@ BEGIN
   IF change_type IN ('grant_support','revoke_support') THEN
     answer := answer || jsonb_build_object('support_scope','beta_admin','previous_grant_active',r.revision->>'grant_id' IS NOT NULL);
   END IF;
+  IF change_type='remove_member' AND r.state='applied' THEN
+    answer := answer || jsonb_build_object('next_step',jsonb_build_object(
+      'actor','home_owner','surface','hub_device_credentials','hub_ids',coalesce((
+        SELECT jsonb_agg(b.id ORDER BY b.id) FROM public.hubs b
+        WHERE b.home_id=home.id AND b.type='server' AND home.owner_id=p_actor
+      ),'[]'::jsonb)));
+  END IF;
   RETURN answer;
 END;
 $$;
