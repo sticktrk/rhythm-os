@@ -36,6 +36,7 @@ pub enum PlatformAction {
         expected_entities: BTreeSet<String>,
         expected_revision: String,
     },
+    ReadUpdateStatus,
     CheckUpdate,
     Update {
         expected_revision: String,
@@ -183,6 +184,7 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
     );
     add("read_managed_ha_lights","Inspect HA's current reviewed lights and selectable registry identities on a Home Assistant add-on.",&[],json!({}),Read);
     add("plan_managed_ha_lights","Review replacing the complete set of HA lights delegated to Rhythm. Pause Rhythm before applying. Other entities stay under HA control.",&["entity_ids"],json!({"entity_ids":ids}),Read);
+    add("read_appliance_update_status","Inspect the current OTA stage, version and last check without contacting the update feed. Home Assistant owns add-on updates.",&[],json!({}),Read);
     add("check_hub_update","Read the current version and check the configured update feed. Home Assistant owns add-on updates.",&[],json!({}),Read);
     add(
         "plan_hub_update",
@@ -284,7 +286,7 @@ fn platform_handoff(s: &AppState, op: &str) -> Option<Value> {
     match op {
         "plan_create_room"|"plan_rename_room"|"plan_merge_rooms"|"plan_delete_room"|"plan_rename_device"|"plan_remove_device" if addon =>Some(ha_area(s)),
         "plan_bridge_pairing"|"plan_nearby_hue_lights" if addon=>setup(s,"pair").ok(),
-        "check_hub_update"|"plan_hub_restart"|"plan_hub_update" if addon=>Some(handoff(s,"home_assistant","ha_administrator","Open Settings > Apps > Rhythm to review the update or restart the add-on.")),
+        "read_appliance_update_status"|"check_hub_update"|"plan_hub_restart"|"plan_hub_update" if addon=>Some(handoff(s,"home_assistant","ha_administrator","Open Settings > Apps > Rhythm to review the update or restart the add-on.")),
         "read_managed_ha_lights"|"plan_managed_ha_lights" if !addon=>Some(handoff(s,"home_assistant","ha_administrator","Light delegation is managed on the Home Assistant add-on. Select that hub to review its lights.")),
         _=>None
     }
@@ -340,6 +342,7 @@ pub(super) async fn call(state: &SharedState, id: &str, args: Value) -> Result<V
             })
         }
         "read_managed_ha_lights" => platform(state, PlatformAction::ReadHaSelection).await,
+        "read_appliance_update_status" => platform(state, PlatformAction::ReadUpdateStatus).await,
         "check_hub_update" => platform(state, PlatformAction::CheckUpdate).await,
         _ => preview(state, id, &args).await,
     }

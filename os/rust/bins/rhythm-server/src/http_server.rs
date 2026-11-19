@@ -692,6 +692,20 @@ fn install_assistant_maintenance(state: &SharedState, ota: crate::self_update::O
             let ota = ota.clone();
             Box::pin(async move {
                 match action {
+                    PlatformAction::ReadUpdateStatus => {
+                        let snapshot = ota.snapshot();
+                        Ok(serde_json::json!({
+                            "stage": snapshot.state,
+                            "current_version": snapshot.current_version,
+                            "latest_version": snapshot.latest_version,
+                            "target_version": snapshot.target_version,
+                            "update_available": snapshot.update_available,
+                            "update_reason": snapshot.update_reason,
+                            "checked_at_epoch_ms": snapshot.checked_at_epoch_ms,
+                            "checksum_verified": snapshot.checksum_verified,
+                            "had_rollback": snapshot.last_rollback.is_some(),
+                        }))
+                    }
                     PlatformAction::CheckUpdate => {
                         let value = platform_receipt(check_update(state, ota).await).await?;
                         Ok(serde_json::json!({
@@ -1463,6 +1477,21 @@ mod tests {
     async fn response_text(response: Response) -> String {
         let body_bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         String::from_utf8_lossy(&body_bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn assistant_update_status_reads_the_existing_operation_without_starting_a_check() {
+        use rhythm_os::assistant::devices::PlatformAction;
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let ota = crate::self_update::OtaStatusHandle::new("1.0.0");
+        install_assistant_maintenance(&state, ota.clone());
+        let run = state.lock().unwrap().assistant_devices.platform.clone().unwrap();
+        let _operation = ota.begin_operation().unwrap();
+        let status = run(state, PlatformAction::ReadUpdateStatus).await.unwrap();
+        assert_eq!(status["current_version"], "1.0.0");
+        assert_eq!(status["stage"], serde_json::json!(ota.snapshot().state));
+        assert!(status["checked_at_epoch_ms"].is_null());
+        assert!(status.get("last_error").is_none());
     }
 
     #[tokio::test]

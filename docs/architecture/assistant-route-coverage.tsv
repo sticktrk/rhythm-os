@@ -33,7 +33,7 @@ rhythm-server	POST	/api/diag/reset-matter-fabric	handoff	Owner reviews installat
 rhythm-server	GET	/api/discover	operation	read_hub_status
 rhythm-server	GET	/api/ota/capabilities	operation	check_hub_update
 rhythm-server	GET	/api/ota/check	operation	check_hub_update
-rhythm-server	GET	/api/ota/status	operation	check_hub_update
+rhythm-server	GET	/api/ota/status	operation	read_appliance_update_status
 rhythm-server	POST	/api/ota/update	operation	plan_hub_update
 rhythm-server	POST	/api/restart	operation	plan_hub_restart
 shared	GET	/.well-known/oauth-authorization-server	exclusion	Contract discovery, authorization or transport for the operation catalog.
