@@ -19626,13 +19626,17 @@ pub(crate) fn do_canonical_rename_device_reviewed(state: &SharedState, device_id
         {
             return Err(anyhow::anyhow!("Device not found: {}", device_id));
         }
+        let canonical_before = s.canonical_registry.clone();
         if !s
             .canonical_registry
             .rename_device_by_user(device_id, trimmed)
         {
             return Err(anyhow::anyhow!("Device not found: {}", device_id));
         }
-        persist_canonical(&s);
+        if let Err(error) = save_canonical(&s) {
+            s.canonical_registry = canonical_before;
+            return Err(error.context("Persisting the device name"));
+        }
     }
 
     reconcile_runtime_from_state(state)?;
@@ -21785,9 +21789,13 @@ pub(crate) fn do_topology_create_room_reviewed(state: &SharedState, name: &str, 
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        check(&s)?;
+    check(&s)?;
+    let previous = s.topology.clone();
     let id = s.topology.create_room(name);
-    persist_topology(&s);
+    if let Err(error) = save_topology(&s) {
+        s.topology = previous;
+        return Err(error.context("Persisting the new room"));
+    }
     drop(s);
     ensure_sleep_mode_hard_off_default(state, &id);
     reconcile_room_binding_triage_best_effort(state);

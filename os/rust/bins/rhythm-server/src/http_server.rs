@@ -674,7 +674,7 @@ fn truncate_stream_log_line(line: &str) -> String {
 }
 
 fn assistant_update_revision(info: &crate::self_update::UpdateInfo) -> String {
-    use sha2::{Digest,Sha256};
+    use sha2::{Digest, Sha256};
     let release = serde_json::json!({
         "current": info.current_version, "latest": info.latest_version,
         "current_package": info.current_package_version, "latest_package": info.latest_package_version,
@@ -682,36 +682,45 @@ fn assistant_update_revision(info: &crate::self_update::UpdateInfo) -> String {
         "asset": info.asset_name, "url": info.download_url, "digest": info.expected_sha256,
         "targets": info.install_targets, "images": info.image_assets, "reason": info.update_reason,
     });
-    format!("{:x}",Sha256::digest(release.to_string().as_bytes()))
+    format!("{:x}", Sha256::digest(release.to_string().as_bytes()))
 }
 
 fn install_assistant_maintenance(state: &SharedState, ota: crate::self_update::OtaStatusHandle) {
     use rhythm_os::assistant::devices::{platform_receipt, unsupported_platform, PlatformAction};
-    state.lock().expect("state lock").assistant_devices.platform = Some(std::sync::Arc::new(move |state, action| {
-        let ota = ota.clone();
-        Box::pin(async move {
-            match action {
-                PlatformAction::CheckUpdate => {
-                    let value = platform_receipt(check_update(state,ota).await).await?;
-                    Ok(serde_json::json!({
-                        "current_version":value["current_version"],"latest_version":value["latest_version"],
-                        "current_package_version":value["current_package_version"],"latest_package_version":value["latest_package_version"],
-                        "current_image_version":value["current_image_version"],"latest_image_version":value["latest_image_version"],
-                        "update_available":value["update_available"],"reason":value["update_reason"],"review_revision":value["review_revision"]
-                    }))
+    state.lock().expect("state lock").assistant_devices.platform = Some(std::sync::Arc::new(
+        move |state, action| {
+            let ota = ota.clone();
+            Box::pin(async move {
+                match action {
+                    PlatformAction::CheckUpdate => {
+                        let value = platform_receipt(check_update(state, ota).await).await?;
+                        Ok(serde_json::json!({
+                            "current_version":value["current_version"],"latest_version":value["latest_version"],
+                            "current_package_version":value["current_package_version"],"latest_package_version":value["latest_package_version"],
+                            "current_image_version":value["current_image_version"],"latest_image_version":value["latest_image_version"],
+                            "update_available":value["update_available"],"reason":value["update_reason"],"review_revision":value["review_revision"]
+                        }))
+                    }
+                    PlatformAction::Update { expected_revision } => {
+                        platform_receipt(
+                            do_update_reviewed(state, ota, Some(expected_revision)).await,
+                        )
+                        .await?;
+                        Ok(
+                            serde_json::json!({"status":"update_accepted","next_check":"Reconnect and verify the installed version after restart."}),
+                        )
+                    }
+                    PlatformAction::Restart => {
+                        platform_receipt(restart_device(state, ota).await).await?;
+                        Ok(
+                            serde_json::json!({"status":"restart_scheduled","next_check":"Reconnect to this hub and read its status."}),
+                        )
+                    }
+                    _ => Err(unsupported_platform()),
                 }
-                PlatformAction::Update{expected_revision} => {
-                    platform_receipt(do_update_reviewed(state,ota,Some(expected_revision)).await).await?;
-                    Ok(serde_json::json!({"status":"update_accepted","next_check":"Reconnect and verify the installed version after restart."}))
-                }
-                PlatformAction::Restart => {
-                    platform_receipt(restart_device(state,ota).await).await?;
-                    Ok(serde_json::json!({"status":"restart_scheduled","next_check":"Reconnect to this hub and read its status."}))
-                }
-                _=>Err(unsupported_platform())
-            }
-        })
-    }));
+            })
+        },
+    ));
 }
 
 async fn check_update(
@@ -1051,7 +1060,7 @@ async fn do_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
 ) -> Response {
-    do_update_reviewed(state,ota_status,None).await
+    do_update_reviewed(state, ota_status, None).await
 }
 
 async fn do_update_reviewed(
@@ -1122,7 +1131,10 @@ async fn do_update_reviewed(
             return err_500(e);
         }
     };
-    if expected_revision.as_ref().is_some_and(|expected| *expected != assistant_update_revision(&info)) {
+    if expected_revision
+        .as_ref()
+        .is_some_and(|expected| *expected != assistant_update_revision(&info))
+    {
         return err_409("The offered update changed. Review the new release before installing it.");
     }
     if let Err(error) = ota_status.record_check_result(&operation, &info) {
@@ -1853,6 +1865,31 @@ mod tests {
             drop(retry);
             assert!(!ota_status.operation_active());
         });
+    }
+
+    #[test]
+    fn assistant_update_rechecks_the_reviewed_artifact_before_installing() {
+        let _guard = crate::self_update::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let original = update_manifest("999.0.0", "release/first-package.tar.gz");
+            let replaced = update_manifest("999.0.0", "release/replacement-package.tar.gz");
+            let manifest_url = spawn_http_sequence(vec![(200, original), (200, replaced)]);
+            set_update_manifest_env(&manifest_url);
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            let ota = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+            let preview = response_json(check_update(state.clone(), ota.clone()).await).await;
+            let revision = preview["review_revision"].as_str().unwrap().to_owned();
+            let result = do_update_reviewed(state, ota.clone(), Some(revision)).await;
+            assert_eq!(result.status(), StatusCode::CONFLICT);
+            assert!(!ota.operation_active());
+        });
+        clear_update_manifest_env();
     }
 
     #[test]

@@ -4086,6 +4086,15 @@ pub fn handle_pair_device_with_context(
     request: &crate::pairing::PairingRequest,
     request_context: crate::pairing::PairingRequestContext,
 ) -> ApiResponse {
+    handle_pair_device_reviewed(state, request, request_context, &|_| Ok(()))
+}
+
+pub(crate) fn handle_pair_device_reviewed(
+    state: &SharedState,
+    request: &crate::pairing::PairingRequest,
+    request_context: crate::pairing::PairingRequestContext,
+    check: crate::commands::ReviewCheck<'_>,
+) -> ApiResponse {
     if request.hub_type == crate::hub::HubType::LOCAL_BLE && request.session_id.is_none() {
         return ApiResponse::bad_request("Local Bluetooth pairing requires a session ID");
     }
@@ -4137,6 +4146,9 @@ pub fn handle_pair_device_with_context(
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
         };
+        if check(&s).is_err() {
+            return ApiResponse::conflict("Pairing proposal changed. Review this hub again.");
+        }
         s.start_pairing_fn.clone()
     };
 

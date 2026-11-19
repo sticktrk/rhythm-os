@@ -75,6 +75,7 @@ enum Change {
         bridge: HubKey,
         serial: Option<String>,
     },
+    PairNearbyHue,
     RetryBridge(HubKey),
     HaSelection {
         before: BTreeSet<String>,
@@ -171,6 +172,7 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
     add("plan_remove_device","Review removing a known device or a single connection on a multi-integration device. Read its connections to choose an endpoint. Review whether the operation unpairs hardware or only forgets its Rhythm record.",&["device_id"],json!({"device_id":id,"endpoint_id":id}),Read);
     add("plan_control_targets","Review all replacement control rooms for one sensor, button or switch. An empty list restores its inherited physical room.",&["device_id","room_ids"],json!({"device_id":id,"room_ids":ids}),Read);
     add("plan_device_review","Review resolving one pending device match or room binding. Select a listed candidate for merge or bind. For an unassigned device use the existing reviewed device-room move.",&["entry_id","decision"],json!({"entry_id":id,"decision":{"enum":["merge","bind","keep_separate","dismiss","snooze","still_installed"]},"target_id":id}),Read);
+    add("plan_nearby_hue_lights", "Review pairing nearby Hue Bluetooth lights with this hub. Put only the intended bulbs in setup mode. Search may pair multiple nearby bulbs.", &[],json!({}),Read);
     add("plan_bridge_pairing","Review searching a configured Hue bridge. Provide a six-character printed serial for a light or omit it for a nearby button in pairing mode. Other commissioning methods return a physical setup handoff.",&["bridge_id","device_kind"],json!({"bridge_id":id,"device_kind":{"enum":["light","button"]},"serial":id}),Read);
     add(
         "plan_bridge_retry",
@@ -280,7 +282,8 @@ fn device(s: &AppState, id: &str) -> Result<Value> {
 fn platform_handoff(s: &AppState, op: &str) -> Option<Value> {
     let addon = s.platform_context == "ha_addon";
     match op {
-        "plan_create_room"|"plan_rename_room"|"plan_merge_rooms"|"plan_delete_room"|"plan_rename_device"|"plan_remove_device"|"plan_bridge_pairing" if addon =>Some(ha_area(s)),
+        "plan_create_room"|"plan_rename_room"|"plan_merge_rooms"|"plan_delete_room"|"plan_rename_device"|"plan_remove_device" if addon =>Some(ha_area(s)),
+        "plan_bridge_pairing"|"plan_nearby_hue_lights" if addon=>setup(s,"pair").ok(),
         "check_hub_update"|"plan_hub_restart"|"plan_hub_update" if addon=>Some(handoff(s,"home_assistant","ha_administrator","Open Settings > Apps > Rhythm to review the update or restart the add-on.")),
         "read_managed_ha_lights"|"plan_managed_ha_lights" if !addon=>Some(handoff(s,"home_assistant","ha_administrator","Light delegation is managed on the Home Assistant add-on. Select that hub to review its lights.")),
         _=>None
@@ -376,6 +379,7 @@ async fn preview(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                 .map(|_| field(args, "target_id").map(str::to_owned))
                 .transpose()?,
         },
+        "plan_nearby_hue_lights" => Change::PairNearbyHue,
         "plan_bridge_retry" | "plan_bridge_pairing" => {
             let s = lock(state)?;
             let key = bridge(&s, field(args, "bridge_id")?)?;
@@ -409,10 +413,18 @@ async fn preview(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
             let before = strings(&catalog, "entities", 4096)?;
             let after = strings(args, "entity_ids", 4096)?;
             let available = catalog["available"].as_array().ok_or_else(stale)?;
+            if lock(state)?.light_breaker_enabled {
+                return Err(invalid(
+                    "Pause Rhythm before reviewing a managed-light change.",
+                ));
+            }
+            let removing_only = after.is_subset(&before);
             if !after.iter().all(|id| {
-                available
-                    .iter()
-                    .any(|item| item["entity_id"] == *id && item["reviewable"] == true)
+                available.iter().any(|item| {
+                    item["entity_id"] == *id
+                        && (item["reviewable"] == true
+                            || (removing_only && item["reviewed_identity_current"] == true))
+                })
             }) {
                 return Err(invalid(
                     "Select only currently reviewable Home Assistant lights.",
@@ -480,18 +492,33 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
             let mut info = device(s, id)?;
             let d = s.canonical_registry.get(id).ok_or_else(stale)?;
             let ep = selected_endpoint(d, selected.as_deref())?;
-            if ep.is_some_and(|ep| ep.hub_key.hub_type.as_str() == HubType::HA) {
-                return Ok(ha_area(s));
+            let physical = ep.or_else(|| d.endpoints.first());
+            let kind = physical.map(|ep| ep.hub_key.hub_type.as_str());
+            if matches!(kind, Some(HubType::HA | "homeassistant")) {
+                return Ok(handoff(s,"home_assistant","ha_administrator","Review the device and its integration in Home Assistant under Settings > Devices & services."));
             }
-            let unpair = ep.filter(|ep| {
-                s.hub_capabilities
-                    .iter()
-                    .any(|c| c.hub_type == ep.hub_key.hub_type.as_str() && c.supports_unpairing)
+            let native = matches!(
+                kind,
+                Some(HubType::MATTER | HubType::HUE | HubType::HUE_BLE | HubType::LOCAL_BLE)
+            );
+            let unpairable = ep.is_some_and(|ep| {
+                s.hub_capabilities.iter().any(|cap| {
+                    let device_type = info["kind"].as_str().unwrap_or("");
+                    cap.hub_type == ep.hub_key.hub_type.as_str()
+                        && cap.supports_unpairing
+                        && (cap
+                            .unpairable_device_types
+                            .iter()
+                            .any(|kind| kind == device_type)
+                            || (cap.hub_type == HubType::HUE
+                                && cap.unpairable_device_types.is_empty()
+                                && device_type == "light"))
+                })
             });
-            if unpair.is_none() && d.endpoints.len() > 1 {
-                return Err(invalid("This integration must remove its own endpoint. Review the device in that integration."));
+            if !unpairable && (native || d.endpoints.len() > 1) {
+                return Ok(handoff(s,"integration_settings","owner","Review this endpoint in its integration settings. Refresh the hub after removing it there."));
             }
-            info["effect"] = json!(if unpair.is_some() {
+            info["effect"] = json!(if unpairable {
                 "unpair_endpoint"
             } else {
                 "forget_rhythm_record"
@@ -546,7 +573,14 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
                         b.target_rhythm_room_id == id || b.candidate_rooms.iter().any(|r| r.0 == id)
                     })
                 }
-                (_, "keep_separate" | "dismiss", None) => true,
+                (
+                    TriageKind::UnassignedDevice
+                    | TriageKind::RoomBinding
+                    | TriageKind::DeviceMerge,
+                    "keep_separate",
+                    None,
+                ) => true,
+                (_, "dismiss", None) => true,
                 _ => false,
             };
             if !valid {
@@ -559,6 +593,20 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
                 return Ok(ha_area(s));
             }
             Ok(review_entry(e))
+        }
+        Change::PairNearbyHue => {
+            let supported = s.hub_capabilities.iter().any(|cap| {
+                cap.hub_type == HubType::HUE_BLE
+                    && cap.device_onboarding_methods.iter().any(|method| {
+                        method == crate::hub::DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN
+                    })
+            });
+            if !supported {
+                return setup(s, "pair");
+            }
+            Ok(
+                json!({"integration":HubType::HUE_BLE,"scope":"nearby_lights_in_setup_mode","effect":"search_and_pair","physical_step":"Place only the intended bulbs in Bluetooth setup mode."}),
+            )
         }
         Change::PairBridge { bridge: key, .. } | Change::RetryBridge(key) => {
             let cred = s
@@ -786,17 +834,32 @@ async fn apply(state: &SharedState, args: &Value) -> Result<Value> {
             let s = lock(state)?;
             json!({"bridge_id":bridge_id(key),"connected":s.hub_is_connected(key)})
         }
-        Change::PairBridge { bridge, serial } => {
-            let mut params = json!({"hub_address":bridge.address,"device_kind":if serial.is_some(){"light"}else{"button"}});
-            if let Some(serial) = serial {
-                params["serial"] = json!(serial);
-            }
+        Change::PairBridge { .. } | Change::PairNearbyHue => {
+            let (integration, params) = match &plan.change {
+                Change::PairBridge { bridge, serial } => {
+                    let mut params = json!({"hub_address":bridge.address,"device_kind":if serial.is_some(){"light"}else{"button"}});
+                    if let Some(serial) = serial {
+                        params["serial"] = json!(serial);
+                    }
+                    (bridge.hub_type.as_str(), params)
+                }
+                _ => (HubType::HUE_BLE, json!({})),
+            };
             let req = pairing::PairingRequest {
-                hub_type: bridge.hub_type.as_str().into(),
+                hub_type: integration.into(),
                 session_id: Some(plan.id.clone()),
                 params,
             };
-            let value = result_body(handlers::handle_pair_device(state, &req))?;
+            let response = handlers::handle_pair_device_reviewed(
+                state,
+                &req,
+                pairing::PairingRequestContext::accepted_now(),
+                &check,
+            );
+            if response.status == 409 {
+                return Err(stale());
+            }
+            let value = result_body(response)?;
             // Pairing results can contain vendor recovery secrets. Return only typed status.
             if value["status"] == "failed" {
                 return Err(changed("The bridge pairing attempt failed. Inspect discovery before starting another attempt."));
@@ -860,4 +923,239 @@ pub async fn platform_receipt(response: axum::response::Response) -> Result<Valu
 
 pub fn unsupported_platform() -> Error {
     invalid("This operation is unavailable on the selected platform.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn confirm(plan: &Value) -> Value {
+        json!({"confirmed":true,"plan_id":plan["plan_id"],"server_instance_id":plan["server_instance_id"]})
+    }
+
+    #[tokio::test]
+    async fn reviewed_room_changes_require_confirmation_current_scope_and_one_application() {
+        let state = state();
+        let name = "Jo’s \"Music\" room";
+        let preview = call(&state, "plan_create_room", json!({"name":name}))
+            .await
+            .unwrap();
+        assert_eq!(preview["operation"], "apply_device_plan");
+        assert_eq!(preview["requested"]["name"], name);
+        let args = confirm(&preview);
+        let mut wrong = args.clone();
+        wrong["server_instance_id"] = json!("different-hub");
+        assert_eq!(
+            call(&state, "apply_device_plan", wrong)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        let mut declined = args.clone();
+        declined["confirmed"] = json!(false);
+        assert_eq!(
+            call(&state, "apply_device_plan", declined)
+                .await
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(lock(&state).unwrap().topology.room_count(), 0);
+        let receipt = call(&state, "apply_device_plan", args.clone())
+            .await
+            .unwrap();
+        let room_id = receipt["result"]["id"].as_str().unwrap();
+        assert_eq!(room(&lock(&state).unwrap(), room_id).unwrap()["name"], name);
+        assert_eq!(
+            call(&state, "apply_device_plan", args)
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        let preview = call(&state, "plan_delete_room", json!({"room_id":room_id}))
+            .await
+            .unwrap();
+        assert_eq!(preview["before"]["name"], name);
+        lock(&state)
+            .unwrap()
+            .topology
+            .rename_room(room_id, "Other name");
+        assert_eq!(
+            call(&state, "apply_device_plan", confirm(&preview))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            room(&lock(&state).unwrap(), room_id).unwrap()["name"],
+            "Other name"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardware_removal_checks_the_target_kind_and_delegates_ha_ownership() {
+        use crate::canonical::{identity::DiscoveredIdentity, registry::ResolveResult};
+        use rhythm_core::DeviceType;
+        let state = state();
+        let mut ids = Vec::new();
+        {
+            let mut s = lock(&state).unwrap();
+            s.hub_capabilities.push(crate::hub::HubIntegrationCapability {
+                hub_type: HubType::HUE.into(),
+                configurable: true,
+                device_onboarding_methods: vec![],
+                device_profiles: vec![],
+                supports_unpairing: true,
+                unpairable_device_types: vec!["light".into()],
+                supports_roomless_devices: true,
+                blocks_room_readiness: false,
+            });
+            for (integration, kind, name) in [
+                (HubType::HUE, DeviceType::Motion, "motion"),
+                (HubType::HUE, DeviceType::Light, "lamp"),
+                ("homeassistant", DeviceType::Contact, "door"),
+            ] {
+                let key = HubKey::new(HubType::new(integration), "test-bridge");
+                let identity = DiscoveredIdentity {
+                    native_id: name.into(),
+                    name: name.into(),
+                    device_type: kind,
+                    room_id: None,
+                    room_name: None,
+                    hardware_ids: vec![],
+                    manufacturer: None,
+                    model: None,
+                };
+                let ResolveResult::Created { canonical_id } =
+                    s.canonical_registry.resolve(&identity, &key, 1)
+                else {
+                    panic!("expected a new device")
+                };
+                s.topology.ensure_standalone_device(&canonical_id);
+                ids.push(canonical_id);
+            }
+        }
+        let args = |i: usize| json!({"device_id":ids[i]});
+        assert_eq!(
+            call(&state, "plan_remove_device", args(0)).await.unwrap()["status"],
+            "handoff"
+        );
+        let endpoints = call(&state, "read_device_connections", args(1))
+            .await
+            .unwrap();
+        let plan = call(
+            &state,
+            "plan_remove_device",
+            json!({"device_id":ids[1],"endpoint_id":endpoints["endpoints"][0]["endpoint_id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan["before"]["effect"], "unpair_endpoint");
+        assert_eq!(
+            call(&state, "plan_remove_device", args(2)).await.unwrap()["surface"],
+            "home_assistant"
+        );
+        lock(&state).unwrap().hub_capabilities.clear();
+        assert_eq!(
+            call(&state, "apply_device_plan", confirm(&plan))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(lock(&state).unwrap().canonical_registry.device_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn ha_area_and_enrollment_handoffs_stay_on_the_selected_hub() {
+        let state = state();
+        lock(&state).unwrap().platform_context = "ha_addon";
+        let request = call(&state, "plan_create_room", json!({"name":"New area"}))
+            .await
+            .unwrap();
+        assert_eq!(request["actor"], "ha_administrator");
+        assert!(request.get("plan_id").is_none());
+        let owner = call(
+            &state,
+            "guide_device_setup",
+            json!({"step":"mobile_enrollment"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(request["server_instance_id"], owner["server_instance_id"]);
+        assert_eq!(owner["actor"], "owner");
+        assert_eq!(lock(&state).unwrap().topology.room_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_ha_selection_is_bound_to_the_reviewed_identity_revision() {
+        let state = state();
+        let writes = Arc::new(Mutex::new(0usize));
+        let applied = writes.clone();
+        {
+            let mut s = lock(&state).unwrap();
+            s.platform_context = "ha_addon";
+            s.light_breaker_enabled = false;
+            s.assistant_devices.platform = Some(Arc::new(move |_, action| {
+                let applied = applied.clone();
+                Box::pin(async move {
+                    match action {
+                        PlatformAction::ReadHaSelection => Ok(
+                            json!({"entities":["light.old"],"snapshot_revision":"inventory:42","available":[{"entity_id":"light.lamp","reviewable":true}]}),
+                        ),
+                        PlatformAction::SetHaSelection {
+                            entities,
+                            expected_entities,
+                            expected_revision,
+                        } => {
+                            assert_eq!(entities, BTreeSet::from(["light.lamp".into()]));
+                            assert_eq!(expected_entities, BTreeSet::from(["light.old".into()]));
+                            assert_eq!(expected_revision, "inventory:42");
+                            *applied.lock().unwrap() += 1;
+                            Ok(json!({"entities":entities}))
+                        }
+                        _ => panic!("unexpected platform operation"),
+                    }
+                })
+            }));
+        }
+        assert!(call(
+            &state,
+            "plan_managed_ha_lights",
+            json!({"entity_ids":["switch.unknown"]})
+        )
+        .await
+        .is_err());
+        let args = json!({"entity_ids":["light.lamp"]});
+        let first = call(&state, "plan_managed_ha_lights", args.clone())
+            .await
+            .unwrap();
+        lock(&state).unwrap().light_breaker_enabled = true;
+        assert_eq!(
+            call(&state, "apply_device_plan", confirm(&first))
+                .await
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert!(call(&state, "plan_managed_ha_lights", args.clone())
+            .await
+            .is_err());
+        assert_eq!(*writes.lock().unwrap(), 0);
+        lock(&state).unwrap().light_breaker_enabled = false;
+        let next = call(&state, "plan_managed_ha_lights", args).await.unwrap();
+        let receipt = call(&state, "apply_device_plan", confirm(&next))
+            .await
+            .unwrap();
+        assert_eq!(receipt["result"]["entities"], json!(["light.lamp"]));
+        assert_eq!(*writes.lock().unwrap(), 1);
+    }
 }
