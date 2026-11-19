@@ -438,7 +438,8 @@ pub struct AppState {
     /// import replace `scenes` but deliberately leave this alone.
     pub seeded_factory_scene_ids: BTreeSet<String>,
     /// Short-lived reviews of scene, schedule and lighting settings changes.
-    pub assistant_automation_plans: std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
+    pub assistant_automation_plans:
+        std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
     /// Hub-local reviewed lighting changes. Plans expire and are consumed on apply.
     pub assistant_move_reviews: std::collections::VecDeque<(String, u64)>,
     pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,

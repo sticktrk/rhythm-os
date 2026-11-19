@@ -816,7 +816,7 @@ fn perform_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> anyhow::Result<crate::pairing::UnpairingResult> {
-    perform_unpair_device_reviewed(state,request,&|_|Ok(()))
+    perform_unpair_device_reviewed(state, request, &|_| Ok(()))
 }
 
 fn perform_unpair_device_reviewed(
@@ -4579,7 +4579,7 @@ pub fn handle_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> ApiResponse {
-    handle_unpair_device_reviewed(state,request,&|_|Ok(()))
+    handle_unpair_device_reviewed(state, request, &|_| Ok(()))
 }
 
 pub(crate) fn handle_unpair_device_reviewed(
@@ -4596,7 +4596,9 @@ pub(crate) fn handle_unpair_device_reviewed(
             Ok(json) => ApiResponse::json_ok(json),
             Err(e) => ApiResponse::server_error(e),
         },
-        Err(e) if e.to_string()=="device_plan_changed" => ApiResponse::conflict("Device plan changed"),
+        Err(e) if e.to_string() == "device_plan_changed" => {
+            ApiResponse::conflict("Device plan changed")
+        }
         Err(e) => {
             log::error!(target: "pair", "Unpairing failed: {}", e);
             ApiResponse::server_error(e)
@@ -4846,8 +4848,10 @@ pub fn handle_post_assistant_move_plan(state: &SharedState, body: &Value) -> Api
 
 pub fn handle_post_assistant_move_apply(state: &SharedState, body: &Value) -> ApiResponse {
     let mut body = body.clone();
-    if let Some(confirmed) = body.as_object_mut().and_then(|m|m.remove("confirmed")) {
-        if confirmed != Value::Bool(true) {return ApiResponse::bad_request("Confirmation required");}
+    if let Some(confirmed) = body.as_object_mut().and_then(|m| m.remove("confirmed")) {
+        if confirmed != Value::Bool(true) {
+            return ApiResponse::bad_request("Confirmation required");
+        }
     }
     let request = match serde_json::from_value(body) {
         Ok(request) => request,
