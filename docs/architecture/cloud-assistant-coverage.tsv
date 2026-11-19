@@ -14,6 +14,7 @@ staff	GET	/api/hubs/<hubId>/logs	operation	staff_list_logs
 staff	GET	/api/hubs/<hubId>/logs/<sourceId>/tail	operation	staff_read_log
 staff	POST	/api/hubs/<hubId>/fleet-report	operation	staff_plan_fleet_report
 staff	POST	/api/hubs/<hubId>/device-admin/proxy	operation	staff_call_hub_tool (advertised reads and proposals), staff_control_hub (temporary output), staff_apply_plan (reviewed writes)
+staff	GET	/api/assistant/mcp	exclusion	Stateless MCP endpoint responds with HTTP 405 to a streaming GET.
 staff	POST	/api/assistant/mcp	exclusion	Protocol transport for the staff operation catalog.
 edge	INVOKE	customer-assistant	exclusion	Protocol transport and authenticated resident app continuation for the customer operation catalog.
 edge	INVOKE	delete-user	handoff	get_account_handoff (account_deletion)
