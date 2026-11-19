@@ -62,7 +62,19 @@ that run outside the hub.
 
 Read operations include previews. A temporary-output tool can change lights
 immediately. A persistent tool accepts explicit confirmation and the arguments
-from its preview. Older device-room move endpoints retain their original
+from its preview. Plans are bound to the creating credential. By default an agent's
+apply request returns `awaiting_owner_approval`. The hub owner reviews the
+change under **Assistant access**. Owners can also list pending plans with
+`GET /api/assistant/approvals` and submit `approve` or `decline` to
+`POST /api/assistant/approvals/{plan_id}`. The creating client polls
+`read_plan_outcome` for the decision and receipt.
+
+An owner can enable `unattended_changes` when issuing an agent credential.
+Operations marked `requires_owner_approval` still require the owner's decision.
+The `observes_household` descriptor marks reads restricted to administrators
+when using the staff service.
+
+Older device-room move endpoints retain their original
 request format for existing clients. Owner actions return a handoff that
 identifies the person, the surface to open and the hub on which to resume.
 
