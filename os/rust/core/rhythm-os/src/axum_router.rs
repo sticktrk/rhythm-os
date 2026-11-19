@@ -1696,6 +1696,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::NodesChanged => "nodes_changed",
         ServerEvent::TriageChanged { .. } => "triage_changed",
         ServerEvent::PairingProgress { .. } => "pairing_progress",
+        ServerEvent::ScenePreviewExpired { .. } => "scene_preview_expired",
         ServerEvent::OtaUpdateProgress { .. } => "ota_update_progress",
     }
 }
