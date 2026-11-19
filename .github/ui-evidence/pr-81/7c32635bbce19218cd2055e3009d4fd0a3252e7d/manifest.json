@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 81,
+  "head": "7c32635bbce19218cd2055e3009d4fd0a3252e7d",
+  "uses_mock_data": true,
+  "source_test": "app/flutter/rhythm_app/test/screens/assistant_chat_screen_test.dart",
+  "screenshots": [
+    {
+      "file": "review.png",
+      "caption": "Reviewing a motion sensor’s proposed room link"
+    }
+  ]
+}
