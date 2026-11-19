@@ -59,6 +59,7 @@ const assistantReadOperations = <String>{
   'read_lighting_state',
   'read_managed_ha_lights',
   'read_pairing_result',
+  'read_plan_outcome',
   'read_profile_curve',
   'read_room_lighting_setup',
   'sample_room_curve',
