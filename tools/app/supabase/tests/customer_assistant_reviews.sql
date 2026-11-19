@@ -3,7 +3,7 @@ BEGIN;
 DO $test$
 DECLARE
   actor uuid:=gen_random_uuid(); member uuid:=gen_random_uuid(); other_user uuid:=gen_random_uuid();
-  home uuid:=gen_random_uuid(); hub uuid:=gen_random_uuid(); plan jsonb; receipt jsonb; arguments jsonb; grant_plan jsonb;
+  home uuid:=gen_random_uuid(); hub uuid:=gen_random_uuid(); plan jsonb; receipt jsonb; arguments jsonb; target jsonb; policy_before uuid;
 BEGIN
   INSERT INTO auth.users(id) VALUES (actor),(member),(other_user);
   INSERT INTO public.homes(id,name,owner_id,member_ids) VALUES(home,'Fixture home',actor,ARRAY[actor,member]);
@@ -62,31 +62,6 @@ BEGIN
     PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
     RAISE EXCEPTION 'device action dispatched twice' USING ERRCODE='XX000';
   EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
-  grant_plan:=plan;
-  -- Dispatch is bound to the reviewed revision, even after the phone claims it.
-  arguments:=jsonb_build_object('change','enable_remote','home_id',home,'hub_id',hub);
-  plan:=public.customer_assistant_review(actor,'plan',arguments);
-  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
-  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
-  UPDATE public.hubs SET remote_access_disabled_at=clock_timestamp() WHERE id=hub;
-  BEGIN
-    PERFORM public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
-      'home_id',home,'hub_id',hub,'server_instance_id',plan->>'server_instance_id'),(plan->>'plan_id')::uuid);
-    RAISE EXCEPTION 'changed remote policy still enabled tunnel' USING ERRCODE='XX000';
-  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
-  ASSERT (SELECT remote_access_disabled_at IS NOT NULL FROM public.hubs WHERE id=hub);
-  receipt:=public.customer_assistant_review(actor,'plan',arguments);
-  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(receipt->>'plan_id')::uuid);
-  PERFORM public.customer_assistant_review(actor,'claim','{}',(receipt->>'plan_id')::uuid);
-  ASSERT public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
-    'home_id',home,'hub_id',hub,'server_instance_id',receipt->>'server_instance_id'),(receipt->>'plan_id')::uuid)->>'status'='dispatched';
-  ASSERT (SELECT remote_access_disabled_at IS NULL FROM public.hubs WHERE id=hub);
-  BEGIN
-    PERFORM public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
-      'home_id',home,'hub_id',hub,'server_instance_id',receipt->>'server_instance_id'),(receipt->>'plan_id')::uuid);
-    RAISE EXCEPTION 'remote dispatched twice' USING ERRCODE='XX000';
-  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
-  plan:=grant_plan;
   -- A background sync from another phone cannot undo a reviewed revocation.
   arguments:=jsonb_build_object('change','revoke_support','home_id',home,'hub_id',hub);
   receipt:=public.customer_assistant_review(actor,'plan',arguments);
@@ -112,6 +87,113 @@ BEGIN
   -- An app or MCP caller cannot report a positive grant without the actual row.
   receipt:=public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid);
   ASSERT receipt->>'status'='uncertain';
+  -- A member who leaves can recover their own successful receipt after a lost response.
+  arguments:=jsonb_build_object('change','remove_member','home_id',home,'member_id',other_user);
+  plan:=public.customer_assistant_review(other_user,'plan',arguments);
+  PERFORM public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  ASSERT NOT (SELECT other_user=ANY(member_ids) FROM public.homes WHERE id=home);
+  ASSERT public.customer_assistant_review(other_user,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid)->>'status'='applied';
+
+  SELECT revision INTO policy_before FROM public.hub_support_review_policy WHERE hub_id=hub;
+  target:=jsonb_build_object('home_id',home,'hub_id',hub,'server_instance_id','changed-instance');
+  arguments:=jsonb_build_object('change','enable_remote','home_id',home,'hub_id',hub);
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  -- A second phone disabled remote access while the first was checking its Box.
+  UPDATE public.hubs SET remote_access_disabled_at=now() WHERE id=hub;
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'bootstrap overrode a newer disable' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  ASSERT (SELECT remote_access_disabled_at IS NOT NULL FROM public.hubs WHERE id=hub);
+  ASSERT (SELECT revision=policy_before FROM public.hub_support_review_policy WHERE hub_id=hub);
+  ASSERT NOT (SELECT remote_dispatched FROM public.customer_assistant_reviews WHERE id=(plan->>'plan_id')::uuid);
+
+  INSERT INTO public.hub_remote_access(hub_id,home_id,hostname,tunnel_id,tunnel_name,server_instance_id)
+    VALUES(hub,home,'fixture.invalid','fixture-route','fixture','changed-instance');
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  ASSERT (SELECT remote_access_disabled_at IS NULL FROM public.hubs WHERE id=hub);
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'bootstrap dispatched twice' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  -- The pre-existing route does not prove the dispatched setup succeeded.
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='uncertain';
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_provisioned',
+    target || '{"tunnel_id":"fixture-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='acknowledged';
+
+  -- Losing the review while the vendor is busy cannot install or replace a database route.
+  DELETE FROM public.hub_remote_access WHERE hub_id=hub;
+  UPDATE public.hubs SET remote_endpoint=NULL WHERE id=hub;
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  UPDATE public.customer_assistant_reviews SET expires_at=now() WHERE id=(plan->>'plan_id')::uuid;
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'remote_provisioned',
+      target || '{"tunnel_id":"expired-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'expired provisioning result accepted' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  ASSERT NOT EXISTS (SELECT 1 FROM public.hub_remote_access WHERE hub_id=hub);
+
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  INSERT INTO public.hub_remote_access(hub_id,home_id,hostname,tunnel_id,tunnel_name,server_instance_id)
+    VALUES(hub,home,'fixture.invalid','newer-route','fixture','changed-instance');
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'remote_provisioned',
+      target || '{"tunnel_id":"stale-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'superseded provisioning result accepted' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  ASSERT (SELECT tunnel_id='newer-route' FROM public.hub_remote_access WHERE hub_id=hub);
+  ASSERT (SELECT remote_endpoint IS NULL FROM public.hubs WHERE id=hub);
+
+  DELETE FROM public.hub_remote_access WHERE hub_id=hub;
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_provisioned',
+    target || '{"tunnel_id":"fixture-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='acknowledged';
+
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  receipt:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(receipt->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(receipt->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(receipt->>'plan_id')::uuid);
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'remote_provisioned',
+      target || '{"tunnel_id":"stale-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'superseded worker committed its endpoint' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  -- A disable that lands during vendor provisioning still wins.
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'remote_dispatch',target,(plan->>'plan_id')::uuid);
+  UPDATE public.hubs SET remote_access_disabled_at=now(), remote_endpoint=NULL WHERE id=hub;
+  receipt:=public.customer_assistant_review(actor,'remote_provisioned',
+    target || '{"tunnel_id":"fixture-route","hostname":"fixture.invalid","tunnel_name":"fixture"}',(plan->>'plan_id')::uuid);
+  ASSERT receipt->>'status'='disabled_by_user';
+  ASSERT (SELECT remote_endpoint IS NULL FROM public.hubs WHERE id=hub);
+  ASSERT public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid)->>'status'='uncertain';
+
   arguments:=jsonb_build_object('change','submit_report','home_id',home,'hub_id',hub,'report_summary','fixture','include_bundle',false);
   plan:=public.customer_assistant_review(actor,'plan',arguments);
   PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);

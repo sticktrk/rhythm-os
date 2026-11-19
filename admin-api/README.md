@@ -195,7 +195,10 @@ can see the proposed scope and the next step for an administrator. Admins
 can use `staff_control_hub` for temporary output. A persistent change requires
 the reviewed plan and `confirmed: true` in `staff_apply_plan`. This also covers
 firmware updates, fleet reports and cloud hub deletion. Re-read the state
-after an uncertain outcome before preparing another proposal.
+after an uncertain outcome before preparing another proposal. When the full
+review contains private or unsupported details, open **Hub tools** in the
+selected hub’s staff console to preview and confirm it there. This includes
+portable settings transfers and profile resets.
 
 The staff service owns the customer-granted support credential and checks the
 active grant on every hub request, including requests with a cached session.

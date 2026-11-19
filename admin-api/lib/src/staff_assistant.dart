@@ -732,19 +732,33 @@ class StaffAssistant {
         final body = await _request(
             s, h, 'POST', 'api/assistant/operations/$tool',
             body: arguments);
-        final result = tool == 'read_lighting_history'
-            ? <String, dynamic>{'status': 'available_in_private_hub_console'}
-            : _project(s, h.id, body) as _Json;
+        if (tool == 'read_lighting_history') {
+          return {'status': 'available_in_private_hub_console'};
+        }
         if (body['status'] == 'handoff') {
           final original = asStringMap(body['handoff']) ?? body;
-          final handoff = _project(s, h.id, original) as _Json;
-          final step = args['operation_id'] == 'get_handoff' ||
-                  args['operation_id'] == 'guide_device_setup'
-              ? arguments['step']
-              : null;
-          final actor = handoff['actor'] ?? 'resident';
-          final surface = handoff['surface'] ??
-              (actor == 'ha_administrator' ? 'home_assistant' : 'rhythm_app');
+          final steps = op['input_schema']['properties']['step']?['enum'];
+          final step = arguments['step'];
+          final knownStep =
+              step is String && steps is List && steps.contains(step);
+          final actor = switch (original['actor']) {
+            'resident' || 'owner' || 'ha_administrator' => original['actor'],
+            _ => 'staff',
+          };
+          final surface = switch (original['surface']) {
+            'home_assistant' ||
+            'home_assistant_addon' ||
+            'rhythm_app' ||
+            'integration' ||
+            'integration_settings' =>
+              original['surface'],
+            _
+                when actor == 'ha_administrator' ||
+                    (knownStep && step.startsWith('ha_')) =>
+              'home_assistant',
+            _ when actor == 'owner' || actor == 'resident' => 'rhythm_app',
+            _ => 'staff_hub_console',
+          };
           final instructions = _handoffs[step] ??
               (tool == 'start_motion_walk' || tool == 'plan_motion_target'
                   ? (arguments['sensor_id'] == ''
@@ -753,8 +767,12 @@ class StaffAssistant {
                   : 'Open the indicated surface, complete the requested setup step and refresh this hub.');
           final resume = original['resume_operation'];
           return {
-            ...result,
             'status': 'handoff',
+            'hub_ref': args['hub_ref'],
+            if (knownStep) 'step': step,
+            'actor': actor,
+            'surface': surface,
+            'instructions': instructions,
             'handoff': {
               'actor': actor,
               'surface': surface,
@@ -766,6 +784,7 @@ class StaffAssistant {
           };
         }
         if (tool == 'inspect_motion_walk') {
+          final result = _project(s, h.id, body) as _Json;
           result['next_check'] = _walkGuidance[result['stage']] ??
               'Inspect the selected walk again on the same hub.';
           if (result['stage'] == 'waiting_for_detection' &&
@@ -773,31 +792,50 @@ class StaffAssistant {
             result['next_check'] =
                 'Check sensor discovery, power and integration availability before starting a new walk.';
           }
+          return result;
         }
-        final apply = body['operation'],
-            reviewedArgs = asStringMap(body['apply_arguments']);
-        if (reviewedArgs != null &&
-            body['server_instance_id'] == h.serverInstanceId &&
-            _trustedHubOperations[apply]?['tier'] == 'persistent_change') {
-          final scope = {
-            'reviewed_operation': tool,
-            'description': op['description'],
-            ...result
+        final apply = body['operation'];
+        final reviewedArgs = asStringMap(body['apply_arguments']);
+        if (reviewedArgs == null) return _project(s, h.id, body) as _Json;
+        if (body['server_instance_id'] != h.serverInstanceId) throw _stale;
+
+        // Omit only envelope fields represented by the service's own plan,
+        // hub handle and trusted operation descriptor. Compare the remaining
+        // review recursively so new fields and truncated lists fail closed.
+        final scope = Map.of(body)
+          ..removeWhere((key, value) =>
+              _reviewEnvelope.contains(key) ||
+              key == 'change' && value == tool);
+        final result = _project(s, h.id, scope) as _Json;
+        if (!scope.keys.any((key) => !_reviewMetadata.contains(key)) ||
+            !_completeProjection(scope, result)) {
+          return {
+            'status': 'handoff',
+            'hub_ref': args['hub_ref'],
+            'actor': 'staff',
+            'surface': 'staff_hub_console',
+            'instructions':
+                'Open Hub tools for this hub and run the same preview. Review the full scope there before an administrator confirms the change.',
+            if (body['potentially_affected_rooms'] is List)
+              'affected_room_count':
+                  (body['potentially_affected_rooms'] as List).length,
+            if (body['pauses_adaptation'] is bool)
+              'pauses_adaptation': body['pauses_adaptation'],
           };
-          if (!s.staff.isAdmin || catalog[apply] == null) {
-            return {
-              'status': 'review',
-              'can_apply': false,
-              'reviewed_operation': tool,
-              'scope': scope,
-              'next_check':
-                  'Ask an administrator to run a fresh preview before confirming this change.'
-            };
-          }
-          return _preview(
-              s, h, 'hub', {'id': apply, 'arguments': reviewedArgs}, scope);
         }
-        return result;
+        if (_trustedHubOperations[apply]?['tier'] != 'persistent_change') {
+          throw _denied;
+        }
+        final review = {
+          'reviewed_operation': tool,
+          'description': op['description'],
+          ...result
+        };
+        if (s.staff.isAdmin && catalog[apply]?['tier'] != 'persistent_change') {
+          throw _denied;
+        }
+        return _preview(
+            s, h, 'hub', {'id': apply, 'arguments': reviewedArgs}, review);
       default:
         throw _badInput;
     }
@@ -940,7 +978,11 @@ class StaffAssistant {
     }
     if (value is bool || value is num || value == null) return value;
     if (value is String) {
-      if (_symbols.contains(value)) return value;
+      if (_symbols.contains(value) ||
+          (field == 'integrations' && _integrationKinds.contains(value)) ||
+          (field == 'reason' && _updateReasons.contains(value))) {
+        return value;
+      }
       if (_versionFields.contains(field)) return _safeVersion(value);
     }
     return null;
@@ -994,7 +1036,57 @@ const _handoffs = {
   'archived_device': 'Review archived devices in the device settings.',
 };
 
+const _integrationKinds = {
+  'hue',
+  'hue_ble',
+  'local_ble',
+  'ha',
+  'homeassistant',
+  'matter',
+  'monster',
+};
+const _updateReasons = {
+  'version_mismatch',
+  'component_drift',
+  'image_base_drift'
+};
+const _reviewEnvelope = {
+  'schema_version',
+  'contract_sha256',
+  'topology_resource_sha256',
+  'server_instance_id',
+  'plan_id',
+  'correlation_id',
+  'operation',
+  'apply_arguments',
+};
+const _reviewMetadata = {
+  'status',
+  'expires_in_seconds',
+  'expires_at_epoch_ms',
+  'requires_confirmation',
+};
+
+bool _completeProjection(Object? source, Object? projected) {
+  if (source is Map) {
+    return projected is Map &&
+        source.entries.every((entry) =>
+            projected.containsKey(entry.key) &&
+            _completeProjection(entry.value, projected[entry.key]));
+  }
+  if (source is List) {
+    if (projected is! List || source.length != projected.length) return false;
+    for (var i = 0; i < source.length; i++) {
+      if (!_completeProjection(source[i], projected[i])) return false;
+    }
+    return true;
+  }
+  // Scalars may be replaced with opaque references. A redacted value is null.
+  return source == null || projected != null;
+}
+
 const _idFields = {
+  'review_revision',
   'id',
   'target_id',
   'source_room_id',
@@ -1066,9 +1158,10 @@ const _versionFields = {
   'latest_package_version'
 };
 const _publicFields = {
+  ..._reviewMetadata,
+  'needs_reprovision',
   ..._versionFields,
   ..._idFields,
-  'status',
   'scope',
   'state',
   'rooms',
@@ -1190,7 +1283,6 @@ const _publicFields = {
   'canonical_power',
   'light_readback',
   'verification',
-  'requires_confirmation',
   'plan',
   'cleared_offsets',
   'before_minutes',

@@ -96,12 +96,13 @@ Deno.serve((req) =>
 
     const requestedServerInstanceId = readServerInstanceId(body)
     const serverEndpoint = readServerEndpoint(body)
-    const reviewed = Object.hasOwn(body, 'assistant_plan_id')
-    if (reviewed && (action !== 'enable' || body.explicit_enable !== true)) {
+    const reviewId = readString(body, 'assistant_plan_id')
+    if (Object.hasOwn(body, 'assistant_plan_id') &&
+        (!reviewId || action !== 'enable' || body.explicit_enable !== true)) {
       return jsonResponse({ error: 'Invalid reviewed remote setup' }, 400)
     }
-    const ensured = reviewed
-      ? await claimReviewedBootstrap(adminClient, userId, hubId, body, requestedServerInstanceId)
+    const ensured = reviewId
+      ? await claimReviewedBootstrap(adminClient, userId, reviewId, hubId, body, requestedServerInstanceId)
       : await ensureServerHubRows(adminClient, userId, hubId, body, requestedServerInstanceId)
     if (ensured instanceof Response) return ensured
     const { hub, serverInstanceId } = ensured
@@ -126,7 +127,7 @@ Deno.serve((req) =>
           requested_hub_id: hubId,
         })
       }
-      if (!reviewed && explicitEnable && hub.remote_access_disabled_at) {
+      if (!reviewId && explicitEnable && hub.remote_access_disabled_at) {
         await setRemoteAccessDisabled(adminClient, hub.id, false)
       }
 
@@ -137,7 +138,7 @@ Deno.serve((req) =>
       const originService =
         readEnv('RHYTHM_REMOTE_ACCESS_ORIGIN', DEFAULT_ORIGIN_SERVICE)
 
-      const existing = reviewed
+      const existing = reviewId
         ? await readExistingMappingByHubId(adminClient, hub.id)
         : await readExistingMapping(adminClient, {
         userId,
@@ -146,7 +147,7 @@ Deno.serve((req) =>
         serverInstanceId,
         serverEndpoint,
       })
-      if (reviewed && existing && (existing.home_id !== hub.home_id ||
+      if (reviewId && existing && (existing.home_id !== hub.home_id ||
           existing.server_instance_id !== serverInstanceId)) {
         return jsonResponse({ error: 'Remote mapping changed. Review setup again.' }, 409)
       }
@@ -177,41 +178,48 @@ Deno.serve((req) =>
       )
 
       const remoteEndpoint = endpointForHostname(hostname)
-      await saveRemoteAccessMapping(adminClient, {
-        hubId: hub.id,
-        existingHubId: existing?.hub_id,
-        homeId: hub.home_id,
-        hostname,
-        tunnelId: tunnel.id,
-        tunnelName: tunnel.name,
-        serverInstanceId,
-      })
-      let endpointUpdate = adminClient
-        .from('hubs')
-        .update({ remote_endpoint: remoteEndpoint })
-        .eq('id', hub.id)
-        .is('remote_access_disabled_at', null)
-      if (reviewed) {
-        endpointUpdate = endpointUpdate.eq('home_id', hub.home_id).eq('server_instance_id', serverInstanceId)
-      }
-      const { data: endpointHub, error: endpointUpdateError } = await endpointUpdate.select('id')
-        .maybeSingle()
-      if (endpointUpdateError) throw new Error(endpointUpdateError.message)
-      if (!endpointHub) {
-        // A disable won the race while Cloudflare was provisioning. Remove
-        // everything this request may have created instead of resurrecting
-        // the route after the user turned it off.
-        await deleteDnsRecordIfPresent(zoneId, apiToken, hostname)
-        await deleteTunnelIfPresent(accountId, apiToken, tunnel.id)
-        await deleteRemoteAccessMapping(adminClient, hub.id)
-        return jsonResponse({
-          status: 'disabled_by_user',
-          hub_id: hub.id,
-          requested_hub_id: hubId,
+      if (reviewId) {
+        const receipt = await reviewedBootstrapStep(adminClient, userId, reviewId, 'remote_provisioned', {
+          home_id: hub.home_id, hub_id: hub.id, server_instance_id: serverInstanceId,
+          hostname, tunnel_id: tunnel.id, tunnel_name: tunnel.name,
         })
-      }
-      if (existing && existing.hub_id !== hub.id) {
-        await clearHubRemoteEndpoint(adminClient, existing.hub_id)
+        if (receipt instanceof Response) return receipt
+        if (receipt === 'disabled_by_user') {
+          // The disable flow owns teardown. These names and IDs can also be
+          // reused by the next enable, so a stale worker must not delete them.
+          return jsonResponse({ status: receipt, hub_id: hub.id, requested_hub_id: hubId })
+        }
+      } else {
+        await saveRemoteAccessMapping(adminClient, {
+          hubId: hub.id,
+          existingHubId: existing?.hub_id,
+          homeId: hub.home_id,
+          hostname,
+          tunnelId: tunnel.id,
+          tunnelName: tunnel.name,
+          serverInstanceId,
+        })
+        const { data, error } = await adminClient.from('hubs')
+          .update({ remote_endpoint: remoteEndpoint })
+          .eq('id', hub.id)
+          .is('remote_access_disabled_at', null)
+          .select('id')
+          .maybeSingle()
+        if (error) throw new Error(error.message)
+        if (!data) {
+          // A disable won the race while Cloudflare was provisioning.
+          await deleteDnsRecordIfPresent(zoneId, apiToken, hostname)
+          await deleteTunnelIfPresent(accountId, apiToken, tunnel.id)
+          await deleteRemoteAccessMapping(adminClient, hub.id)
+          return jsonResponse({
+            status: 'disabled_by_user',
+            hub_id: hub.id,
+            requested_hub_id: hubId,
+          })
+        }
+        if (existing && existing.hub_id !== hub.id) {
+          await clearHubRemoteEndpoint(adminClient, existing.hub_id)
+        }
       }
 
       return jsonResponse({
@@ -236,11 +244,10 @@ Deno.serve((req) =>
 // Box. Reconciliation is allowed to repair aliases; this action cannot move
 // mappings between them. Consume the device dispatch before any vendor write.
 async function claimReviewedBootstrap(
-  adminClient: any, actor: string, hubId: string, body: JsonObject, instance: string | null,
+  adminClient: any, actor: string, reviewId: string, hubId: string, body: JsonObject, instance: string | null,
 ): Promise<EnsuredHubRows | Response> {
   const homeId = readString(body, 'home_id')
-  const planId = readString(body, 'assistant_plan_id')
-  if (!homeId || !planId || !instance || body.home || body.server_hub) {
+  if (!homeId || !instance || body.home || body.server_hub) {
     return jsonResponse({ error: 'Missing reviewed target' }, 400)
   }
   const hub = await fetchHub(adminClient, hubId)
@@ -258,14 +265,28 @@ async function claimReviewedBootstrap(
       existing.server_instance_id !== instance)) {
     return jsonResponse({ error: 'Review the current remote mapping before setup' }, 409)
   }
-  const { data, error } = await adminClient.rpc('customer_assistant_review', {
-    p_actor: actor, p_step: 'dispatch_remote', p_id: planId,
-    p_args: {home_id: homeId, hub_id: hubId, server_instance_id: instance},
+  const receipt = await reviewedBootstrapStep(adminClient, actor, reviewId, 'remote_dispatch', {
+    home_id: homeId, hub_id: hubId, server_instance_id: instance,
   })
-  if (error || data?.status !== 'dispatched' || data.plan_id !== planId) {
-    return jsonResponse({ error: 'Review remote setup again' }, 409)
+  if (receipt instanceof Response) return receipt
+  return { hub, home, serverInstanceId: instance }
+}
+
+async function reviewedBootstrapStep(
+  adminClient: any, actor: string, reviewId: string,
+  step: 'remote_dispatch' | 'remote_provisioned', args: JsonObject,
+): Promise<'ok' | 'disabled_by_user' | Response> {
+  const { data, error } = await adminClient.rpc('customer_assistant_review', {
+    p_actor: actor, p_id: reviewId, p_step: step, p_args: args,
+  })
+  if (error?.code === '42501') return jsonResponse({ error: 'Home access required' }, 403)
+  if (error?.code === 'P0001' || error?.code === '22P02') {
+    return jsonResponse({ error: 'Review the current remote setup again' }, 409)
   }
-  return {hub, home, serverInstanceId: instance}
+  if (!error && (data?.status === 'ok' || (step === 'remote_provisioned' && data?.status === 'disabled_by_user'))) {
+    return data.status
+  }
+  return jsonResponse({ error: 'Remote setup unavailable' }, 503)
 }
 
 function readRemoteAccessAction(body: JsonObject): RemoteAccessAction | Response {

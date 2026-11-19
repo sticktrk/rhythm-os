@@ -8,6 +8,7 @@ CREATE TABLE public.customer_assistant_reviews (
   arguments jsonb NOT NULL,
   support_grant_id uuid,
   remote_dispatched boolean NOT NULL DEFAULT false,
+  remote_tunnel_id text,
   revision jsonb NOT NULL,
   state text NOT NULL DEFAULT 'review' CHECK (state IN ('review','awaiting_device','claimed','applied','acknowledged','uncertain','cancelled')),
   expires_at timestamptz NOT NULL DEFAULT (now() + interval '10 minutes')
@@ -60,7 +61,7 @@ DECLARE
   current_args jsonb;
   answer jsonb;
 BEGIN
-  IF p_actor IS NULL OR p_step NOT IN ('plan','confirm','claim','complete','cancel','dispatch_remote') THEN
+  IF p_actor IS NULL OR p_step NOT IN ('plan','confirm','claim','complete','cancel','remote_dispatch','remote_provisioned') THEN
     RAISE EXCEPTION 'invalid_request' USING ERRCODE = '22023';
   END IF;
   IF p_step = 'plan' THEN
@@ -83,11 +84,7 @@ BEGIN
       UPDATE public.customer_assistant_reviews SET state='cancelled',arguments=arguments-'report_summary' WHERE id=r.id;
       RETURN jsonb_build_object('status','cancelled','plan_id',r.id);
     END IF;
-    IF r.state='cancelled' OR (p_step='dispatch_remote' AND
-          (r.change<>'enable_remote' OR r.state<>'claimed' OR r.remote_dispatched OR
-           p_args IS DISTINCT FROM jsonb_build_object('home_id',r.arguments->'home_id','hub_id',r.arguments->'hub_id',
-             'server_instance_id',r.arguments->'server_instance_id')))
-       OR (p_step='confirm' AND p_args->'confirmed' IS DISTINCT FROM 'true'::jsonb)
+    IF r.state='cancelled' OR (p_step='confirm' AND p_args->'confirmed' IS DISTINCT FROM 'true'::jsonb)
        OR (p_step='claim' AND r.state <> 'awaiting_device')
        OR (p_step='complete' AND r.state <> 'claimed') THEN
       RAISE EXCEPTION 'review_state_changed' USING ERRCODE='P0001';
@@ -96,7 +93,12 @@ BEGIN
     current_args := r.arguments;
   END IF;
 
-  IF change_type='join_home' THEN
+  IF p_step='confirm' AND r.state='applied' AND change_type='remove_member'
+      AND current_args->>'member_id'=p_actor::text THEN
+    -- Leaving the home removes the permission that was needed to perform the
+    -- action. Its author can still retrieve their own unexpired receipt.
+    NULL;
+  ELSIF change_type='join_home' THEN
     -- The phone is the only party that can prove possession of an unknown
     -- hub. Reveal nothing about its account before the proof succeeds.
     IF coalesce(length(current_args->>'server_instance_id'),0) NOT BETWEEN 1 AND 128 THEN
@@ -129,8 +131,8 @@ BEGIN
       END IF;
       IF change_type='enable_remote' THEN
         rev := rev || jsonb_build_object('disabled_at',hub.remote_access_disabled_at,'endpoint',hub.remote_endpoint,
-          'mapping',(SELECT jsonb_build_array(m.home_id,m.server_instance_id,m.tunnel_id,m.hostname)
-                     FROM public.hub_remote_access m WHERE m.hub_id=hub.id));
+          'mapping',(SELECT jsonb_build_array(m.home_id,m.server_instance_id,m.hostname,m.tunnel_id)
+            FROM public.hub_remote_access m WHERE m.hub_id=hub.id));
       END IF;
     END IF;
   END IF;
@@ -141,6 +143,53 @@ BEGIN
   ELSIF p_step='confirm' AND r.state <> 'review' THEN
     -- A repeat can retrieve a receipt but never dispatch a second action.
     NULL;
+  ELSIF p_step IN ('remote_dispatch','remote_provisioned') THEN
+    -- These steps are called only by the provisioning service. Bind its
+    -- request to the same resident, Box and review as the phone's claim.
+    IF change_type<>'enable_remote' OR r.state<>'claimed' OR NOT (p_args @> (current_args-'change')) THEN
+      RAISE EXCEPTION 'review_changed' USING ERRCODE='P0001';
+    END IF;
+    IF p_step='remote_dispatch' THEN
+      IF r.remote_dispatched OR r.revision IS DISTINCT FROM rev THEN
+        RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001';
+      END IF;
+      -- Fence legacy automatic support grants before starting provisioning.
+      INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
+        ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
+      IF hub.remote_access_disabled_at IS NOT NULL THEN
+        UPDATE public.hubs SET remote_access_disabled_at=NULL WHERE id=hub.id;
+      END IF;
+      rev := rev || jsonb_build_object('disabled_at',NULL,
+        'policy',(SELECT revision FROM public.hub_support_review_policy WHERE hub_id=hub.id));
+      UPDATE public.customer_assistant_reviews SET remote_dispatched=true,revision=rev WHERE id=r.id;
+    ELSE
+      IF NOT r.remote_dispatched OR r.remote_tunnel_id IS NOT NULL THEN
+        RAISE EXCEPTION 'review_state_changed' USING ERRCODE='P0001';
+      END IF;
+      IF hub.remote_access_disabled_at IS NOT NULL THEN
+        RETURN jsonb_build_object('status','disabled_by_user');
+      END IF;
+      IF r.revision IS DISTINCT FROM rev THEN
+        RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001';
+      END IF;
+      -- Commit the mapping, endpoint and provisioning evidence together. An
+      -- older result cannot overwrite a route changed while the vendor ran.
+      IF r.revision->'mapping'='null'::jsonb THEN
+        INSERT INTO public.hub_remote_access(hub_id,home_id,server_instance_id,hostname,tunnel_id,tunnel_name)
+          VALUES(hub.id,home.id,hub.server_instance_id,p_args->>'hostname',p_args->>'tunnel_id',p_args->>'tunnel_name')
+          ON CONFLICT DO NOTHING;
+      ELSE
+        UPDATE public.hub_remote_access m SET tunnel_name=p_args->>'tunnel_name' WHERE m.hub_id=hub.id
+          AND jsonb_build_array(m.home_id,m.server_instance_id,m.hostname,m.tunnel_id)=r.revision->'mapping'
+          AND m.home_id=home.id AND m.server_instance_id=hub.server_instance_id
+          AND m.hostname=p_args->>'hostname' AND m.tunnel_id=p_args->>'tunnel_id';
+      END IF;
+      IF NOT FOUND THEN RAISE EXCEPTION 'remote_mapping_changed' USING ERRCODE='P0001'; END IF;
+      UPDATE public.hubs SET remote_endpoint=jsonb_build_object('host',p_args->>'hostname','port',443,'useSsl',true)
+        WHERE id=hub.id;
+      UPDATE public.customer_assistant_reviews SET remote_tunnel_id=p_args->>'tunnel_id' WHERE id=r.id;
+    END IF;
+    RETURN jsonb_build_object('status','ok');
   ELSIF p_step='complete' THEN
     IF (p_args->>'outcome') IS NULL OR p_args->>'outcome' NOT IN ('acknowledged','uncertain') THEN
       RAISE EXCEPTION 'invalid_outcome' USING ERRCODE='22023'; END IF;
@@ -148,9 +197,10 @@ BEGIN
     -- with the service's durable record for this particular action.
     IF p_args->>'outcome'='acknowledged' AND (CASE change_type
       WHEN 'grant_support' THEN r.support_grant_id IS NOT NULL AND r.support_grant_id=grant_id
-      WHEN 'enable_remote' THEN r.remote_dispatched AND hub.remote_access_disabled_at IS NULL AND EXISTS (
+      WHEN 'enable_remote' THEN hub.remote_access_disabled_at IS NULL AND EXISTS (
         SELECT 1 FROM public.hub_remote_access m WHERE m.hub_id=hub.id AND m.home_id=home.id
-          AND m.server_instance_id=hub.server_instance_id)
+          AND m.server_instance_id=hub.server_instance_id AND m.tunnel_id=r.remote_tunnel_id
+          AND hub.remote_endpoint=jsonb_build_object('host',m.hostname,'port',443,'useSsl',true))
       WHEN 'join_home' THEN EXISTS (
         SELECT 1 FROM public.hubs b JOIN public.homes a ON a.id=b.home_id
         WHERE b.type='server' AND b.server_instance_id=current_args->>'server_instance_id' AND p_actor=ANY(a.member_ids)
@@ -167,23 +217,14 @@ BEGIN
     UPDATE public.customer_assistant_reviews SET state=p_args->>'outcome', arguments=arguments-'report_summary' WHERE id=r.id RETURNING * INTO r;
   ELSE
     IF r.revision IS DISTINCT FROM rev THEN RAISE EXCEPTION 'review_stale' USING ERRCODE='P0001'; END IF;
-    IF (p_step='claim' AND change_type='enable_remote') OR (p_step='confirm' AND change_type='revoke_support') THEN
-      INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
-        ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
-      rev := jsonb_set(rev,'{policy}',to_jsonb((SELECT revision FROM public.hub_support_review_policy WHERE hub_id=hub.id)));
-    END IF;
-    IF p_step='dispatch_remote' THEN
-      -- Consume the lease and enable the route under the same locks as the
-      -- freshness check. A later disable must win during vendor provisioning.
-      UPDATE public.hubs SET remote_access_disabled_at=NULL WHERE id=hub.id;
-      UPDATE public.customer_assistant_reviews SET remote_dispatched=true WHERE id=r.id;
-      RETURN jsonb_build_object('status','dispatched','plan_id',r.id);
-    ELSIF p_step='claim' THEN
-      UPDATE public.customer_assistant_reviews SET state='claimed',revision=rev WHERE id=r.id RETURNING * INTO r;
+    IF p_step='claim' THEN
+      UPDATE public.customer_assistant_reviews SET state='claimed' WHERE id=r.id RETURNING * INTO r;
     ELSIF change_type='remove_member' THEN
       UPDATE public.homes SET member_ids=array_remove(member_ids, member) WHERE id=home.id;
       UPDATE public.customer_assistant_reviews SET state='applied' WHERE id=r.id RETURNING * INTO r;
     ELSIF change_type='revoke_support' THEN
+      INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
+        ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
       UPDATE public.hub_support_access_grants SET revoked_at=now(), encrypted_token='{"version":"support_access_token_revoked_v1"}'::jsonb WHERE id=grant_id;
       UPDATE public.customer_assistant_reviews SET state='applied' WHERE id=r.id RETURNING * INTO r;
     ELSE

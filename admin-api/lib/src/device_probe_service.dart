@@ -380,6 +380,8 @@ class DeviceProbeService {
     bool requireAssistantGrant = false,
   }) async {
     final grantRequired = request.isAssistant || requireAssistantGrant;
+    // StaffAssistant verifies the body of its own api/state identity read.
+    final verifyIdentity = grantRequired && request.path != 'api/state';
     if (request.isMutation && !session.staff.isAdmin) {
       throw const AdminApiException(
           403, 'An enabled admin is required to change a device.');
@@ -417,7 +419,7 @@ class DeviceProbeService {
         candidate: candidate,
         request: request,
         authToken: token,
-        verifyIdentity: requireAssistantGrant && request.path != 'api/state',
+        verifyIdentity: verifyIdentity,
       );
       if (result.authRequired &&
           (grantRequired || hub.authToken == null) &&
@@ -437,8 +439,7 @@ class DeviceProbeService {
             candidate: candidate,
             request: request,
             authToken: freshToken,
-            verifyIdentity:
-                requireAssistantGrant && request.path != 'api/state',
+            verifyIdentity: verifyIdentity,
           );
         }
       }

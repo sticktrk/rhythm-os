@@ -67,8 +67,9 @@ void main() {
       var sameAccount = true;
       var executions = 0;
       final service = CustomerAssistantService((body) async {
-        if (body.containsKey('device_claim'))
+        if (body.containsKey('device_claim')) {
           return {...review, 'status': 'claimed'};
+        }
         throw StateError('Completion receipt lost');
       }, () => sameAccount);
       final result = await service.confirm(

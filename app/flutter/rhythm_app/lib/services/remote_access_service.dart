@@ -212,14 +212,25 @@ class RemoteAccessService {
     bool autoGrantSupport = true,
     String? expectedServerInstanceId,
     String? assistantPlanId,
+    String? reviewedCloudHubId,
     bool explicitUserEnable = false,
     bool? verifyRemoteRoute,
   }) async {
     _ensureCanUse(serverHub);
     final shouldVerifyRemoteRoute = verifyRemoteRoute ?? !explicitUserEnable;
 
-    if (explicitUserEnable) {
-      // An explicit enable always wins over a previously recorded opt-out.
+    final cloudHubId = reviewedCloudHubId ?? serverHub.id;
+    final generationKey = _autoEnableKey(serverHub.homeId, serverHub);
+    final generation = _autoEnableGenerations[generationKey];
+    void checkReviewedIntent() {
+      if (assistantPlanId != null &&
+          _autoEnableGenerations[generationKey] != generation) {
+        throw const RemoteAccessOptedOutException();
+      }
+    }
+
+    if (explicitUserEnable && assistantPlanId == null) {
+      // A manual settings change starts a fresh enable immediately.
       await _clearOptOut(serverHub);
     }
 
@@ -231,26 +242,42 @@ class RemoteAccessService {
       );
     }
 
-    final serverInstanceId = await _serverInstanceIdFor(serverHub);
-    if (expectedServerInstanceId != null && serverInstanceId != expectedServerInstanceId) {
+    if (assistantPlanId != null && expectedServerInstanceId == null) {
+      throw StateError('The remote setup review requires a Box identity.');
+    }
+    final serverInstanceId = await _serverInstanceIdFor(serverHub,
+        requireLiveIdentity: assistantPlanId != null);
+    checkReviewedIntent();
+    if (expectedServerInstanceId != null &&
+        serverInstanceId != expectedServerInstanceId) {
       throw StateError('The Box identity changed before remote setup.');
     }
     final client = _supabaseClient();
     final response = await client.functions.invoke(
       _bootstrapFunctionName,
       body: assistantPlanId == null
-          ? buildBootstrapBody(serverHub:serverHub, home:home, serverInstanceId:serverInstanceId,
-              explicitUserEnable:explicitUserEnable)
-          : {'assistant_plan_id': assistantPlanId, 'home_id': serverHub.homeId,
-             'hub_id':serverHub.id, 'server_instance_id':serverInstanceId, 'explicit_enable':true},
+          ? buildBootstrapBody(
+              serverHub: serverHub,
+              home: home,
+              serverInstanceId: serverInstanceId,
+              explicitUserEnable: explicitUserEnable)
+          : {
+              'assistant_plan_id': assistantPlanId,
+              'home_id': serverHub.homeId,
+              'hub_id': cloudHubId,
+              'server_instance_id': serverInstanceId,
+              'explicit_enable': true
+            },
     );
+    checkReviewedIntent();
     final data = Map<String, dynamic>.from(response.data as Map);
     if (data['status'] == 'disabled_by_user') {
       throw const RemoteAccessOptedOutException();
     }
     if (expectedServerInstanceId != null &&
-        (data['hub_id'] != serverHub.id || data['requested_hub_id'] != serverHub.id ||
-         data['server_instance_id'] != expectedServerInstanceId)) {
+        (data['hub_id'] != cloudHubId ||
+            data['requested_hub_id'] != cloudHubId ||
+            data['server_instance_id'] != expectedServerInstanceId)) {
       throw StateError('The remote setup receipt identifies a different Box.');
     }
     final remoteEndpoint = HubEndpoint.fromJson(
@@ -274,6 +301,7 @@ class RemoteAccessService {
     final configured = await _putConfigThroughReachableEndpoint(
       serverHub: serverHub,
       bootstrapEndpoint: remoteEndpoint,
+      checkIntent: assistantPlanId == null ? null : checkReviewedIntent,
       expectedServerInstanceId: expectedServerInstanceId,
       hostname: hostname,
       connectorToken: connectorToken,
@@ -281,6 +309,14 @@ class RemoteAccessService {
       tunnelName: tunnelName,
     );
     final api = configured.api;
+    try {
+      checkReviewedIntent();
+    } on RemoteAccessOptedOutException {
+      // The user's disable can finish while the device write is in flight.
+      // Re-clear the exact endpoint that just accepted the connector.
+      await api.clearConfig();
+      rethrow;
+    }
     late final RhythmRemoteAccessStatus status;
     String? stableServerInstanceId;
     status = await _waitForActivation(
@@ -341,6 +377,14 @@ class RemoteAccessService {
     );
     if (requireSupportGrant) {
       await _supportGrant(updatedHub).timeout(_supportGrantTimeout);
+    }
+
+    checkReviewedIntent();
+    if (assistantPlanId != null &&
+        (routeVerified || !shouldVerifyRemoteRoute)) {
+      await _clearOptOut(updatedHub,
+          checkIntent: checkReviewedIntent, cloudHubId: cloudHubId);
+      checkReviewedIntent();
     }
 
     return RemoteAccessEnableResult(
@@ -866,9 +910,15 @@ class RemoteAccessService {
     await _persistOptOutHubIds(ids);
   }
 
-  Future<void> _clearOptOut(Hub hub) async {
+  Future<void> _clearOptOut(Hub hub,
+      {void Function()? checkIntent, String? cloudHubId}) async {
     final ids = await _optOutIds();
-    final changed = _hubPreferenceIdentities(hub).fold<bool>(
+    checkIntent?.call();
+    final identities = {
+      ..._hubPreferenceIdentities(hub),
+      if (cloudHubId != null) cloudHubId
+    };
+    final changed = identities.fold<bool>(
       false,
       (changed, identity) => ids.remove(identity) || changed,
     );
@@ -968,6 +1018,7 @@ class RemoteAccessService {
       })> _putConfigThroughReachableEndpoint({
     required Hub serverHub,
     required HubEndpoint bootstrapEndpoint,
+    void Function()? checkIntent,
     required String? expectedServerInstanceId,
     required String hostname,
     required String connectorToken,
@@ -991,11 +1042,13 @@ class RemoteAccessService {
       final api = _apiForEndpoint(endpoint, serverHub.token);
       try {
         if (expectedServerInstanceId != null) {
-          final hello = await _stateLoader(endpoint: endpoint, authToken: serverHub.token);
+          final hello = await _stateLoader(
+              endpoint: endpoint, authToken: serverHub.token);
           if (hello.serverInstanceId != expectedServerInstanceId) {
             throw StateError('The endpoint did not identify the reviewed Box.');
           }
         }
+        checkIntent?.call();
         final status = await api.putConfig(
           hostname: hostname,
           connectorToken: connectorToken,
@@ -1003,6 +1056,8 @@ class RemoteAccessService {
           tunnelName: tunnelName,
         );
         return (api: api, status: status);
+      } on RemoteAccessOptedOutException {
+        rethrow;
       } catch (error, stackTrace) {
         lastError = error;
         lastStackTrace = stackTrace;
@@ -1118,7 +1173,8 @@ class RemoteAccessService {
     return [serverHub.endpoint, remote];
   }
 
-  Future<String> _serverInstanceIdFor(Hub serverHub) async {
+  Future<String> _serverInstanceIdFor(Hub serverHub,
+      {bool requireLiveIdentity = false}) async {
     for (final endpoint in _disableEndpoints(serverHub)) {
       try {
         final state = await _stateLoader(
@@ -1129,6 +1185,7 @@ class RemoteAccessService {
           state.serverInstanceId,
         );
         if (serverInstanceId != null && serverInstanceId.isNotEmpty) {
+          if (requireLiveIdentity) return serverInstanceId;
           return preferredServerIdentity(
             existing: serverHub.serverInstanceId,
             candidate: serverInstanceId,
@@ -1142,6 +1199,10 @@ class RemoteAccessService {
       }
     }
 
+    if (requireLiveIdentity) {
+      throw StateError(
+          'Could not verify the Box identity before remote setup.');
+    }
     return preferredServerIdentity(
       existing: serverHub.serverInstanceId,
       candidate: _fallbackServerInstanceId(serverHub.endpoint),
