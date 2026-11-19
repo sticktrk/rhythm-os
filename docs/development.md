@@ -58,6 +58,15 @@ shared commissioning guards under `tools/ci/`; those commands are also useful
 individually while editing. The BlueZ exceptions are maintained in
 `tools/ci/references/bluez-owner-exceptions.tsv` alongside their contract tests.
 
+The hub's scenario tests share one integration-test binary. To add a scenario,
+place its file in `os/rust/core/rhythm-os/tests/scenarios/` and declare the
+module in that directory's `main.rs`. To run a single module, pass its name
+followed by `::` as the test filter.
+
+```bash
+cargo test --locked -p rhythm-os --test scenarios scenario_backup_nodes::
+```
+
 Push your branch to your fork and open a public PR. Include the intended
 behavior, focused tests and any outstanding hardware verification. See
 [CONTRIBUTING.md](../CONTRIBUTING.md).
