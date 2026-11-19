@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(operation_started.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn device_batch_marks_only_the_operation_that_reaches_its_deadline() {
         let coordinator = ClientOperationCoordinator::new();
         let adapter_gate = AdapterOperationGate::new(4);
