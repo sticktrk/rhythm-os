@@ -92,7 +92,7 @@ enum Edit {
 }
 
 pub struct AutomationPlan {
-    token: String,
+    pub(super) token: String,
     operation: String,
     server: String,
     valid_until: Instant,

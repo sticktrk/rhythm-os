@@ -20,7 +20,7 @@ const PLAN_LIFETIME_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Debug)]
 pub struct LightPlan {
-    id: String,
+    pub(super) id: String,
     expires_ms: u64,
     server: String,
     contract: String,

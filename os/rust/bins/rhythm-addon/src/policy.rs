@@ -14,6 +14,7 @@ use serde_json::json;
 
 const READ_PATHS: &[&str] = &[
     "/api/auth/agent-tokens",
+    "/api/assistant/approvals",
     "/api/assistant/contract",
     "/api/assistant/topology",
     "/health",
@@ -59,6 +60,7 @@ const READ_PATHS: &[&str] = &[
 ];
 
 const WRITE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/api/assistant/approvals/:plan_id"),
     ("POST", "/api/assistant/mcp"),
     ("POST", "/api/auth/assistant-clients"),
     ("POST", "/api/auth/agent-tokens"),

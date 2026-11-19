@@ -51,6 +51,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/assistant/approvals",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/assistant/approvals/:plan_id",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: crate::assistant::OPERATION_PATH,
         methods: &["POST"],
     },

@@ -23,7 +23,7 @@ const LIMIT: usize = 32;
 pub struct MotionSessions {
     next_detection_id: u64,
     walks: HashMap<String, Walk>,
-    plans: HashMap<String, Plan>,
+    pub(super) plans: HashMap<String, Plan>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -89,7 +89,7 @@ struct WalkLight {
 }
 
 #[derive(Clone)]
-struct Plan {
+pub(super) struct Plan {
     created: Instant,
     server_instance_id: String,
     target: Target,

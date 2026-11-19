@@ -440,8 +440,8 @@ pub struct AppState {
     /// Short-lived reviews of scene, schedule and lighting settings changes.
     pub assistant_automation_plans:
         std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
-    /// Hub-local reviewed lighting changes. Plans expire and are consumed on apply.
-    pub assistant_move_reviews: std::collections::VecDeque<(String, u64)>,
+    /// Credential-bound previews, pending owner decisions and recent receipts.
+    pub assistant_approvals: crate::assistant::approvals::PlanStore,
     pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,
     pub assistant_light_plans: std::collections::VecDeque<crate::assistant::lighting::LightPlan>,
     /// Ephemeral light scene previews keyed by preview ID.
@@ -1083,7 +1083,7 @@ impl Default for AppState {
             light_schedule_write_lock: Arc::new(Mutex::new(())),
             scenes: default_scene_map(),
             seeded_factory_scene_ids: factory_default_scene_ids(),
-            assistant_move_reviews: Default::default(),
+            assistant_approvals: Default::default(),
             assistant_transfers: Default::default(),
             assistant_automation_plans: Default::default(),
             assistant_light_plans: Default::default(),

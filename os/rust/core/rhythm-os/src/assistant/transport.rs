@@ -1,6 +1,7 @@
 //! Stateless MCP Streamable HTTP and typed REST projections of one registry.
+use super::approvals::Caller;
 use super::*;
-use crate::auth::{ApiAuthRequestInfo, ApiTokenRole};
+use crate::auth::{ApiAuthRequestInfo, ApiTokenRole, VerifiedApiToken};
 use axum::{
     extract::{Extension, Path, State},
     http::{HeaderMap, Method, StatusCode},
@@ -29,6 +30,7 @@ fn invalid_args() -> LightAssistantError {
 
 async fn execute(
     state: SharedState,
+    caller: Caller,
     name: &str,
     args: Value,
 ) -> Result<Value, LightAssistantError> {
@@ -43,7 +45,16 @@ async fn execute(
             mutation_may_have_applied: false,
             trial_id: None,
         })?;
-    let fields = args.as_object().ok_or_else(invalid_args)?;
+    let invalid = || match name {
+        OP_PLAN_MOVE_DEVICE_ROOM | OP_APPLY_MOVE_DEVICE_ROOM_PLAN => {
+            LightAssistantError::bad_request(
+                "invalid_request",
+                "The move request does not match the advertised contract",
+            )
+        }
+        _ => invalid_args(),
+    };
+    let fields = args.as_object().ok_or_else(invalid)?;
     if op.tier == OperationTier::OwnerOnly {
         return Err(LightAssistantError {
             status: 403,
@@ -67,7 +78,7 @@ async fn execute(
             .keys()
             .any(|k| op.input_schema["properties"].get(k).is_none())
     {
-        return Err(invalid_args());
+        return Err(invalid());
     }
     if op.input_schema["required"]
         .as_array()
@@ -78,29 +89,16 @@ async fn execute(
                 .any(|k| !fields.contains_key(k))
         })
     {
-        return Err(invalid_args());
+        return Err(invalid());
     }
-    // Existing appliance handlers perform synchronous persistence and native
-    // device I/O. Never stall the Pi's single async worker while they run.
-    let runtime = tokio::runtime::Handle::current();
-    let mut result = tokio::task::spawn_blocking(move || match op.handler {
-        Handler::Lighting => runtime.block_on(lighting::call(&state, &op.id, args)),
-        Handler::Motion => runtime.block_on(motion::call(&state, &op.id, args)),
-        Handler::Automation => automation::call(&state, &op.id, args),
-        Handler::Devices => runtime.block_on(devices::call(&state, &op.id, args)),
-        Handler::Portable => portable::call(&state, &op.id, args),
-        Handler::Information => information::call(&state, &op.id, args),
-        Handler::Legacy => legacy(&state, &op.id, args),
-    })
-    .await
-    .map_err(|_| LightAssistantError {
-        status: 500,
-        code: "operation_interrupted",
-        message: "Reread the affected resource before trying again".into(),
-        retryable: false,
-        mutation_may_have_applied: op.tier != OperationTier::Read,
-        trial_id: None,
-    })??;
+    if name == "read_plan_outcome" {
+        return approvals::outcome(&state, &caller, &args);
+    }
+    if op.tier == OperationTier::PersistentChange {
+        return approvals::apply(state, &caller, op, args).await;
+    }
+    let planned_at = current_epoch_ms();
+    let mut result = dispatch(state.clone(), op, args).await?;
     if op.tier == OperationTier::Read && result["plan_id"].is_string() {
         let target = match op.id.as_str() {
             OP_PLAN_MOVE_DEVICE_ROOM => OP_APPLY_MOVE_DEVICE_ROOM_PLAN,
@@ -131,9 +129,38 @@ async fn execute(
             }
             result["operation"] = json!(apply.id);
             result["apply_arguments"] = Value::Object(arguments);
+            approvals::register(&state, caller, op, apply, &mut result, planned_at)?;
         }
     }
     Ok(result)
+}
+
+pub(super) async fn dispatch(
+    state: SharedState,
+    op: &'static LightAssistantOperationDto,
+    args: Value,
+) -> Result<Value, LightAssistantError> {
+    // Existing appliance handlers perform synchronous persistence and native
+    // device I/O. Never stall the Pi's single async worker while they run.
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || match op.handler {
+        Handler::Lighting => runtime.block_on(lighting::call(&state, &op.id, args)),
+        Handler::Motion => runtime.block_on(motion::call(&state, &op.id, args)),
+        Handler::Automation => automation::call(&state, &op.id, args),
+        Handler::Devices => runtime.block_on(devices::call(&state, &op.id, args)),
+        Handler::Portable => portable::call(&state, &op.id, args),
+        Handler::Information => information::call(&state, &op.id, args),
+        Handler::Legacy => legacy(&state, &op.id, args),
+    })
+    .await
+    .map_err(|_| LightAssistantError {
+        status: 500,
+        code: "operation_interrupted",
+        message: "Reread the affected resource before trying again".into(),
+        retryable: false,
+        mutation_may_have_applied: op.tier != OperationTier::Read,
+        trial_id: None,
+    })?
 }
 
 fn identify_error(error: anyhow::Error) -> LightAssistantError {
@@ -175,16 +202,6 @@ fn legacy(state: &SharedState, id: &str, mut args: Value) -> Result<Value, Light
                 state,
                 serde_json::from_value(args).map_err(|_| invalid_args())?,
             )?;
-            let mut s = state.lock().map_err(|_| {
-                LightAssistantError::internal("state_unavailable", "Hub unavailable")
-            })?;
-            s.assistant_move_reviews
-                .retain(|(id, expires)| id != &plan.plan_id && *expires > current_epoch_ms());
-            if s.assistant_move_reviews.len() >= 32 {
-                s.assistant_move_reviews.pop_front();
-            }
-            s.assistant_move_reviews
-                .push_back((plan.plan_id.clone(), current_epoch_ms() + 300_000));
             Ok(json!(plan))
         }
         OP_APPLY_MOVE_DEVICE_ROOM_PLAN => {
@@ -193,22 +210,6 @@ fn legacy(state: &SharedState, id: &str, mut args: Value) -> Result<Value, Light
                 .remove("confirmed");
             let req: LightAssistantMoveApplyRequest =
                 serde_json::from_value(args).map_err(|_| invalid_args())?;
-            {
-                let mut s = state.lock().map_err(|_| {
-                    LightAssistantError::internal("state_unavailable", "Hub unavailable")
-                })?;
-                let pos = s
-                    .assistant_move_reviews
-                    .iter()
-                    .position(|(id, expires)| id == &req.plan_id && *expires > current_epoch_ms())
-                    .ok_or_else(|| {
-                        LightAssistantError::conflict(
-                            "plan_expired",
-                            "Review a fresh move plan before applying it",
-                        )
-                    })?;
-                s.assistant_move_reviews.remove(pos);
-            }
             Ok(json!(apply_light_assistant_device_room_move(state, req)?))
         }
         OP_IDENTIFY_DEVICE => {
@@ -224,13 +225,26 @@ pub(crate) async fn rest(
     State(state): State<SharedState>,
     Path(id): Path<String>,
     auth: Option<Extension<ApiAuthRequestInfo>>,
+    credential: Option<Extension<VerifiedApiToken>>,
     headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
-    if headers.contains_key("origin") && auth.and_then(|Extension(a)| a.role).is_none() {
+    invoke_rest(state, &id, auth, credential, headers, args).await
+}
+
+pub(crate) async fn invoke_rest(
+    state: SharedState,
+    id: &str,
+    auth: Option<Extension<ApiAuthRequestInfo>>,
+    credential: Option<Extension<VerifiedApiToken>>,
+    headers: HeaderMap,
+    args: Value,
+) -> Response {
+    let caller = Caller::from_request(auth, credential);
+    if headers.contains_key("origin") && caller.role.is_none() {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match execute(state, &id, args).await {
+    match execute(state, caller, id, args).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => (
             StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -247,6 +261,7 @@ fn rpc_error(id: &Value, code: i32, message: &str) -> Response {
 pub(crate) async fn mcp(
     State(state): State<SharedState>,
     auth: Option<Extension<ApiAuthRequestInfo>>,
+    credential: Option<Extension<VerifiedApiToken>>,
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
@@ -255,7 +270,8 @@ pub(crate) async fn mcp(
     if headers.contains_key("origin") {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if auth.and_then(|Extension(a)| a.role) != Some(ApiTokenRole::Agent) {
+    let caller = Caller::from_request(auth, credential);
+    if caller.role != Some(ApiTokenRole::Agent) {
         return (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Bearer realm=\"Rhythm assistant\"")],
@@ -307,7 +323,7 @@ pub(crate) async fn mcp(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match execute(state, name, arguments).await {
+            match execute(state, caller, name, arguments).await {
                 Ok(value) => {
                     json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
                 }

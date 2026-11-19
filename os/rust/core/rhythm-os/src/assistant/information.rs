@@ -20,6 +20,7 @@ pub(super) fn operations() -> Vec<LightAssistantOperationDto> {
     let empty = || object_schema(&[], json!({}));
     let result = || json!({"type":"object"});
     vec![
+        operation("read_plan_outcome", "Read the outcome of your reviewed plan after requesting owner approval.", OperationTier::Read, object_schema(&["plan_id"], json!({"plan_id":string_schema("Plan ID from this credential’s preview")})), result()),
         operation("read_hub_status", "Read this installation's identity, platform, version, light breaker and integration connectivity before diagnosing unavailable lights.", OperationTier::Read, empty(), result()),
         operation("read_lighting_state", "Read the current canonical room and light states. Check each light's evidence before claiming a physical change.", OperationTier::Read, empty(), result()),
         operation("read_lighting_history", "Read the latest lighting actions for one selected node. These are action records, not proof that a light changed.", OperationTier::Read, object_schema(&["node_id"], json!({"node_id":string_schema("Canonical room or light ID"),"limit":{"type":"integer","minimum":1,"maximum":50}})), result()),

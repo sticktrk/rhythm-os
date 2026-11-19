@@ -835,6 +835,9 @@ void main() {
       expect(request.url.host, 'hub-1.relay.test');
       if (path == '/api/auth/support-session-token') {
         expect(request.headers['Authorization'], 'Bearer synthetic-support');
+        final mint = jsonDecode((request as http.Request).body) as Map;
+        expect(mint['actor_id'], 'staff-user');
+        expect(mint['grant_id'], 'grant1');
         return _jsonResponse({'token': 'synthetic-short-session'});
       }
       expect(

@@ -8,7 +8,7 @@ type Result<T> = std::result::Result<T, LightAssistantError>;
 
 #[derive(Debug)]
 pub struct TransferPlan {
-    id: String,
+    pub(super) id: String,
     installation: String,
     revision: String,
     action: &'static str,

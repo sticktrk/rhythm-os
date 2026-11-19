@@ -90,6 +90,10 @@ class SupportAccessService {
         })
         ..body = jsonEncode({
           'label': _sessionLabel(session),
+          if (grant['id'] is String) ...{
+            'actor_id': session.user.id,
+            'grant_id': grant['id'],
+          },
           'ttl_seconds': _sessionTokenTtl.inSeconds
         });
       response = await _http

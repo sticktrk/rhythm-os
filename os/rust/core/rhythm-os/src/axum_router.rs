@@ -110,6 +110,14 @@ fn shared_routes() -> Router<SharedState> {
             post(post_auth_support_session_token_revoke),
         )
         .route("/api/auth/settings", put(put_auth_settings))
+        .route(
+            "/api/assistant/approvals",
+            get(crate::assistant::approvals::list),
+        )
+        .route(
+            "/api/assistant/approvals/:plan_id",
+            post(crate::assistant::approvals::decide),
+        )
         .route(LIGHT_ASSISTANT_CONTRACT_PATH, get(get_assistant_contract))
         .route(LIGHT_ASSISTANT_TOPOLOGY_PATH, get(get_assistant_topology))
         .route(
@@ -404,13 +412,13 @@ async fn list_agent_tokens(
     let clients = &s.api_auth.agent_clients;
     let tokens: Vec<_> = clients
         .iter()
-        .map(|c| serde_json::json!({"id":c.id,"kind":"home_assistant"}))
+        .map(|c| serde_json::json!({"id":c.id,"kind":"home_assistant","unattended_changes":c.unattended_changes}))
         .chain(
             s.api_auth
                 .agent_tokens
                 .iter()
                 .filter(|token| !clients.iter().any(|c| c.id == token.id))
-                .map(|token| serde_json::json!({"id":token.id,"kind":"bearer"})),
+                .map(|token| serde_json::json!({"id":token.id,"kind":"bearer","unattended_changes":token.unattended_changes})),
         )
         .collect();
     (
@@ -423,11 +431,21 @@ async fn list_agent_tokens(
 async fn issue_agent_token(
     State(state): State<SharedState>,
     info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    body: axum::body::Bytes,
 ) -> Response {
+    let options = match crate::auth::AgentOptions::parse(&body) {
+        Ok(options) => options,
+        Err(status) => return status.into_response(),
+    };
     (
         [("cache-control", "no-store")],
         run_blocking(move || {
-            crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), None)
+            crate::auth::manage_agent_token(
+                &state,
+                info.map(|Extension(i)| i),
+                None,
+                options.unattended_changes,
+            )
         })
         .await,
     )
@@ -440,7 +458,7 @@ async fn revoke_agent_token(
     Path(id): Path<String>,
 ) -> ApiResponse {
     run_blocking(move || {
-        crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), Some(&id))
+        crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), Some(&id), false)
     })
     .await
 }
@@ -461,12 +479,14 @@ async fn post_auth_support_token(
 
 async fn post_auth_support_session_token(
     State(state): State<SharedState>,
+    issuer: Option<Extension<crate::auth::VerifiedApiToken>>,
     auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
     crate::auth::handle_issue_support_session_token(
         &state,
         auth_info.map(|Extension(info)| info),
+        issuer.as_ref().map(|Extension(token)| token.id.as_str()),
         &body,
     )
 }
@@ -1142,16 +1162,42 @@ async fn get_assistant_topology(State(state): State<SharedState>) -> ApiResponse
 
 async fn post_assistant_move_plan(
     State(state): State<SharedState>,
+    auth: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    credential: Option<Extension<crate::auth::VerifiedApiToken>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
-) -> ApiResponse {
-    run_blocking(move || handlers::handle_post_assistant_move_plan(&state, &body)).await
+) -> Response {
+    crate::assistant::transport::invoke_rest(
+        state,
+        crate::assistant::OP_PLAN_MOVE_DEVICE_ROOM,
+        auth,
+        credential,
+        headers,
+        body,
+    )
+    .await
 }
 
 async fn post_assistant_move_apply(
     State(state): State<SharedState>,
-    Json(body): Json<Value>,
-) -> ApiResponse {
-    run_blocking(move || handlers::handle_post_assistant_move_apply(&state, &body)).await
+    auth: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    credential: Option<Extension<crate::auth::VerifiedApiToken>>,
+    headers: axum::http::HeaderMap,
+    Json(mut body): Json<Value>,
+) -> Response {
+    // The legacy owner/support endpoint predates the confirmed argument.
+    if let Some(fields) = body.as_object_mut() {
+        fields.entry("confirmed").or_insert(Value::Bool(true));
+    }
+    crate::assistant::transport::invoke_rest(
+        state,
+        crate::assistant::OP_APPLY_MOVE_DEVICE_ROOM_PLAN,
+        auth,
+        credential,
+        headers,
+        body,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

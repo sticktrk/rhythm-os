@@ -41,6 +41,8 @@ shared	GET	/.well-known/oauth-authorization-server/api/assistant/mcp	exclusion	C
 shared	DELETE	/api/activity-cloud/config	handoff	Account holder provisions the activity upload credential in Rhythm.
 shared	GET	/api/activity-cloud/config	operation	read_activity_upload
 shared	PUT	/api/activity-cloud/config	operation	plan_activity_upload
+shared	GET	/api/assistant/approvals	handoff	The owner reviews pending agent changes on this hub.
+shared	POST	/api/assistant/approvals/:plan_id	handoff	The owner approves or declines the reviewed change.
 shared	GET	/api/assistant/contract	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	POST	/api/assistant/mcp	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	GET	/api/assistant/oauth/authorize	exclusion	Contract discovery, authorization or transport for the operation catalog.

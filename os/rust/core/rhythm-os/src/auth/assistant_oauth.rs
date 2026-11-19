@@ -17,6 +17,8 @@ const TOKEN_SECONDS: u64 = 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentClient {
+    #[serde(default)]
+    pub(crate) unattended_changes: bool,
     pub(crate) id: String,
     secret_hash: String,
     activation_hash: Option<String>,
@@ -64,11 +66,13 @@ fn save(s: &mut crate::state::AppState, auth: StoredApiAuth) -> Result<(), Statu
 pub(crate) async fn register(
     State(state): State<SharedState>,
     info: Option<Extension<ApiAuthRequestInfo>>,
+    body: axum::body::Bytes,
 ) -> Result<Response, StatusCode> {
     if !info.is_some_and(|Extension(i)| i.role == Some(ApiTokenRole::Owner) && !i.via_remote_access)
     {
         return Err(StatusCode::FORBIDDEN);
     }
+    let options = AgentOptions::parse(&body)?;
     let client_id = uuid::Uuid::new_v4().to_string();
     let client_secret = generate_raw_token("rhythm_ha_client_");
     let activation = generate_raw_token("pair_");
@@ -82,6 +86,7 @@ pub(crate) async fn register(
         return Err(StatusCode::CONFLICT);
     }
     auth.agent_clients.push(AgentClient {
+        unattended_changes: options.unattended_changes,
         id: client_id.clone(),
         secret_hash: hash_token(&client_secret),
         activation_hash: Some(hash_token(&activation)),
@@ -91,7 +96,7 @@ pub(crate) async fn register(
         refresh_hash: None,
     });
     save(&mut s, auth)?;
-    Ok(([("cache-control","no-store")],Json(json!({"client_id":client_id,"client_secret":client_secret,"activation_code":activation,"expires_in":PAIR_MS/1000}))).into_response())
+    Ok(([("cache-control","no-store")],Json(json!({"client_id":client_id,"client_secret":client_secret,"activation_code":activation,"expires_in":PAIR_MS/1000,"unattended_changes":options.unattended_changes}))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -271,6 +276,8 @@ fn redeem(state: &SharedState, headers: &HeaderMap, form: &Exchange) -> Result<V
     let token = generate_raw_token(AGENT_PREFIX);
     auth.agent_tokens.retain(|t| t.id != id);
     auth.agent_tokens.push(StoredApiToken {
+        support_principal: None,
+        unattended_changes: client.unattended_changes,
         id: id.to_owned(),
         role: ApiTokenRole::Agent,
         token_hash: hash_token(&token),
@@ -298,9 +305,13 @@ mod tests {
             role: Some(ApiTokenRole::Owner),
             token_expires_at_epoch_ms: None,
         };
-        let response = register(State(state.clone()), Some(Extension(owner)))
-            .await
-            .unwrap();
+        let response = register(
+            State(state.clone()),
+            Some(Extension(owner)),
+            axum::body::Bytes::from_static(br#"{"unattended_changes":true}"#),
+        )
+        .await
+        .unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
@@ -360,6 +371,7 @@ mod tests {
         };
         let updated = redeem(&state, &HeaderMap::new(), &refresh).unwrap();
         assert!(redeem(&state, &HeaderMap::new(), &refresh).is_err());
+        assert!(state.lock().unwrap().api_auth.agent_tokens[0].unattended_changes);
         let verify = |v: &Value| {
             state
                 .lock()
@@ -370,7 +382,7 @@ mod tests {
         assert_eq!(verify(&tokens), None);
         assert_eq!(verify(&updated), Some(ApiTokenRole::Agent));
         assert_eq!(
-            manage_agent_token(&state, Some(owner), reg["client_id"].as_str()).status,
+            manage_agent_token(&state, Some(owner), reg["client_id"].as_str(), false).status,
             204
         );
         assert_eq!(verify(&updated), None);

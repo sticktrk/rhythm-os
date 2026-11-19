@@ -120,7 +120,12 @@ impl StoredApiAuth {
             })
             .map(|token| VerifiedApiToken {
                 id: token.id.clone(),
+                binding_id: token
+                    .support_principal
+                    .clone()
+                    .unwrap_or_else(|| token.id.clone()),
                 role: token.role,
+                unattended_changes: token.unattended_changes,
                 expires_at_epoch_ms: token.expires_at_epoch_ms,
             })
     }
@@ -141,14 +146,21 @@ impl Default for ApiTokenRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct VerifiedApiToken {
-    id: String,
-    role: ApiTokenRole,
+pub(crate) struct VerifiedApiToken {
+    pub(crate) binding_id: String,
+    pub(crate) id: String,
+    pub(crate) role: ApiTokenRole,
+    pub(crate) unattended_changes: bool,
     expires_at_epoch_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiToken {
+    /// A refresh-stable plan principal for a staff member using a particular grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support_principal: Option<String>,
+    #[serde(default)]
+    pub unattended_changes: bool,
     pub id: String,
     #[serde(default)]
     pub role: ApiTokenRole,
@@ -189,6 +201,8 @@ pub fn install_ephemeral_owner_token(state: &SharedState, raw_token: &str) -> an
     s.api_auth = StoredApiAuth::default();
     s.api_auth.require_api_auth = Some(true);
     s.api_auth.tokens.push(StoredApiToken {
+        support_principal: None,
+        unattended_changes: false,
         id: "local-supervisor".into(),
         role: ApiTokenRole::Owner,
         token_hash: hash_token(raw_token),
@@ -214,7 +228,14 @@ pub fn issue_local_owner_token(
     state: &SharedState,
     label: Option<String>,
 ) -> anyhow::Result<IssuedOwnerToken> {
-    issue_local_token(state, ApiTokenRole::Owner, TOKEN_PREFIX, label, None)
+    issue_local_token(
+        state,
+        ApiTokenRole::Owner,
+        TOKEN_PREFIX,
+        label,
+        None,
+        Default::default(),
+    )
 }
 
 /// Issue a support token from a trusted local or owner-authenticated channel.
@@ -232,7 +253,14 @@ pub fn issue_local_support_token(
         SUPPORT_TOKEN_PREFIX,
         label,
         None,
+        Default::default(),
     )
+}
+
+#[derive(Default)]
+struct TokenOptions {
+    unattended_changes: bool,
+    support_principal: Option<String>,
 }
 
 fn issue_local_token(
@@ -241,6 +269,7 @@ fn issue_local_token(
     prefix: &str,
     label: Option<String>,
     expires_at_epoch_ms: Option<u64>,
+    options: TokenOptions,
 ) -> anyhow::Result<IssuedToken> {
     let token = generate_raw_token(prefix);
     let token_hash = hash_token(&token);
@@ -255,6 +284,8 @@ fn issue_local_token(
         &mut auth.tokens
     };
     collection.push(StoredApiToken {
+        support_principal: options.support_principal,
+        unattended_changes: options.unattended_changes,
         id: id.clone(),
         role,
         token_hash,
@@ -277,6 +308,15 @@ pub fn issue_support_session_token(
     label: Option<String>,
     ttl_seconds: Option<u64>,
 ) -> anyhow::Result<(IssuedToken, u64)> {
+    issue_bound_support_session(state, label, ttl_seconds, None)
+}
+
+fn issue_bound_support_session(
+    state: &SharedState,
+    label: Option<String>,
+    ttl_seconds: Option<u64>,
+    support_principal: Option<String>,
+) -> anyhow::Result<(IssuedToken, u64)> {
     let ttl_seconds = clamp_support_session_ttl(ttl_seconds);
     let expires_at_epoch_ms = current_epoch_ms().saturating_add(ttl_seconds.saturating_mul(1000));
     let issued = issue_local_token(
@@ -285,6 +325,10 @@ pub fn issue_support_session_token(
         SUPPORT_SESSION_TOKEN_PREFIX,
         label,
         Some(expires_at_epoch_ms),
+        TokenOptions {
+            support_principal,
+            ..Default::default()
+        },
     )?;
     Ok((issued, expires_at_epoch_ms))
 }
@@ -366,6 +410,8 @@ pub fn issue_owner_token(
 
     let mut auth = s.api_auth.clone();
     auth.tokens.push(StoredApiToken {
+        support_principal: None,
+        unattended_changes: false,
         id: id.clone(),
         role: ApiTokenRole::Owner,
         token_hash,
@@ -398,6 +444,8 @@ pub fn set_api_auth_required(
         let id = token_hash.chars().take(16).collect::<String>();
 
         auth.tokens.push(StoredApiToken {
+            support_principal: None,
+            unattended_changes: false,
             id: id.clone(),
             role: ApiTokenRole::Owner,
             token_hash,
@@ -485,10 +533,28 @@ pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> A
     }
 }
 
+#[derive(Default, Deserialize)]
+pub(crate) struct AgentOptions {
+    #[serde(default)]
+    pub unattended_changes: bool,
+}
+
+impl AgentOptions {
+    // Existing clients POST without a body.
+    pub(crate) fn parse(body: &[u8]) -> Result<Self, StatusCode> {
+        if body.is_empty() {
+            Ok(Self::default())
+        } else {
+            serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+        }
+    }
+}
+
 pub fn manage_agent_token(
     state: &SharedState,
     info: Option<ApiAuthRequestInfo>,
     revoke_id: Option<&str>,
+    unattended_changes: bool,
 ) -> ApiResponse {
     if !info.is_some_and(|info| info.role == Some(ApiTokenRole::Owner) && !info.via_remote_access) {
         return ApiResponse::forbidden(
@@ -510,9 +576,26 @@ pub fn manage_agent_token(
         s.api_auth = auth;
         return ApiResponse::no_content();
     }
-    match issue_local_token(state, ApiTokenRole::Agent, AGENT_PREFIX, None, None) {
+    let options = TokenOptions {
+        unattended_changes,
+        ..Default::default()
+    };
+    match issue_local_token(
+        state,
+        ApiTokenRole::Agent,
+        AGENT_PREFIX,
+        None,
+        None,
+        options,
+    ) {
         Ok(issued) => ApiResponse::json_ok(
-            json!({"token_id":issued.id,"token":issued.token,"role":"agent"}).to_string(),
+            json!({
+                "token_id": issued.id,
+                "token": issued.token,
+                "role": "agent",
+                "unattended_changes": unattended_changes,
+            })
+            .to_string(),
         ),
         Err(error) => ApiResponse::server_error(error),
     }
@@ -550,6 +633,7 @@ pub fn handle_issue_support_token(
 pub fn handle_issue_support_session_token(
     state: &SharedState,
     request_info: Option<ApiAuthRequestInfo>,
+    issuer_id: Option<&str>,
     body: &Value,
 ) -> ApiResponse {
     if !request_has_privileged_token(request_info) {
@@ -566,7 +650,22 @@ pub fn handle_issue_support_session_token(
         .map(str::to_string);
     let ttl_seconds = body.get("ttl_seconds").and_then(Value::as_u64);
 
-    match issue_support_session_token(state, label, ttl_seconds) {
+    // Only a durable credential can mint sessions. Bind the verified issuer,
+    // grant and staff subject together so short-lived tokens can rotate while
+    // an employee reviews a plan. Older callers remain bound to one session.
+    let principal = match (body.get("actor_id"), body.get("grant_id")) {
+        (None, None) => None,
+        (Some(Value::String(actor)), Some(Value::String(grant)))
+            if !actor.trim().is_empty()
+                && actor.len() <= 256
+                && !grant.trim().is_empty()
+                && grant.len() <= 256 =>
+        {
+            issuer_id.map(|issuer| hash_token(&json!([issuer, grant, actor]).to_string()))
+        }
+        _ => return ApiResponse::bad_request("Supply both staff actor and grant identifiers"),
+    };
+    match issue_bound_support_session(state, label, ttl_seconds, principal) {
         Ok((issued, expires_at_epoch_ms)) => ApiResponse::json_ok(
             json!({
                 "status": "ok",
@@ -692,6 +791,7 @@ pub async fn require_api_auth_middleware(
         if let Some(token) = bearer_token(req.headers().get(AUTHORIZATION)).map(str::to_owned) {
             req.extensions_mut().insert(ApiAuthStreamToken(token));
         }
+        req.extensions_mut().insert(verified_token.clone());
         auth_info.role = Some(verified_token.role);
         auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
         req.extensions_mut().insert(auth_info);
@@ -732,28 +832,12 @@ pub async fn require_api_auth_middleware(
         return next.run(req).await;
     }
 
-    let Some(token) = bearer_token(req.headers().get(AUTHORIZATION)) else {
-        return unauthorized("Missing bearer token");
-    };
-
-    let verified_token = verified_bearer.or_else(|| {
-        state
-            .lock()
-            .map(|s| s.api_auth.verify_token_info(token))
-            .unwrap_or(None)
-    });
-    let Some(verified_token) = verified_token else {
-        return unauthorized("Invalid bearer token");
-    };
-
-    auth_info.role = Some(verified_token.role);
-    auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
-    req.extensions_mut().insert(auth_info);
-
-    if verified_token.role == ApiTokenRole::Support {
-        if let Some(reason) = support_token_forbidden_reason(req.method(), req.uri()) {
-            return forbidden(reason);
-        }
+    if verified_bearer.is_none() {
+        return if bearer_token(req.headers().get(AUTHORIZATION)).is_none() {
+            unauthorized("Missing bearer token")
+        } else {
+            unauthorized("Invalid bearer token")
+        };
     }
 
     next.run(req).await
@@ -882,6 +966,9 @@ fn forbidden(message: &str) -> Response {
 
 fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
     let path = uri.path();
+    if path == "/api/assistant/approvals" || path.starts_with("/api/assistant/approvals/") {
+        return Some("Only the owner can review agent approvals");
+    }
     if path.starts_with("/api/pairing/wifi-profiles")
         || path.starts_with("/api/matter/wifi-change")
         || path.starts_with("/api/matter/wifi-network/")
@@ -1178,6 +1265,8 @@ mod tests {
             agent_clients: vec![],
             agent_tokens: vec![],
             tokens: vec![StoredApiToken {
+                support_principal: None,
+                unattended_changes: false,
                 id: "owner".into(),
                 role: ApiTokenRole::Owner,
                 token_hash: hash_token(raw),

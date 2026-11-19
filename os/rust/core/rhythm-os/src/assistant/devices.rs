@@ -46,12 +46,12 @@ pub enum PlatformAction {
 
 #[derive(Default)]
 pub struct DeviceSessions {
-    plans: VecDeque<DevicePlan>,
+    pub(super) plans: VecDeque<DevicePlan>,
     pub platform: Option<PlatformHandler>,
 }
 
-struct DevicePlan {
-    id: String,
+pub(super) struct DevicePlan {
+    pub(super) id: String,
     hub: String,
     created: Instant,
     change: Change,

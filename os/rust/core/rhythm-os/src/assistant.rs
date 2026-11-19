@@ -13,6 +13,7 @@ use crate::commands::{self, TopologyAssignmentPrecondition};
 use crate::state::{current_epoch_ms, SharedState};
 use crate::topology::DevicePlacement;
 
+pub(crate) mod approvals;
 pub(crate) mod automation;
 pub mod devices;
 mod information;
@@ -474,6 +475,7 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
                 json!({
                     "schema_version": {"type": "integer"},
                     "plan_id": string_schema("Credential-bound identifier of the reviewed move plan"),
+                    "apply_arguments": {"type":"object"},
                     "correlation_id": {"type": "string"},
                     "operation": {"const": OP_APPLY_MOVE_DEVICE_ROOM_PLAN},
                     "contract_sha256": {"type": "string"},
@@ -550,6 +552,20 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
             op.handler = handler;
             op
         }));
+    }
+    for apply in entries
+        .iter_mut()
+        .filter(|op| op.tier == OperationTier::PersistentChange)
+    {
+        let receipt = std::mem::take(&mut apply.result_schema);
+        apply.result_schema = json!({
+            "type":"object",
+            "anyOf":[receipt, object_schema(&["status","plan_id","expires_at_epoch_ms"], json!({
+                "status":{"const":"awaiting_owner_approval"},
+                "plan_id":{"type":"string"},
+                "expires_at_epoch_ms":{"type":"integer"},
+            }))],
+        });
     }
     entries
 }
