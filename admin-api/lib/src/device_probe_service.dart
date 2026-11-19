@@ -374,22 +374,32 @@ class DeviceProbeService {
     var sawPreconditionFailure = false;
     for (final candidate in candidates) {
       final baseUrl = candidate.endpoint.baseUrl;
-      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final token = request.isAssistant
+          ? await _supportAccessSessionToken(session, hub, baseUrl,
+              assistantRequest: true)
+          : await _authTokenForEndpoint(session, hub, baseUrl);
+      if (request.isAssistant && token == null) {
+        sawAuthRequired = true;
+        continue;
+      }
       var result = await _proxyJsonFromEndpoint(
         hub: hub,
         candidate: candidate,
         request: request,
         authToken: token,
       );
-      if (result.authRequired && hub.authToken == null && token != null) {
+      if (result.authRequired &&
+          (request.isAssistant || hub.authToken == null) &&
+          token != null) {
         // The cached support-session token was rejected (revoked or the
         // device restarted); mint a fresh one and retry this endpoint once.
         _supportAccess?.invalidateSessionToken(
           hubId: hub.id,
           baseUrl: baseUrl,
         );
-        final freshToken =
-            await _supportAccessSessionToken(session, hub, baseUrl);
+        final freshToken = await _supportAccessSessionToken(
+            session, hub, baseUrl,
+            assistantRequest: request.isAssistant);
         if (freshToken != null && freshToken != token) {
           result = await _proxyJsonFromEndpoint(
             hub: hub,
@@ -416,7 +426,9 @@ class DeviceProbeService {
     if (sawAuthRequired) {
       throw AdminApiException(
         403,
-        _operationAuthRequiredMessage(hub, request.path),
+        request.isAssistant
+            ? 'An active customer support grant for this hub is required.'
+            : _operationAuthRequiredMessage(hub, request.path),
       );
     }
 
@@ -531,7 +543,10 @@ class DeviceProbeService {
         }
         verifiedServerInstanceId = cleanString(state.hello?.serverInstanceId);
         if (verifiedServerInstanceId == null ||
-            verifiedServerInstanceId != request.expectedServerInstanceId) {
+            verifiedServerInstanceId != request.expectedServerInstanceId ||
+            (request.isAssistant &&
+                hub.serverInstanceId != null &&
+                verifiedServerInstanceId != hub.serverInstanceId)) {
           return _ProxyJsonEndpointResult.preconditionFailed(
             'live server identity did not match expectedServerInstanceId.',
           );
@@ -592,7 +607,8 @@ class DeviceProbeService {
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _ProxyJsonEndpointResult.authRequired();
       }
-      if (request.resourcePrecondition != null && response.statusCode == 409) {
+      if ((request.resourcePrecondition != null || request.isAssistant) &&
+          response.statusCode == 409) {
         return _ProxyJsonEndpointResult.preconditionFailed(
           '${request.method} /${request.path} was rejected by the device because its live preconditions changed'
           '${_responseErrorSuffix(response)}.',
@@ -999,12 +1015,14 @@ class DeviceProbeService {
   Future<String?> _supportAccessSessionToken(
     AdminSession session,
     _ProbeHub hub,
-    String baseUrl,
-  ) {
+    String baseUrl, {
+    bool assistantRequest = false,
+  }) {
     return _supportAccess?.createSessionToken(
           session: session,
           hubId: hub.id,
           baseUrl: baseUrl,
+          assistantRequest: assistantRequest,
         ) ??
         Future<String?>.value();
   }

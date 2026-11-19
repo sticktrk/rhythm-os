@@ -1642,6 +1642,38 @@ class RhythmServerApi {
     }
   }
 
+  /// Call an advertised operation through the fixed assistant dispatcher.
+  /// Descriptor paths may describe older direct routes; they are never used
+  /// as caller-controlled HTTP destinations.
+  Future<Map<String, dynamic>> callAssistantOperation(
+    RhythmAssistantContract contract,
+    String id,
+    Map<String, dynamic> arguments,
+  ) async {
+    final operation = contract.operation(id);
+    if (operation == null ||
+        operation.location != 'hub' ||
+        operation.invocationPath != '/api/assistant/operations/$id' ||
+        !RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(id) ||
+        operation.tier == RhythmAssistantTier.ownerOnly ||
+        operation.tier == RhythmAssistantTier.unknown) {
+      throw UnsupportedError('This assistant operation is unavailable.');
+    }
+    if (operation.tier == RhythmAssistantTier.persistentChange &&
+        arguments['confirmed'] != true) {
+      throw ArgumentError('Review and confirm the plan before applying it.');
+    }
+    final response = await _dio.post(
+      'api/assistant/operations/$id',
+      data: arguments,
+    );
+    final data = jsonMap(response.data);
+    if (data == null) {
+      throw const FormatException('Assistant result must be an object');
+    }
+    return data;
+  }
+
   /// Fetch one topology snapshot tied to the current assistant contract.
   Future<RhythmAssistantTopologySnapshot> getAssistantTopologySnapshot() async {
     final response = await _dio.get('api/assistant/topology');

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:cryptography/cryptography.dart';
 import 'package:rhythm_admin_api/src/config.dart';
 import 'package:rhythm_admin_api/src/device_probe_service.dart';
 import 'package:rhythm_admin_api/src/fleet_report_service.dart';
@@ -772,6 +773,105 @@ void main() {
     );
     expect(guardResponse.statusCode, 428);
     expect(deviceRequested, isFalse);
+  });
+
+  test(
+      'assistant preview requires a current grant; writes require an admin and reviewed hub',
+      () async {
+    const aad = 'hub:hub-1:token:t1:scope:beta_admin';
+    final digest = await Sha256().hash(utf8.encode('support-key'));
+    final encrypted = await AesGcm.with256bits().encrypt(
+        utf8.encode('synthetic-support'),
+        secretKey: SecretKey(digest.bytes),
+        aad: utf8.encode(aad));
+    var role = 'support', liveHub = 'srv-test';
+    var granted = true;
+    final calls = <String>[];
+    final client = _HandlerClient((request) async {
+      final staff = _staffAuthResponse(request, role: role);
+      if (staff != null) return staff;
+      final path = request.url.path;
+      if (path == '/rest/v1/hub_support_access_grants') {
+        expect(request.url.queryParameters['hub_id'], 'eq.hub-1');
+        expect(request.url.queryParameters['revoked_at'], 'is.null');
+        return _jsonResponse([
+          if (granted)
+            {
+              'id': 'grant1',
+              'hub_id': 'hub-1',
+              'token_id': 't1',
+              'scope': 'beta_admin',
+              'encrypted_token': {
+                'version': 'support_access_token_v1',
+                'algorithm': 'aes-gcm-256',
+                'key_derivation': 'sha256-env-v1',
+                'key_id': 'default',
+                'aad': aad,
+                'ciphertext': base64Url.encode(encrypted.cipherText),
+                'nonce': base64Url.encode(encrypted.nonce),
+                'mac': base64Url.encode(encrypted.mac.bytes),
+              }
+            }
+        ]);
+      }
+      if (request.url.host == 'supabase.test') {
+        return _supabaseResponse(request);
+      }
+      if (path == '/api/auth/support-session-token') {
+        expect(request.headers['Authorization'], 'Bearer synthetic-support');
+        return _jsonResponse({'token': 'synthetic-short-session'});
+      }
+      expect(
+          request.headers['Authorization'], 'Bearer synthetic-short-session');
+      if (path == '/api/state') {
+        return _jsonResponse(
+            {'server_instance_id': liveHub, 'version': '1', 'nodes': []});
+      }
+      calls.add(path);
+      return _jsonResponse({'status': 'ok'});
+    });
+    final server = _testServer(client: client);
+    Future<int> proxy(String method, String path) async {
+      final response = await server.handler(Request('POST',
+          Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+          headers: {
+            'authorization': 'Bearer staff-session',
+            'content-type': 'application/json'
+          },
+          body: jsonEncode({
+            'method': method,
+            'path': path,
+            'expectedServerInstanceId': 'srv-test',
+            'requestId': 'assistant-test-1',
+            'body': {'confirmed': true}
+          })));
+      return response.statusCode;
+    }
+
+    const plan = 'api/assistant/operations/plan_motion_target';
+    const apply = 'api/assistant/operations/apply_motion_target';
+    expect(await proxy('POST', plan), 200);
+    expect(await proxy('POST', 'api/assistant/plans/device-room-move'), 200);
+    expect(await proxy('POST', apply), 403);
+    expect(await proxy('POST', 'api/assistant/operations/plan_unknown'), 403);
+    role = 'admin';
+    liveHub = 'wrong-hub';
+    expect(await proxy('POST', apply), 409);
+    liveHub = 'srv-test';
+    expect(await proxy('POST', apply), 200);
+    // Same staff identity, endpoint and unexpired device session.
+    granted = false;
+    expect(await proxy('POST', apply), 403);
+    expect(await proxy('POST', plan), 403);
+    for (final path in [
+      'api/auth/agent-tokens',
+      'api/auth/assistant-clients',
+      'api/assistant/mcp'
+    ]) {
+      expect(await proxy('POST', path), 400);
+    }
+    expect(
+        calls, ['/$plan', '/api/assistant/plans/device-room-move', '/$apply']);
   });
 
   test('device config hashes match the shared numeric contract', () async {

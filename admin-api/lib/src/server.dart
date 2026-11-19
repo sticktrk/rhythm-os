@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
@@ -225,12 +226,33 @@ class AdminApiServer {
       );
     }
     proxyRequest.validateMutationGuards();
-    final result = await _probes.proxyJson(
-      session: session,
-      hubId: hubId,
-      request: proxyRequest,
-    );
-    return _json(result.toJson());
+    var status = 500;
+    try {
+      final result = await _probes.proxyJson(
+        session: session,
+        hubId: hubId,
+        request: proxyRequest,
+      );
+      status = result.statusCode;
+      return _json(result.toJson());
+    } on AdminApiException catch (error) {
+      status = error.statusCode;
+      rethrow;
+    } finally {
+      if (proxyRequest.isAssistant && proxyRequest.isMutation) {
+        // Staff audit only. Arguments, household evidence and grant tokens
+        // must never enter either audit logs or model telemetry.
+        stdout.writeln(jsonEncode({
+          'event': 'staff_assistant_mutation',
+          'at': DateTime.now().toUtc().toIso8601String(),
+          'actor': session.user.id,
+          'hub_id': hubId,
+          'operation': proxyRequest.path,
+          'request_id': proxyRequest.requestId,
+          'status': status,
+        }));
+      }
+    }
   }
 
   Future<Map<String, dynamic>> _readJsonObject(

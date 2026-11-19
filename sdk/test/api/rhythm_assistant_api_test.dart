@@ -84,6 +84,51 @@ void main() {
     await expectLater(api.getAssistantContract(), throwsA(same(failure)));
   });
 
+  test(
+      'dispatcher uses only an advertised hub operation and exact confirmed arguments',
+      () async {
+    RhythmAssistantContract contract(
+            {String tier = 'read',
+            String path = '/api/assistant/operations/test_op',
+            String location = 'hub'}) =>
+        RhythmAssistantContract.fromJson({
+          'operations': [
+            {
+              'id': 'test_op',
+              'tier': tier,
+              'location': location,
+              'invocation_path': path,
+            }
+          ]
+        });
+    when(() => dio.post(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/assistant/operations/test_op'),
+            data: {'result': 'ok'}));
+    expect(await api.callAssistantOperation(contract(), 'test_op', {}),
+        {'result': 'ok'});
+    for (final blocked in [
+      contract(path: '/api/auth/agent-tokens'),
+      contract(tier: 'future_tier'),
+      contract(location: 'cloud'),
+      contract(tier: 'owner_only')
+    ]) {
+      await expectLater(api.callAssistantOperation(blocked, 'test_op', {}),
+          throwsUnsupportedError);
+    }
+    await expectLater(
+        api.callAssistantOperation(contract(tier: 'persistent_change'),
+            'test_op', {'confirmed': false}),
+        throwsArgumentError);
+    expect(
+        await api.callAssistantOperation(contract(tier: 'persistent_change'),
+            'test_op', {'confirmed': true, 'plan_id': 'p1'}),
+        {'result': 'ok'});
+    verify(() => dio.post('api/assistant/operations/test_op',
+        data: {'confirmed': true, 'plan_id': 'p1'})).called(1);
+  });
+
   test('parses topology snapshot with its exact resource hash', () async {
     when(() => dio.get(any())).thenAnswer(
       (_) async => Response(

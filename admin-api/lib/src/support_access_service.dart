@@ -40,19 +40,32 @@ class SupportAccessService {
     required AdminSession session,
     required String hubId,
     required String baseUrl,
+    bool assistantRequest = false,
   }) async {
-    if (!canUseSupportAccess || !session.staff.isAdmin) return null;
+    if (!canUseSupportAccess ||
+        !(assistantRequest ? session.staff.isActive : session.staff.isAdmin)) {
+      return null;
+    }
 
     // Session tokens are valid for [_sessionTokenTtl]; reuse them instead of
     // minting one per proxied request (grant lookup + decrypt + device POST).
     final cacheKey = _sessionTokenCacheKey(session, hubId, baseUrl);
+    // Staff assistant access checks the customer grant for each call, even
+    // while a previously minted session token is still valid on the hub.
+    final activeGrant = assistantRequest ? await _loadActiveGrant(hubId) : null;
+    if (assistantRequest && activeGrant == null) {
+      _sessionTokens.remove(cacheKey);
+      return null;
+    }
     final cached = _sessionTokens[cacheKey];
-    if (cached != null && cached.expiresAt.isAfter(DateTime.now().toUtc())) {
+    if (cached != null &&
+        (!assistantRequest || cached.grantId == activeGrant?['id']) &&
+        cached.expiresAt.isAfter(DateTime.now().toUtc())) {
       return cached.token;
     }
     _sessionTokens.remove(cacheKey);
 
-    final grant = await _loadActiveGrant(hubId);
+    final grant = activeGrant ?? await _loadActiveGrant(hubId);
     if (grant == null) return null;
 
     final durableToken = await _decryptGrantToken(grant);
@@ -91,6 +104,7 @@ class SupportAccessService {
     final trimmed = token.trim();
     _sessionTokens[cacheKey] = _CachedSessionToken(
       token: trimmed,
+      grantId: grant['id'] as String?,
       expiresAt: DateTime.now().toUtc().add(_sessionTokenReuse),
     );
     return trimmed;
@@ -98,7 +112,8 @@ class SupportAccessService {
 
   /// Drop cached session tokens for a hub endpoint after the device rejects
   /// one (revoked token, device restart, clock skew).
-  void invalidateSessionToken({required String hubId, required String baseUrl}) {
+  void invalidateSessionToken(
+      {required String hubId, required String baseUrl}) {
     final suffix = '|$hubId|${baseUrl.trim().toLowerCase()}';
     _sessionTokens.removeWhere((key, _) => key.endsWith(suffix));
   }
@@ -212,8 +227,10 @@ class SupportAccessService {
 }
 
 class _CachedSessionToken {
-  const _CachedSessionToken({required this.token, required this.expiresAt});
+  const _CachedSessionToken(
+      {required this.token, required this.grantId, required this.expiresAt});
 
   final String token;
+  final String? grantId;
   final DateTime expiresAt;
 }

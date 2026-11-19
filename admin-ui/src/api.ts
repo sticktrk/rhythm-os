@@ -177,7 +177,7 @@ export async function runGuardedDeviceOperation(
   send: (request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>
 ): Promise<DeviceAdminProxyResponse> {
   let guardedRequest = request;
-  if (isDeviceMutation(request)) {
+  if (await isDeviceMutation(request, send)) {
     let serverInstanceId = request.expectedServerInstanceId;
     if (!serverInstanceId) {
       const identity = await send({
@@ -244,12 +244,20 @@ function runDeviceAdminProxyRaw(
   );
 }
 
-function isDeviceMutation(request: DeviceAdminProxyRequest): boolean {
-  return !(
-    request.method === 'GET' ||
-    (request.method === 'POST' &&
-      normalizedDevicePath(request.path) === 'api/curve')
-  );
+async function isDeviceMutation(
+  request: DeviceAdminProxyRequest,
+  send: (request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>
+): Promise<boolean> {
+  if (request.method === 'GET') return false;
+  if (request.method !== 'POST') return true;
+  const path = normalizedDevicePath(request.path);
+  if (path === 'api/curve' || path === 'api/assistant/plans/device-room-move') return false;
+  const operation = /^api\/assistant\/operations\/([a-z][a-z0-9_]*)$/.exec(path);
+  if (!operation) return true;
+  const contract = asRecord((await send({method: 'GET', path: 'api/assistant/contract'})).body);
+  return !(Array.isArray(contract.operations) && contract.operations.some(
+    item => asRecord(item).id === operation[1] && asRecord(item).tier === 'read'
+  ));
 }
 
 function normalizedDevicePath(path: string): string {

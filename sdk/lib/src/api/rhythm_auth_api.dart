@@ -233,6 +233,19 @@ class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
   final String? token;
 }
 
+/// Metadata returned when an owner lists existing agent credentials.
+class RhythmAgentCredential {
+  const RhythmAgentCredential(this.id, this.kind);
+  final String id, kind;
+}
+
+class RhythmAssistantClientRegistration {
+  const RhythmAssistantClientRegistration(
+      this.id, this.secret, this.activationCode, this.expiresIn);
+  final String id, secret, activationCode;
+  final Duration expiresIn;
+}
+
 class RhythmAuthApi {
   static final _log = Logger('rhythm_sdk.api');
 
@@ -273,6 +286,38 @@ class RhythmAuthApi {
         cause: error,
       );
     }
+  }
+
+  Future<List<RhythmAgentCredential>> listAgentCredentials() async {
+    final response = await _dio.get('api/auth/agent-tokens');
+    final entries = response.data?['tokens'] as List;
+    return entries
+        .map((entry) => RhythmAgentCredential(
+            entry['id'] as String, entry['kind'] as String))
+        .toList();
+  }
+
+  Future<({String id, String token})> createAgentCredential() async {
+    final response = await _dio.post('api/auth/agent-tokens');
+    final data = response.data;
+    return (id: data['token_id'] as String, token: data['token'] as String);
+  }
+
+  Future<RhythmAssistantClientRegistration> registerAssistantClient() async {
+    final response = await _dio.post('api/auth/assistant-clients');
+    final data = response.data;
+    return RhythmAssistantClientRegistration(
+        data['client_id'] as String,
+        data['client_secret'] as String,
+        data['activation_code'] as String,
+        Duration(seconds: data['expires_in'] as int));
+  }
+
+  Future<void> revokeAgentCredential(String id) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(id)) {
+      throw ArgumentError('Invalid agent credential ID');
+    }
+    await _dio.delete('api/auth/agent-tokens/$id');
   }
 
   Future<RhythmOwnerClaim> exchangeMobileEnrollment(

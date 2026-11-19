@@ -132,6 +132,19 @@ The OTA routes use the same remote-first endpoint and server-side token
 selection as probes. `ota/check` asks the device to check the stable feed, and
 `ota/update` asks the device to apply the available update.
 
+### Per-hub lighting assistant
+
+Open **Lighting assistant** on the selected hub to inspect a walk, review its
+sensor and room targets, or browse operations advertised by that hub. Staff
+can inspect and preview with an active customer support grant. Applying a
+repair also requires the admin role and the reviewed hub identity. After a
+conflict or uncertain write, refresh and preview the current state.
+
+The proxy checks the customer grant on every assistant call, including calls
+that reuse a device session. A staff mutation audit records the staff user,
+hub, operation, request ID and status. The resident manages assistant client
+credentials from the local Rhythm app under **Assistant access**.
+
 ### Device admin mutation contract
 
 Proxy `GET` requests and `POST api/curve` previews are read-only. Every other

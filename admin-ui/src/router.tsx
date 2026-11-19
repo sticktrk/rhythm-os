@@ -19,6 +19,7 @@ const HistoryPage = lazy(() => import('./pages/hub/HistoryPage'));
 const RemotePage = lazy(() => import('./pages/hub/RemotePage'));
 const SecurityPage = lazy(() => import('./pages/hub/SecurityPage'));
 const SystemPage = lazy(() => import('./pages/hub/SystemPage'));
+const AssistantPage = lazy(() => import('./pages/hub/AssistantPage'));
 const ConsolePage = lazy(() => import('./pages/hub/ConsolePage'));
 
 function PageFallback() {
@@ -148,6 +149,7 @@ export function AppRoutes() {
             </Suspense>
           }
         />
+        <Route path="assistant" element={<Suspense fallback={<PageFallback />}><AssistantPage /></Suspense>} />
         <Route
           path="console"
           element={

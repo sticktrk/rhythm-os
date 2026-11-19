@@ -3,9 +3,29 @@ import 'rhythm_room.dart';
 
 abstract final class RhythmAssistantOperationId {
   static const String getTopologySnapshot = 'get_topology_snapshot';
+  static const startMotionWalk = 'start_motion_walk';
+  static const inspectMotionWalk = 'inspect_motion_walk';
+  static const planMotionTarget = 'plan_motion_target';
+  static const applyMotionTarget = 'apply_motion_target';
   static const String identifyDevice = 'identify_device';
   static const String planMoveDeviceRoom = 'plan_move_device_room';
   static const String applyMoveDeviceRoomPlan = 'apply_move_device_room_plan';
+}
+
+enum RhythmAssistantTier {
+  read,
+  temporaryLightOutput,
+  persistentChange,
+  ownerOnly,
+  unknown;
+
+  static RhythmAssistantTier fromWire(Object? value) => switch (value) {
+        'read' => read,
+        'temporary_light_output' => temporaryLightOutput,
+        'persistent_change' => persistentChange,
+        'owner_only' => ownerOnly,
+        _ => unknown,
+      };
 }
 
 class RhythmAssistantOperation {
@@ -14,6 +34,9 @@ class RhythmAssistantOperation {
   final String method;
   final String path;
   final String effect;
+  final String location;
+  final String invocationPath;
+  final RhythmAssistantTier tier;
   final String confirmation;
   final String freshnessPrecondition;
   final String verification;
@@ -27,6 +50,9 @@ class RhythmAssistantOperation {
     required this.method,
     required this.path,
     required this.effect,
+    this.location = 'hub',
+    this.invocationPath = '',
+    this.tier = RhythmAssistantTier.unknown,
     required this.confirmation,
     required this.freshnessPrecondition,
     required this.verification,
@@ -41,6 +67,9 @@ class RhythmAssistantOperation {
       description: json['description'] as String? ?? '',
       method: json['method'] as String? ?? '',
       path: json['path'] as String? ?? '',
+      location: json['location'] as String? ?? 'hub',
+      invocationPath: json['invocation_path'] as String? ?? '',
+      tier: RhythmAssistantTier.fromWire(json['tier']),
       effect: json['effect'] as String? ?? '',
       confirmation: json['confirmation'] as String? ?? '',
       freshnessPrecondition: json['freshness_precondition'] as String? ?? '',
@@ -324,4 +353,72 @@ class RhythmAssistantError {
           error['mutation_may_have_applied'] as bool? ?? false,
     );
   }
+}
+
+/// The evidence returned for one walk on one hub. Acknowledgement, observed
+/// light state and the resident's own observation are independent evidence.
+class RhythmMotionDiagnosis {
+  const RhythmMotionDiagnosis(this.stage, this.reason, this.nextCheck,
+      this.lights, this.detectedAtEpochMs, this.routedTargets);
+  final String stage;
+  final String? reason;
+  final String nextCheck;
+  final List<RhythmMotionWalkLight> lights;
+  final int? detectedAtEpochMs;
+  final List<String> routedTargets;
+
+  factory RhythmMotionDiagnosis.fromJson(Map<String, dynamic> json) =>
+      RhythmMotionDiagnosis(
+          json['stage'] as String,
+          json['reason'] as String?,
+          json['next_check'] as String,
+          (json['lights'] as List)
+              .map((v) => RhythmMotionWalkLight.fromJson(
+                  Map<String, dynamic>.from(v as Map)))
+              .toList(),
+          json['detected_at_epoch_ms'] as int?,
+          List<String>.from(json['routed_targets'] as List? ?? []));
+}
+
+class RhythmMotionWalkLight {
+  const RhythmMotionWalkLight(this.deviceId, this.availability, this.readback,
+      this.powerOn, this.residentPowerOn);
+  final String deviceId;
+  final String availability;
+  final String readback;
+  final bool? powerOn, residentPowerOn;
+
+  factory RhythmMotionWalkLight.fromJson(Map<String, dynamic> json) =>
+      RhythmMotionWalkLight(
+          json['device_id'] as String,
+          json['availability'] as String,
+          json['readback'] as String,
+          json['power_on'] as bool?,
+          json['resident_power_on'] as bool?);
+
+  bool get freshPowerObserved =>
+      readback == 'fresh_device_readback' &&
+      availability == 'available' &&
+      powerOn != null;
+}
+
+/// Keep the exact server-issued plan ID and server identity together through
+/// explicit review. Human-readable labels are looked up only for presentation.
+class RhythmMotionTargetReview {
+  const RhythmMotionTargetReview(this.id, this.hub, this.sensor, this.room,
+      this.physicalRoom, this.before, this.after);
+  final String id, hub, sensor, room;
+  final String? physicalRoom;
+  final List<String> before, after;
+  factory RhythmMotionTargetReview.fromJson(Map<String, dynamic> json) =>
+      RhythmMotionTargetReview(
+          json['plan_id'] as String,
+          json['server_instance_id'] as String,
+          json['sensor_id'] as String,
+          json['room_id'] as String,
+          json['physical_room_id'] as String?,
+          List<String>.from(json['before_targets'] as List),
+          List<String>.from(json['after_targets'] as List));
+  Map<String, dynamic> confirmedArguments() =>
+      {'plan_id': id, 'server_instance_id': hub, 'confirmed': true};
 }
