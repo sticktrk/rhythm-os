@@ -37,6 +37,42 @@ fn installation() -> (TestHarness, String, String) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_controls_survive_runtime_bootstrap() {
+    use rhythm_os::storage::FileStorage;
+    let (h, kitchen, _) = installation();
+    let data = tempfile::tempdir().unwrap();
+    h.state.lock().unwrap().storage = Some(std::sync::Arc::new(
+        FileStorage::new(data.path().to_str().unwrap()).unwrap(),
+    ));
+    for (id, mut args) in [
+        ("adjust_room_brightness", json!({"delta_percent":-5})),
+        ("adjust_room_warmth", json!({"kelvin":3000})),
+        ("step_room_curve", json!({"direction":"down"})),
+        ("set_room_offset", json!({"offset_minutes":-45})),
+        (
+            "return_room_to_schedule",
+            json!({"behavior":"reset_offsets"}),
+        ),
+        ("control_room_power", json!({"power":"hard_off"})),
+    ] {
+        args["room_id"] = json!(kitchen);
+        let (status, result) = operation(&h, id, args).await;
+        assert_eq!(status, 200, "{id}: {result}");
+        let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+        let before = runtime.engine_node_snapshot(&kitchen).unwrap();
+        for node in runtime.engine_all_node_snapshots() {
+            runtime.remove_node(&node.id);
+        }
+        rhythm_os::commands::reconcile_runtime_from_state(&h.state).unwrap();
+        assert_eq!(
+            runtime.engine_node_snapshot(&kitchen).unwrap(),
+            before,
+            "{id}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuning_preserves_warmth_and_other_rooms_and_requires_a_fresh_review() {
     let (h, kitchen, hall) = installation();
     let (status, width) = operation(

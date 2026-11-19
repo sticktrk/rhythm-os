@@ -1216,7 +1216,7 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     _ => "reset_to_mode_default",
                 },
             };
-            commands::do_node_action(state, &room_id, action, false).map_err(|_| uncertain())?;
+            commands::do_node_action(state, &room_id, action, true).map_err(|_| uncertain())?;
         }
         "adjust_room_brightness" | "adjust_room_warmth" => {
             guard_adaptive(&room)?;
@@ -1259,7 +1259,7 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     preserve_brightness: true,
                 }
             };
-            commands::do_set_node_curve_modifier(state, &room_id, modifier, false)
+            commands::do_set_node_curve_modifier(state, &room_id, modifier, true)
                 .map_err(|_| uncertain())?;
         }
         "try_room_offset"
@@ -1281,7 +1281,7 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                 ));
             }
             let offset = num(args, "offset_minutes", -720., 720.)?;
-            commands::do_set_node_time_offset(state, &room_id, offset, false)
+            commands::do_set_node_time_offset(state, &room_id, offset, true)
                 .map_err(|_| uncertain())?;
         }
         "undo_room_trial" => {
