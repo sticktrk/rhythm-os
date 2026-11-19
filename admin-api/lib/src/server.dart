@@ -107,7 +107,7 @@ class AdminApiServer {
 
   Future<Response> _staffAssistant(Request request) async {
     final origin = request.headers['origin'];
-    if (origin != null && !_config.allowedOrigins.contains(origin)) {
+    if (origin != null && !_config.allowsOrigin(origin)) {
       return _json({
         'error': 'Browser origin is not configured for the staff assistant.'
       }, status: 403);

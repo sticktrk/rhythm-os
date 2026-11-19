@@ -11,6 +11,10 @@ void _staffAssistantScenarios() {
         () async {
       final uri = Uri.parse('http://admin.test/api/assistant/mcp');
       final handler = service.server.handler;
+      final wildcard = _testServer(client: _HandlerClient(service.handle), allowedOrigins: {'*'});
+      expect((await wildcard.handler(Request('GET', uri, headers: {
+        'origin': 'https://console.test', 'authorization': 'Bearer staff-session'
+      }))).statusCode, 405);
       expect((await handler(Request('GET', uri))).statusCode, 401);
       expect(
           (await handler(Request('GET', uri,

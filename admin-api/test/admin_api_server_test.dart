@@ -93,7 +93,7 @@ void main() {
       supportAccessKeyId: 'default',
       host: '127.0.0.1',
       port: 8787,
-      allowedOrigins: {'http://127.0.0.1:5173'},
+      allowedOrigins: allowedOrigins,
     );
     final supabase = SupabaseRestClient(config: config, httpClient: client);
     final supportAccess = SupportAccessService(
@@ -398,7 +398,7 @@ void main() {
       supportAccessKeyId: 'default',
       host: '127.0.0.1',
       port: 8787,
-      allowedOrigins: {'http://127.0.0.1:5173'},
+      allowedOrigins: allowedOrigins,
     );
     final supabase = SupabaseRestClient(config: config, httpClient: client);
     final supportAccess = SupportAccessService(
@@ -1452,6 +1452,7 @@ AdminApiServer _testServer({
   required http.Client client,
   String? serviceRoleKey = 'service-role-key',
   void Function(String)? auditLog,
+  Set<String> allowedOrigins = const {'http://127.0.0.1:5173'},
 }) {
   final config = AdminApiConfig(
     supabaseUrl: Uri.parse('https://supabase.test'),
@@ -1462,7 +1463,7 @@ AdminApiServer _testServer({
     remoteAccessDomain: 'relay.test',
     host: '127.0.0.1',
     port: 8787,
-    allowedOrigins: {'http://127.0.0.1:5173'},
+    allowedOrigins: allowedOrigins,
   );
   final supabase = SupabaseRestClient(config: config, httpClient: client);
   final supportAccess = SupportAccessService(
