@@ -186,6 +186,101 @@ async fn live_trial_is_undoable_only_on_the_selected_room_and_does_not_edit_the_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_a_trial_preserves_room_opt_out_and_child_power() {
+    let (mut h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+    h = h.with_discovery(rooms, devices);
+    h.sync();
+    let den = h.resolve("den");
+    let child = h.state.lock().unwrap().topology.get(&den).unwrap().devices[0]
+        .device_id
+        .clone();
+    let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+    runtime.lights_off_room(&child, None).unwrap();
+
+    for opt_out in [false, true] {
+        let (status, trial) = operation(
+            &h,
+            "set_room_color",
+            json!({"room_id":den,"red":10,"green":20,"blue":200}),
+        )
+        .await;
+        assert_eq!(status, 200, "{trial}");
+        if opt_out {
+            h.set_room_preferences(&den, Some(false), None, None);
+        }
+        spy.reset();
+        let (status, receipt) = operation(
+            &h,
+            "undo_room_trial",
+            json!({"room_id":den,"trial_id":trial["trial_id"]}),
+        )
+        .await;
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(
+            runtime.engine_node_snapshot(&den).unwrap().rhythm_enabled,
+            !opt_out
+        );
+        assert!(runtime.engine_node_snapshot(&child).unwrap().hard_off);
+        assert_eq!(spy.turn_on_calls().is_empty(), opt_out);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn previewing_an_off_scene_does_not_commit_hard_off() {
+    let (mut h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+    h = h.with_discovery(rooms, devices);
+    h.sync();
+    let den = h.resolve("den");
+    let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+    let (status, trial) = operation(&h, "preview_room_scene_draft", json!({
+        "room_id": den,
+        "scene": {"id":"dark-preview","name":"Dark","light":{"default_output":{"power":"off","brightness":1}}}
+    })).await;
+    assert_eq!(status, 200, "{trial}");
+    assert!(!spy.turn_off_calls().is_empty());
+    assert!(runtime
+        .engine_all_node_snapshots()
+        .iter()
+        .all(|node| !node.hard_off));
+    spy.reset();
+    let (status, receipt) = operation(
+        &h,
+        "undo_room_trial",
+        json!({"room_id":den,"trial_id":trial["trial_id"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{receipt}");
+    assert!(!spy.turn_on_calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_restore_keeps_the_trial_retryable() {
+    let (mut h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("den", "Den")]);
+    h = h.with_discovery(rooms, devices);
+    h.sync();
+    let den = h.resolve("den");
+    let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+    runtime.lights_off_room(&den, None).unwrap();
+    let (status, trial) = operation(
+        &h,
+        "set_room_color",
+        json!({"room_id":den,"red":10,"green":20,"blue":200}),
+    )
+    .await;
+    assert_eq!(status, 200, "{trial}");
+    let args = json!({"room_id":den,"trial_id":trial["trial_id"]});
+    spy.fail_next_turn_off();
+    assert_ne!(operation(&h, "undo_room_trial", args.clone()).await.0, 200);
+    let (status, receipt) = operation(&h, "undo_room_trial", args.clone()).await;
+    assert_eq!(status, 200, "{receipt}");
+    assert!(runtime.engine_node_snapshot(&den).unwrap().hard_off);
+    assert_eq!(operation(&h, "undo_room_trial", args).await.0, 409);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reviews_create_edit_and_delete_a_scene_and_reject_a_stale_deletion() {
     let (h, _, _) = installation();
     let id = "blue-reading";

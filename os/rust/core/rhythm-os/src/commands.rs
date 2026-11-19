@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
+use rhythm_core::lighting::SceneLightDispatch;
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
     ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
@@ -5040,12 +5041,6 @@ pub fn build_profiles(state: &SharedState) -> Result<String> {
 }
 
 #[derive(Clone)]
-enum SceneLightDispatch {
-    On(LightingCommand),
-    Off(Option<u32>),
-}
-
-#[derive(Clone)]
 struct SceneLightCommand {
     public_node_id: String,
     dispatch_node_id: String,
@@ -5794,20 +5789,26 @@ fn dispatch_scene_light_command(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     command: &SceneLightCommand,
+    temporary: bool,
 ) -> Result<()> {
-    let lights_on = match &command.dispatch {
-        SceneLightDispatch::On(lighting_command) => {
-            log_room_command_dispatch(
-                runtime.as_ref(),
-                &command.dispatch_node_id,
-                lighting_command,
-            );
-            runtime.apply_room_command(&command.dispatch_node_id, lighting_command.clone())?;
-            true
-        }
-        SceneLightDispatch::Off(transition_ms) => {
-            runtime.lights_off_room(&command.dispatch_node_id, *transition_ms)?;
-            false
+    let lights_on = if temporary {
+        runtime.render_scene_preview(&command.dispatch_node_id, &command.dispatch)?;
+        matches!(command.dispatch, SceneLightDispatch::On(_))
+    } else {
+        match &command.dispatch {
+            SceneLightDispatch::On(lighting_command) => {
+                log_room_command_dispatch(
+                    runtime.as_ref(),
+                    &command.dispatch_node_id,
+                    lighting_command,
+                );
+                runtime.apply_room_command(&command.dispatch_node_id, lighting_command.clone())?;
+                true
+            }
+            SceneLightDispatch::Off(transition_ms) => {
+                runtime.lights_off_room(&command.dispatch_node_id, *transition_ms)?;
+                false
+            }
         }
     };
     update_lights_on_cache_for_runtime_node(state, runtime, &command.public_node_id, lights_on);
@@ -5819,9 +5820,10 @@ fn dispatch_scene_plan(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     plan: &SceneApplicationPlan,
+    temporary: bool,
 ) -> Result<()> {
     for command in &plan.commands {
-        dispatch_scene_light_command(state, runtime, command)?;
+        dispatch_scene_light_command(state, runtime, command, temporary)?;
     }
     Ok(())
 }
@@ -6067,7 +6069,7 @@ fn do_scene_apply_definition_in_transaction(
     // companion leg of mixed Hue rooms. The scene lifecycle guard remains held
     // through dispatch and committed state so upsert/delete cannot interleave.
     drop(transaction);
-    dispatch_scene_plan(state, &runtime, &plan)?;
+    dispatch_scene_plan(state, &runtime, &plan, preview_id.is_some())?;
 
     if commit_state {
         set_scene_committed_state(
@@ -6422,7 +6424,15 @@ fn do_scene_apply_response(
         return do_scene_apply_inner(state, scene_id, request, true, persist_state, None, palette);
     }
     if is_native_scene_id(scene_id) {
-        return do_native_scene_apply(state, scene_id, request, persist_state, None);
+        let gate = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .scene_lifecycle_transaction_lock
+            .clone();
+        let _transaction = gate
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scene transaction"))?;
+        return do_native_scene_apply(state, scene_id, request, persist_state, None, true);
     }
     Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
 }
@@ -6842,7 +6852,7 @@ pub(crate) fn do_home_scene_apply_reviewed(
                     std::thread::sleep(dispatch_spacing);
                 }
                 dispatched_any = true;
-                if let Err(error) = dispatch_scene_light_command(state, &runtime, command) {
+                if let Err(error) = dispatch_scene_light_command(state, &runtime, command, false) {
                     dispatch_failures.push((target_id.clone(), error.to_string()));
                     return false;
                 }
@@ -7321,7 +7331,7 @@ fn home_scene_apply_to_devices(
             }
             dispatched_any = true;
             let (target, _, command) = &applied[*index];
-            if let Err(error) = dispatch_scene_light_command(state, &runtime, command) {
+            if let Err(error) = dispatch_scene_light_command(state, &runtime, command, false) {
                 dispatch_failures.push((target.node_id.clone(), error.to_string()));
             }
         }
@@ -7457,6 +7467,7 @@ fn do_native_scene_apply(
     request: SceneApplyRequest,
     persist_state: bool,
     preview_id: Option<String>,
+    commit_state: bool,
 ) -> Result<SceneApplyResponse> {
     let target_id = resolve_node_id(state, &request.target_id);
     let sources = {
@@ -7521,11 +7532,11 @@ fn do_native_scene_apply(
             })?;
         let mut unresolved_node_ids = Vec::new();
         if let Some(plan) = companion_plan {
-            dispatch_scene_plan(state, &runtime, &plan)?;
+            dispatch_scene_plan(state, &runtime, &plan, !commit_state)?;
             unresolved_node_ids = plan.unresolved_node_ids;
         }
 
-        if preview_id.is_none() {
+        if commit_state {
             set_scene_committed_state(
                 state,
                 &runtime,
@@ -7659,6 +7670,8 @@ fn record_scene_preview_session(
         .clamp(1_000, 10 * 60_000);
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     clear_scene_preview_sessions_locked(&mut s, &target_id, &response.affected_node_ids);
+    let rhythm_owned_at_start = s.rhythm_automation_allowed_for_node(&target_id);
+    let breaker_enabled_at_start = s.light_breaker_enabled;
     s.light_scene_previews.insert(
         preview_id.clone(),
         LightScenePreviewSession {
@@ -7667,6 +7680,9 @@ fn record_scene_preview_session(
             target_node_id: target_id,
             affected_node_ids: response.affected_node_ids.clone(),
             previous_mood_scene_id,
+            rhythm_owned_at_start,
+            breaker_enabled_at_start,
+            restore_failed_at_epoch_ms: None,
             draft_scene,
             started_at_epoch_ms: now,
             expires_at_epoch_ms: now.saturating_add(duration_ms),
@@ -7680,77 +7696,83 @@ pub fn do_scene_preview(
     scene_id: &str,
     request: ScenePreviewRequest,
 ) -> Result<String> {
-    let preview_id = crate::canonical::identity::generate_uuid_public();
-    let target_id = resolve_node_id(state, &request.target_id);
-    let apply_request = SceneApplyRequest {
-        target_id: target_id.clone(),
-        transition_ms: request.transition_ms,
-    };
-    let response = if is_native_scene_id(scene_id) {
-        do_native_scene_apply(
-            state,
-            scene_id,
-            apply_request,
-            false,
-            Some(preview_id.clone()),
-        )?
-    } else {
-        do_scene_apply_definition_inner(
-            state,
-            SceneApplySource::Stored(scene_id.to_string()),
-            apply_request,
-            false,
-            false,
-            Some(preview_id.clone()),
-            false,
-            PaletteWindow::default(),
-        )?
-    };
-    record_scene_preview_session(
+    apply_scene_preview(
         state,
-        preview_id,
-        target_id,
-        &response,
-        request.duration_ms,
-        None,
-    )?;
-
-    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene preview: {}", e))
+        SceneApplySource::Stored(scene_id.to_string()),
+        request,
+    )
 }
 
 pub fn do_scene_draft_preview(
     state: &SharedState,
     request: SceneDraftPreviewRequest,
 ) -> Result<String> {
-    let preview_id = crate::canonical::identity::generate_uuid_public();
-    let target_id = resolve_node_id(state, &request.target_id);
     let mut scene = request.scene;
     scene.normalize();
+    apply_scene_preview(
+        state,
+        SceneApplySource::Definition(scene),
+        ScenePreviewRequest {
+            target_id: request.target_id,
+            duration_ms: request.duration_ms,
+            transition_ms: request.transition_ms,
+        },
+    )
+}
+
+fn apply_scene_preview(
+    state: &SharedState,
+    source: SceneApplySource,
+    request: ScenePreviewRequest,
+) -> Result<String> {
+    let gate = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .scene_lifecycle_transaction_lock
+        .clone();
+    let transaction = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("scene transaction"))?;
+    let preview_id = crate::canonical::identity::generate_uuid_public();
+    let target_id = resolve_node_id(state, &request.target_id);
     let apply_request = SceneApplyRequest {
         target_id: target_id.clone(),
         transition_ms: request.transition_ms,
     };
-    let response = do_scene_apply_definition_inner(
-        state,
-        SceneApplySource::Definition(scene.clone()),
-        apply_request,
-        false,
-        false,
-        Some(preview_id.clone()),
-        true,
-        PaletteWindow::default(),
-    )?;
+    let draft = match &source {
+        SceneApplySource::Definition(scene) => Some(scene.clone()),
+        SceneApplySource::Stored(_) => None,
+    };
+    let response = match source {
+        SceneApplySource::Stored(id) if is_native_scene_id(&id) => do_native_scene_apply(
+            state,
+            &id,
+            apply_request,
+            false,
+            Some(preview_id.clone()),
+            false,
+        )?,
+        source => do_scene_apply_definition_in_transaction(
+            state,
+            source,
+            apply_request,
+            false,
+            false,
+            Some(preview_id.clone()),
+            draft.is_some(),
+            PaletteWindow::default(),
+            &transaction,
+        )?,
+    };
     record_scene_preview_session(
         state,
         preview_id,
         target_id,
         &response,
         request.duration_ms,
-        Some(scene),
+        draft,
     )?;
-
-    serde_json::to_string(&response)
-        .map_err(|e| anyhow::anyhow!("serialize scene draft preview: {}", e))
+    Ok(serde_json::to_string(&response)?)
 }
 
 pub fn do_scene_preview_commit(state: &SharedState, preview_id: &str) -> Result<String> {
@@ -7776,6 +7798,7 @@ pub(crate) fn do_scene_preview_commit_reviewed(
         let preview = app
             .light_scene_previews
             .get(preview_id)
+            .filter(|p| p.expires_at_epoch_ms > current_epoch_ms())
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?;
         if let Some(mut scene) = preview.draft_scene.clone() {
@@ -7802,7 +7825,7 @@ pub(crate) fn do_scene_preview_commit_reviewed(
         transition_ms: None,
     };
     let receipt = if is_native_scene_id(&preview.scene_id) {
-        do_native_scene_apply(state, &preview.scene_id, request, true, None)?
+        do_native_scene_apply(state, &preview.scene_id, request, true, None, true)?
     } else {
         let seed = state
             .lock()
@@ -7830,46 +7853,184 @@ pub(crate) fn do_scene_preview_commit_reviewed(
 }
 
 pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<String> {
-    let preview = {
-        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.light_scene_previews
+    finish_scene_preview(state, preview_id, false)
+}
+
+pub(crate) fn expire_scene_preview(state: &SharedState, preview_id: &str) -> Result<()> {
+    finish_scene_preview(state, preview_id, true).map(|_| ())
+}
+
+fn finish_scene_preview(
+    state: &SharedState,
+    preview_id: &str,
+    expired_only: bool,
+) -> Result<String> {
+    let gate = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .scene_lifecycle_transaction_lock
+        .clone();
+    let transaction = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("scene transaction"))?;
+    let mut preview = {
+        let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if expired_only
+            && !app.light_scene_previews.get(preview_id).is_some_and(|p| {
+                p.restore_failed_at_epoch_ms.is_none()
+                    && p.expires_at_epoch_ms <= current_epoch_ms()
+            })
+        {
+            anyhow::bail!("Scene preview is no longer due for expiry");
+        }
+        app.light_scene_previews
             .remove(preview_id)
             .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
     };
-
-    // Reconcile to the live room behavior. A dormant saved Mood binding is
-    // not necessarily what was running when the audition began.
-    let runtime = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("lock"))?
-        .hub_runtime()
-        .ok_or_else(|| anyhow::anyhow!("Lighting runtime unavailable while ending preview"))?;
-    let room = runtime
-        .engine_effective_node_snapshot(&preview.target_node_id)
-        .ok_or_else(|| anyhow::anyhow!("Preview room unavailable"))?;
-    if room.hard_off {
-        runtime.lights_off_room(&room.id, None)?;
-    } else if room.soft_off {
-        runtime.soft_off_tick_room(&room.id)?;
-    } else if room.mood_active {
-        apply_mood_scene_or_tick(
-            state,
-            &runtime,
-            &room.id,
-            room.profile_settings.mood_scene_id.as_deref(),
-            false,
-        )?;
-    } else {
-        runtime.turn_on_room(&room.id)?;
+    if let Err(error) = restore_scene_preview(state, &preview, &transaction) {
+        // The scene transaction prevents superseding previews or commits from
+        // interleaving. Keep the token so a temporary I/O failure can recover.
+        let now = current_epoch_ms();
+        preview.restore_failed_at_epoch_ms = Some(now);
+        preview.expires_at_epoch_ms = preview.expires_at_epoch_ms.min(now);
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .light_scene_previews
+            .insert(preview.id.clone(), preview);
+        return Err(error);
     }
-    update_lights_on_cache_for_runtime_node(state, &runtime, &room.id, !room.hard_off);
-    emit_node_state_event_after_apply(state, &runtime, &room.id);
-
     serde_json::to_string(&serde_json::json!({
         "preview_id": preview.id,
         "cancelled": true
     }))
     .map_err(|e| anyhow::anyhow!("serialize scene preview cancel: {}", e))
+}
+
+fn restore_scene_preview(
+    state: &SharedState,
+    preview: &LightScenePreviewSession,
+    transaction: &std::sync::MutexGuard<'_, ()>,
+) -> Result<()> {
+    let runtime = {
+        let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if (preview.rhythm_owned_at_start
+            && !app.rhythm_automation_allowed_for_node(&preview.target_node_id))
+            || (preview.breaker_enabled_at_start && !app.light_breaker_enabled)
+        {
+            return Ok(());
+        }
+        app.hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("Lighting runtime unavailable while ending preview"))?
+    };
+    let Some(room) = runtime.engine_effective_node_snapshot(&preview.target_node_id) else {
+        return Ok(());
+    };
+    if !room.disabled && room.rhythm_enabled {
+        if let Some(scene_id) = room
+            .profile_settings
+            .mood_scene_id
+            .as_ref()
+            .filter(|_| room.mood_active && !room.hard_off)
+        {
+            let request = SceneApplyRequest {
+                target_id: room.id.clone(),
+                transition_ms: None,
+            };
+            if is_native_scene_id(scene_id) {
+                do_native_scene_apply(state, scene_id, request, false, None, false)?;
+            } else {
+                do_scene_apply_definition_in_transaction(
+                    state,
+                    SceneApplySource::Stored(scene_id.clone()),
+                    request,
+                    false,
+                    false,
+                    Some(preview.id.clone()),
+                    false,
+                    stored_mood_palette_window(&runtime, &room.id),
+                    transaction,
+                )?;
+            }
+        } else {
+            restore_preview_output(state, &runtime, &room)?;
+        }
+        emit_node_state_event_after_apply(state, &runtime, &room.id);
+    }
+    Ok(())
+}
+
+/// Re-render the current preferences for each route without treating an ended
+/// audition as a new On press. A direct bulb can have its own power or curve.
+fn restore_preview_output(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    target: &rhythm_core::NodeSnapshot,
+) -> Result<()> {
+    let commands = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let routes = if target.kind.is_room() {
+            crate::periodic::periodic_dispatch_nodes_from_state(&s, std::slice::from_ref(target))
+        } else {
+            crate::periodic::preview_dispatch_node_for_target(target)
+                .into_iter()
+                .collect()
+        };
+        let mode_configs = s.mode_configs();
+        let lighting = RoomLightingContext {
+            light_profile_configs: &s.light_profile_configs,
+            mode_configs: &mode_configs,
+            mode: s.active_mode,
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+            timezone_name: s.timezone_name.as_deref(),
+            utc_offset: s.utc_offset_hours,
+        };
+        let now = current_local_datetime(s.utc_offset_hours);
+        routes
+            .into_iter()
+            .filter_map(|route| {
+                let snap = runtime.engine_effective_node_snapshot(&route.settings_node_id)?;
+                if !snap.rhythm_enabled
+                    || snap.disabled
+                    || !s.rhythm_automation_allowed_for_node(&snap.id)
+                {
+                    return None;
+                }
+                let room_state = room_mode_state_for_settings(
+                    s.power_save,
+                    &snap.profile_settings,
+                    snap.hard_off,
+                    snap.mood_active,
+                    snap.soft_off,
+                    s.motion_snapshots
+                        .get(&target.id)
+                        .is_some_and(|m| m.warning_active),
+                );
+                let output = resolve_room_command_for_state_at_from_parts(
+                    lighting,
+                    RoomLightingInput {
+                        settings: &snap.profile_settings,
+                        room_state,
+                        time_offset_minutes: snap.time_offset_minutes,
+                        brightness_offset: snap.brightness_offset,
+                    },
+                    now,
+                    None,
+                );
+                Some(SceneLightCommand {
+                    public_node_id: snap.id,
+                    dispatch_node_id: route.node_id,
+                    dispatch: output.map_or(SceneLightDispatch::Off(None), SceneLightDispatch::On),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    for command in &commands {
+        dispatch_scene_light_command(state, runtime, command, true)?;
+    }
+    Ok(())
 }
 
 fn apply_mood_scene_or_tick(
@@ -23468,6 +23629,19 @@ mod tests {
             }
             Ok(())
         }
+        fn render_scene_preview(
+            &self,
+            node_id: &str,
+            output: &SceneLightDispatch,
+        ) -> anyhow::Result<()> {
+            match output {
+                SceneLightDispatch::On(command) => {
+                    self.apply_room_command(node_id, command.clone())
+                }
+                SceneLightDispatch::Off(transition) => self.lights_off_room(node_id, *transition),
+            }
+        }
+
         fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> anyhow::Result<()> {
             let transaction_lock = self.scene_dispatch_transaction_lock.lock().unwrap().clone();
             let _transaction = transaction_lock

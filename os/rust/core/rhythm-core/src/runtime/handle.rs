@@ -6,7 +6,7 @@
 
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
-use crate::lighting::LightingCommand;
+use crate::lighting::{LightingCommand, SceneLightDispatch};
 use crate::primitives::{ManualDispatchPlan, PeriodicTickPlan};
 use crate::room::{LightNodeKind, ModeConfig, RoomProfileSettings};
 use crate::solar::{SolarTime, SunTimes};
@@ -245,6 +245,11 @@ pub trait RuntimeHandle: Send + Sync {
 
     /// Apply an explicit rendered lighting command to a room.
     fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()>;
+
+    /// Render a temporary look without changing the node's operating state.
+    fn render_scene_preview(&self, _node_id: &str, _output: &SceneLightDispatch) -> Result<()> {
+        anyhow::bail!("Runtime does not support temporary scene output")
+    }
 
     /// Turn a room fully off, optionally fading out first.
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()>;
@@ -1168,6 +1173,26 @@ where
             },
         )
         .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
+    }
+
+    fn render_scene_preview(&self, node_id: &str, output: &SceneLightDispatch) -> Result<()> {
+        let gate = self.dispatch_lock(node_id);
+        let _guard = gate.lock().map_err(|_| anyhow::anyhow!("dispatch gate"))?;
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|_| anyhow::anyhow!("engine lock"))?;
+            match output {
+                SceneLightDispatch::On(command) => {
+                    engine.plan_non_periodic_turn_on(node_id, command.clone())
+                }
+                SceneLightDispatch::Off(transition) => {
+                    engine.plan_non_periodic_turn_off(node_id, *transition)
+                }
+            }
+        };
+        dispatch_manual_plan(self, dispatch)
     }
 
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {

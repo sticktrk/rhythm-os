@@ -84,6 +84,7 @@ struct WalkLight {
     readback: &'static str,
     power_on: Option<bool>,
     observed_at_epoch_ms: Option<u64>,
+    resident_power_on: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -288,6 +289,7 @@ fn start(state: &SharedState, t: Target) -> Result<Value, Error> {
                     readback: "no_fresh_readback",
                     power_on: None,
                     observed_at_epoch_ms: None,
+                    resident_power_on: None,
                 },
             )
         })
@@ -348,6 +350,12 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
         .get(&request.walk_id)
         .filter(|w| w.server_instance_id == s.server_instance_id)
         .ok_or_else(|| Error::conflict("walk_expired", "Start a new walk on the same hub."))?;
+    let mut result = context(&s, &walk.target);
+    let walk = s
+        .assistant_motion
+        .walks
+        .get_mut(&request.walk_id)
+        .expect("walk was checked under the state lock");
     let active = walk.started.elapsed() < WALK_WINDOW;
     let (stage, reason, next) = walk
         .detection
@@ -385,14 +393,18 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
             "Wait until motion reaches the room before reporting the visual result.",
         ));
     }
-    let mut result = context(&s, &walk.target);
+    for (id, power_on) in confirmed {
+        walk.lights
+            .get_mut(id)
+            .expect("observations were validated")
+            .resident_power_on = Some(power_on);
+    }
     let lights: Vec<_> = walk
         .lights
         .iter()
         .map(|(id, light)| {
             let mut item = json!(light);
             item["device_id"] = json!(id);
-            item["resident_power_on"] = json!(confirmed.get(id));
             item
         })
         .collect();
@@ -408,7 +420,11 @@ fn inspect(state: &SharedState, request: Inspect) -> Result<Value, Error> {
     result["detected_at_epoch_ms"] = json!(walk.detection.as_ref().map(|d| d.epoch_ms));
     result["routed_targets"] = json!(walk.detection.as_ref().map(|d| &d.routed_targets));
     result["lights"] = json!(lights);
-    result["resident_confirmation"] = json!(if confirmed.is_empty() {
+    result["resident_confirmation"] = json!(if walk
+        .lights
+        .values()
+        .all(|light| light.resident_power_on.is_none())
+    {
         "not_recorded"
     } else {
         "reported"

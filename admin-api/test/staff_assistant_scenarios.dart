@@ -435,6 +435,7 @@ class _StaffFixture {
     }
     expect(request.headers['Authorization'], 'Bearer synthetic-short-session');
     if (path == '/api/diag/debug-bundle') {
+      expect(request.followRedirects, isFalse);
       final body = jsonDecode((request as http.Request).body) as Map;
       expect(body['upload_url'], endsWith('?token=signed-upload-token'));
       uploads++;
@@ -445,6 +446,7 @@ class _StaffFixture {
       });
     }
     if (path == '/api/state') {
+      expect(request.followRedirects, isFalse);
       return _jsonResponse(
           {'server_instance_id': liveHub, 'version': '1.2.3', 'nodes': []});
     }
