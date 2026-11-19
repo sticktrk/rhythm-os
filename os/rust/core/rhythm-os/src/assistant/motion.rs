@@ -554,6 +554,7 @@ fn preview(state: &SharedState, t: Target, correlation_id: String) -> Result<Val
     result["topology_resource_sha256"] = json!(topology_sha256);
     result["after_targets"] = json!(after);
     result["requires_confirmation"] = json!(true);
+    result["operation"] = json!("apply_motion_target");
     let server_instance_id = s.server_instance_id.clone();
     s.assistant_motion.plans.insert(
         id,

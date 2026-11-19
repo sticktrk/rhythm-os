@@ -1836,3 +1836,45 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
         }
     }
 }
+
+#[tokio::test]
+async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
+    let f = Fixture::new();
+    let (status, issued) = json_request(
+        f.admin(),
+        Method::POST,
+        "/api/auth/agent-tokens",
+        Some(ADMIN),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = Some(issued["token"].as_str().unwrap());
+    let req = |method, params| json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+    let (status, tools) = json_request(
+        f.mobile(),
+        Method::POST,
+        rhythm_os::assistant::MCP_PATH,
+        token,
+        req("tools/list", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for op in rhythm_os::assistant::operation_registry()
+        .iter()
+        .filter(|op| op.tier != rhythm_os::assistant::OperationTier::OwnerOnly)
+    {
+        assert!(crate::policy::allows(&Method::POST, &op.invocation_path));
+        assert!(tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == op.id));
+    }
+    let (_,result)=json_request(f.mobile(),Method::POST,rhythm_os::assistant::MCP_PATH,token,req("tools/call",json!({
+        "name":"plan_move_device_room","arguments":{"device_id":"lamp","to_room_id":"office","correlation_id":"test"}}))).await;
+    let handoff: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(handoff["status"], "handoff");
+    assert_eq!(handoff["actor"], "ha_administrator");
+}

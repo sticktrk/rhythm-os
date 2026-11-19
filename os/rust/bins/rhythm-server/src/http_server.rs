@@ -32,6 +32,7 @@ pub fn create_router(
     ota_status: crate::self_update::OtaStatusHandle,
 ) -> Router {
     let auth_state = state.clone();
+    install_assistant_maintenance(&state, ota_status.clone());
 
     logging::with_http_observability(
         rhythm_os::axum_router::api_routes()
@@ -672,6 +673,47 @@ fn truncate_stream_log_line(line: &str) -> String {
     truncated
 }
 
+fn assistant_update_revision(info: &crate::self_update::UpdateInfo) -> String {
+    use sha2::{Digest,Sha256};
+    let release = serde_json::json!({
+        "current": info.current_version, "latest": info.latest_version,
+        "current_package": info.current_package_version, "latest_package": info.latest_package_version,
+        "current_image": info.current_image_version, "latest_image": info.latest_image_version,
+        "asset": info.asset_name, "url": info.download_url, "digest": info.expected_sha256,
+        "targets": info.install_targets, "images": info.image_assets, "reason": info.update_reason,
+    });
+    format!("{:x}",Sha256::digest(release.to_string().as_bytes()))
+}
+
+fn install_assistant_maintenance(state: &SharedState, ota: crate::self_update::OtaStatusHandle) {
+    use rhythm_os::assistant::devices::{platform_receipt, unsupported_platform, PlatformAction};
+    state.lock().expect("state lock").assistant_devices.platform = Some(std::sync::Arc::new(move |state, action| {
+        let ota = ota.clone();
+        Box::pin(async move {
+            match action {
+                PlatformAction::CheckUpdate => {
+                    let value = platform_receipt(check_update(state,ota).await).await?;
+                    Ok(serde_json::json!({
+                        "current_version":value["current_version"],"latest_version":value["latest_version"],
+                        "current_package_version":value["current_package_version"],"latest_package_version":value["latest_package_version"],
+                        "current_image_version":value["current_image_version"],"latest_image_version":value["latest_image_version"],
+                        "update_available":value["update_available"],"reason":value["update_reason"],"review_revision":value["review_revision"]
+                    }))
+                }
+                PlatformAction::Update{expected_revision} => {
+                    platform_receipt(do_update_reviewed(state,ota,Some(expected_revision)).await).await?;
+                    Ok(serde_json::json!({"status":"update_accepted","next_check":"Reconnect and verify the installed version after restart."}))
+                }
+                PlatformAction::Restart => {
+                    platform_receipt(restart_device(state,ota).await).await?;
+                    Ok(serde_json::json!({"status":"restart_scheduled","next_check":"Reconnect to this hub and read its status."}))
+                }
+                _=>Err(unsupported_platform())
+            }
+        })
+    }));
+}
+
 async fn check_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
@@ -732,6 +774,7 @@ async fn check_update(
                 None,
             );
             let json = serde_json::json!({
+                "review_revision": assistant_update_revision(&info),
                 "current_version": info.current_version,
                 "latest_version": info.latest_version,
                 "current_package_version": info.current_package_version,
@@ -1008,6 +1051,14 @@ async fn do_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
 ) -> Response {
+    do_update_reviewed(state,ota_status,None).await
+}
+
+async fn do_update_reviewed(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+    expected_revision: Option<String>,
+) -> Response {
     let operation = match ota_status.begin_operation() {
         Ok(operation) => operation,
         Err(error) => return err_409(error),
@@ -1071,6 +1122,9 @@ async fn do_update(
             return err_500(e);
         }
     };
+    if expected_revision.as_ref().is_some_and(|expected| *expected != assistant_update_revision(&info)) {
+        return err_409("The offered update changed. Review the new release before installing it.");
+    }
     if let Err(error) = ota_status.record_check_result(&operation, &info) {
         return err_500(error);
     }

@@ -888,6 +888,36 @@ fn load_config(state: &SharedState) -> anyhow::Result<Option<StoredActivityCloud
         .map(StoredActivityCloudConfig::normalized))
 }
 
+/// Read the user-configurable switch, or update it under the same storage
+/// lock used by setup and uploader status writes. The revision binds the
+/// existing destination and credential without exporting them.
+pub(crate) fn assistant_upload_preference(state:&SharedState, change:Option<(&str,bool)>) -> anyhow::Result<(serde_json::Value,String)> {
+    use serde_json::json;
+    let storage = storage_handle(state)?;
+    let guard = CONFIG_STORAGE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let Some(mut config)=storage.load_activity_cloud_config()? else {
+        anyhow::ensure!(change.is_none(),"activity_changed");
+        return Ok((json!({"configured":false}),String::new()));
+    };
+    let revision=format!("{:x}",Sha256::digest(serde_json::to_vec(&(
+        &config.home_id,&config.hub_id,&config.ingest_url,&config.upload_token,config.enabled,config.updated_at_epoch_ms
+    ))?));
+    if let Some((expected,enabled)) = change {
+        anyhow::ensure!(expected==revision,"activity_changed");
+        anyhow::ensure!(!enabled || !config.needs_reprovision(),"reprovision_required");
+        config.enabled=enabled;
+        config.updated_at_epoch_ms=current_epoch_ms();
+        storage.save_activity_cloud_config(&config)?;
+    }
+    let value=json!({"configured":true,"enabled":config.enabled,"needs_reprovision":config.needs_reprovision()});
+    drop(guard);
+    if change.is_some() {
+        if config.enabled {crate::light_usage::request_cloud_upload(state);}
+        else if let Ok(mut s)=state.lock() {s.light_usage.mark_cloud_unavailable("disabled",std::time::Instant::now());}
+    }
+    Ok((value,revision))
+}
+
 fn save_config(state: &SharedState, config: &StoredActivityCloudConfig) -> anyhow::Result<()> {
     let storage = storage_handle(state)?;
     let _guard = CONFIG_STORAGE_LOCK

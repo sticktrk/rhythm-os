@@ -6,6 +6,7 @@ license.workspace = true
 description = "Platform-agnostic business logic for Rhythm OS controllers"
 
 [dependencies]
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 rhythm-core = { path = "../rhythm-core" }
 rhythm-devices = { path = "../rhythm-devices" }

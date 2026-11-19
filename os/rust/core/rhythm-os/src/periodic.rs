@@ -678,6 +678,16 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 }
 
 fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Duration {
+    // Expiry also restores hard-off and scene-owned rooms whose ordinary
+    // adaptive ticks may be suppressed. A superseding trial has a different ID.
+    let expired_previews: Vec<_> = state.lock().ok().map(|s| {
+        let now = crate::state::current_epoch_ms();
+        s.light_scene_previews.values().filter(|p| p.expires_at_epoch_ms <= now)
+            .map(|p| p.id.clone()).collect()
+    }).unwrap_or_default();
+    for id in expired_previews {
+        let _ = crate::commands::do_scene_preview_cancel(&state, &id);
+    }
     let (
         utc_offset,
         profile_registry,

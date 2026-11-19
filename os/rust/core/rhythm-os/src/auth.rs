@@ -5,6 +5,8 @@
 //! the remote tunnel are still authorized by a device-issued bearer token.
 //! Direct LAN access can remain open for local-first setup and control.
 
+pub mod assistant_oauth;
+
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::header::AUTHORIZATION;
@@ -24,6 +26,7 @@ use crate::handlers::ApiResponse;
 use crate::state::{current_epoch_ms, SharedState};
 
 const TOKEN_RANDOM_BYTES: usize = 32;
+const AGENT_PREFIX: &str = "rhythm_agent_";
 const TOKEN_PREFIX: &str = "rhythm_owner_";
 const SUPPORT_TOKEN_PREFIX: &str = "rhythm_support_";
 const SUPPORT_SESSION_TOKEN_PREFIX: &str = "rhythm_support_session_";
@@ -58,6 +61,12 @@ pub struct StoredApiAuth {
     pub require_api_auth: Option<bool>,
     #[serde(default)]
     pub tokens: Vec<StoredApiToken>,
+    // Older readers ignore this collection. They must never interpret an
+    // unrecognized role as an owner or lose the installation's owner tokens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_tokens: Vec<StoredApiToken>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_clients: Vec<assistant_oauth::AgentClient>,
 }
 
 fn default_schema_version() -> u8 {
@@ -70,6 +79,8 @@ impl Default for StoredApiAuth {
             schema_version: default_schema_version(),
             require_api_auth: None,
             tokens: Vec::new(),
+            agent_clients: vec![],
+            agent_tokens: Vec::new(),
         }
     }
 }
@@ -97,6 +108,12 @@ impl StoredApiAuth {
         let now = current_epoch_ms();
         self.tokens
             .iter()
+            .filter(|item| item.role != ApiTokenRole::Agent)
+            .chain(
+                self.agent_tokens
+                    .iter()
+                    .filter(|item| item.role == ApiTokenRole::Agent),
+            )
             .find(|token| {
                 !token.is_expired(now)
                     && constant_time_eq(token.token_hash.as_bytes(), candidate_hash.as_bytes())
@@ -114,6 +131,7 @@ impl StoredApiAuth {
 pub enum ApiTokenRole {
     Owner,
     Support,
+    Agent,
 }
 
 impl Default for ApiTokenRole {
@@ -231,7 +249,12 @@ fn issue_local_token(
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let mut auth = s.api_auth.clone();
     prune_expired_tokens(&mut auth.tokens, current_epoch_ms());
-    auth.tokens.push(StoredApiToken {
+    let collection = if role == ApiTokenRole::Agent {
+        &mut auth.agent_tokens
+    } else {
+        &mut auth.tokens
+    };
+    collection.push(StoredApiToken {
         id: id.clone(),
         role,
         token_hash,
@@ -462,6 +485,39 @@ pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> A
     }
 }
 
+pub fn manage_agent_token(
+    state: &SharedState,
+    info: Option<ApiAuthRequestInfo>,
+    revoke_id: Option<&str>,
+) -> ApiResponse {
+    if !info.is_some_and(|info| info.role == Some(ApiTokenRole::Owner) && !info.via_remote_access) {
+        return ApiResponse::forbidden(
+            "Managing agent access requires a local authenticated owner",
+        );
+    }
+    if let Some(id) = revoke_id {
+        let Ok(mut s) = state.lock() else {
+            return ApiResponse::server_error("State unavailable");
+        };
+        let mut auth = s.api_auth.clone();
+        auth.agent_tokens.retain(|token| token.id != id);
+        auth.agent_clients.retain(|client| client.id != id);
+        if let Some(storage) = &s.storage {
+            if let Err(error) = storage.save_api_auth(&auth) {
+                return ApiResponse::server_error(error);
+            }
+        }
+        s.api_auth = auth;
+        return ApiResponse::no_content();
+    }
+    match issue_local_token(state, ApiTokenRole::Agent, AGENT_PREFIX, None, None) {
+        Ok(issued) => ApiResponse::json_ok(
+            json!({"token_id":issued.id,"token":issued.token,"role":"agent"}).to_string(),
+        ),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
 pub fn handle_issue_support_token(
     state: &SharedState,
     request_info: Option<ApiAuthRequestInfo>,
@@ -566,7 +622,7 @@ fn request_has_privileged_token(request_info: Option<ApiAuthRequestInfo>) -> boo
     match info.role {
         Some(ApiTokenRole::Owner) => true,
         Some(ApiTokenRole::Support) => info.token_expires_at_epoch_ms.is_none(),
-        None => false,
+        Some(ApiTokenRole::Agent) | None => false,
     }
 }
 
@@ -620,6 +676,18 @@ pub async fn require_api_auth_middleware(
     req.extensions_mut().insert(auth_info);
 
     let verified_bearer = verified_bearer_token(&state, &req);
+    let scoped = verified_bearer
+        .as_ref()
+        .is_some_and(|token| token.role == ApiTokenRole::Agent);
+    if scoped && !crate::assistant::transport::agent_route(req.method(), req.uri().path()) {
+        return forbidden("Agent credentials are scoped to assistant operations");
+    }
+    if verified_bearer.is_none()
+        && bearer_token(req.headers().get(AUTHORIZATION))
+            .is_some_and(|token| token.starts_with(AGENT_PREFIX))
+    {
+        return unauthorized("Invalid agent credential");
+    }
     if let Some(verified_token) = verified_bearer.as_ref() {
         if let Some(token) = bearer_token(req.headers().get(AUTHORIZATION)).map(str::to_owned) {
             req.extensions_mut().insert(ApiAuthStreamToken(token));
@@ -708,6 +776,7 @@ fn auth_status_payload(
         "authenticated_role": authenticated_role.map(|role| match role {
             ApiTokenRole::Owner => "owner",
             ApiTokenRole::Support => "support",
+            ApiTokenRole::Agent => "agent",
         }),
     })
 }
@@ -753,7 +822,8 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
 }
 
 fn is_public_request(method: &Method, path: &str, auth_info: ApiAuthRequestInfo) -> bool {
-    *method == Method::OPTIONS
+    assistant_oauth::public_route(method, path)
+        || *method == Method::OPTIONS
         || path == "/health"
         || path == "/api/auth/status"
         || (*method == Method::POST && path == "/api/auth/claim" && auth_info.claim_available)
@@ -1105,6 +1175,8 @@ mod tests {
         let stored = StoredApiAuth {
             schema_version: 1,
             require_api_auth: None,
+            agent_clients: vec![],
+            agent_tokens: vec![],
             tokens: vec![StoredApiToken {
                 id: "owner".into(),
                 role: ApiTokenRole::Owner,

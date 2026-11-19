@@ -437,6 +437,12 @@ pub struct AppState {
     /// from returning on the next restart. Backup restore and profile-bundle
     /// import replace `scenes` but deliberately leave this alone.
     pub seeded_factory_scene_ids: BTreeSet<String>,
+    /// Short-lived reviews of scene, schedule and lighting settings changes.
+    pub assistant_automation_plans: std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
+    /// Hub-local reviewed lighting changes. Plans expire and are consumed on apply.
+    pub assistant_move_reviews: std::collections::VecDeque<(String, u64)>,
+    pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,
+    pub assistant_light_plans: std::collections::VecDeque<crate::assistant::lighting::LightPlan>,
     /// Ephemeral light scene previews keyed by preview ID.
     pub light_scene_previews: HashMap<String, crate::scenes::LightScenePreviewSession>,
     /// Serializes stored-scene definition changes with projection, dispatch,
@@ -587,6 +593,9 @@ pub struct AppState {
     /// Per-target motion timer snapshots, updated by the main loop.
     /// Keyed by **topology node IDs** (not hub-native IDs).
     pub motion_snapshots: HashMap<String, MotionSnapshot>,
+    /// Short-lived user-requested walk tests and reviewed sensor links.
+    pub assistant_devices: crate::assistant::devices::DeviceSessions,
+    pub assistant_motion: crate::assistant::motion::MotionSessions,
     /// Temporary restored motion timers waiting for startup prefetch to
     /// reconcile source/target IDs. Matched entries are removed by room sync;
     /// unmatched stale entries disappear on the next motion timer persist.
@@ -1073,6 +1082,10 @@ impl Default for AppState {
             light_schedule_write_lock: Arc::new(Mutex::new(())),
             scenes: default_scene_map(),
             seeded_factory_scene_ids: factory_default_scene_ids(),
+            assistant_move_reviews: Default::default(),
+            assistant_transfers: Default::default(),
+            assistant_automation_plans: Default::default(),
+            assistant_light_plans: Default::default(),
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
             motion_scene_transaction_lock: Arc::new(RwLock::new(())),
@@ -1119,6 +1132,8 @@ impl Default for AppState {
             observed_power_resume_refresh_running: false,
             light_usage: crate::light_usage::LightUsageLedger::default(),
             motion_snapshots: HashMap::new(),
+            assistant_devices: Default::default(),
+            assistant_motion: Default::default(),
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             room_schedule_evaluations: HashMap::new(),

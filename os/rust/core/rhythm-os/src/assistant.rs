@@ -13,6 +13,37 @@ use crate::commands::{self, TopologyAssignmentPrecondition};
 use crate::state::{current_epoch_ms, SharedState};
 use crate::topology::DevicePlacement;
 
+pub(crate) mod automation;
+pub mod devices;
+mod information;
+pub(crate) mod lighting;
+pub(crate) mod motion;
+pub(crate) mod portable;
+pub(crate) mod transport;
+
+pub const MCP_PATH: &str = "/api/assistant/mcp";
+pub const OPERATION_PATH: &str = "/api/assistant/operations/:operation_id";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationTier {
+    Read,
+    TemporaryLightOutput,
+    PersistentChange,
+    OwnerOnly,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Handler {
+    Legacy,
+    Motion,
+    Lighting,
+    Information,
+    Portable,
+    Automation,
+    Devices,
+}
+
 pub const LIGHT_ASSISTANT_CONTRACT_PATH: &str = "/api/assistant/contract";
 pub const LIGHT_ASSISTANT_TOPOLOGY_PATH: &str = "/api/assistant/topology";
 pub const LIGHT_ASSISTANT_MOVE_PLAN_PATH: &str = "/api/assistant/plans/device-room-move";
@@ -43,6 +74,11 @@ pub struct LightAssistantContractDto {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LightAssistantOperationDto {
+    #[serde(skip)]
+    handler: Handler,
+    pub tier: OperationTier,
+    pub invocation_path: String,
+    pub location: &'static str,
     pub id: String,
     pub description: String,
     pub method: String,
@@ -282,9 +318,60 @@ fn topology_node_schema() -> Value {
     )
 }
 
-fn operation_registry() -> Vec<LightAssistantOperationDto> {
-    vec![
+fn operation(
+    id: &str,
+    description: &str,
+    tier: OperationTier,
+    input_schema: Value,
+    result_schema: Value,
+) -> LightAssistantOperationDto {
+    let (effect, confirmation, freshness, verification) = match tier {
+        OperationTier::Read => ("read_only", "none", "live_server", "server_response"),
+        OperationTier::TemporaryLightOutput => (
+            "temporary_light_output",
+            "session_probe_permission",
+            "current_target",
+            "command_and_device_evidence",
+        ),
+        OperationTier::PersistentChange => (
+            "persistent_change",
+            "explicit_user_confirmation",
+            "exact_reviewed_plan",
+            "authoritative_readback",
+        ),
+        OperationTier::OwnerOnly => ("handoff", "owner_required", "none", "human_action"),
+    };
+    let path = format!("/api/assistant/operations/{id}");
+    LightAssistantOperationDto {
+        handler: Handler::Legacy,
+        tier,
+        invocation_path: path.clone(),
+        location: "hub",
+        id: id.into(),
+        description: description.into(),
+        method: "POST".into(),
+        path,
+        effect: effect.into(),
+        confirmation: confirmation.into(),
+        freshness_precondition: freshness.into(),
+        verification: verification.into(),
+        physical_confirmation_required: false,
+        input_schema,
+        result_schema,
+    }
+}
+
+pub fn operation_registry() -> &'static [LightAssistantOperationDto] {
+    static REGISTRY: std::sync::OnceLock<Vec<LightAssistantOperationDto>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(build_registry)
+}
+
+fn build_registry() -> Vec<LightAssistantOperationDto> {
+    let mut entries = vec![
         LightAssistantOperationDto {
+            handler: Handler::Legacy, location: "hub", tier: OperationTier::Read,
+            invocation_path: format!("/api/assistant/operations/{OP_GET_TOPOLOGY_SNAPSHOT}"),
             id: OP_GET_TOPOLOGY_SNAPSHOT.to_string(),
             description: "Read the current public room, device, and control topology from the connected Rhythm appliance".to_string(),
             method: "GET".to_string(),
@@ -309,6 +396,8 @@ fn operation_registry() -> Vec<LightAssistantOperationDto> {
             ),
         },
         LightAssistantOperationDto {
+            handler: Handler::Legacy, location: "hub", tier: OperationTier::TemporaryLightOutput,
+            invocation_path: format!("/api/assistant/operations/{OP_IDENTIFY_DEVICE}"),
             id: OP_IDENTIFY_DEVICE.to_string(),
             description: "Briefly flash one canonical light so the user can confirm which physical device is being discussed".to_string(),
             method: "POST".to_string(),
@@ -322,9 +411,11 @@ fn operation_registry() -> Vec<LightAssistantOperationDto> {
                 &["device_id"],
                 json!({"device_id": string_schema("Canonical light device ID from the current topology snapshot")}),
             ),
-            result_schema: object_schema(&[], json!({})),
+            result_schema: object_schema(&["server_acknowledged", "physical_verification"], json!({"server_acknowledged":{"type":"boolean"},"physical_verification":{"const":"ask_resident"}})),
         },
         LightAssistantOperationDto {
+            handler: Handler::Legacy, location: "hub", tier: OperationTier::Read,
+            invocation_path: format!("/api/assistant/operations/{OP_PLAN_MOVE_DEVICE_ROOM}"),
             id: OP_PLAN_MOVE_DEVICE_ROOM.to_string(),
             description: "Prepare a non-mutating reviewed plan to move one canonical device into a Rhythm room".to_string(),
             method: "POST".to_string(),
@@ -362,6 +453,8 @@ fn operation_registry() -> Vec<LightAssistantOperationDto> {
             ),
         },
         LightAssistantOperationDto {
+            handler: Handler::Legacy, location: "hub", tier: OperationTier::PersistentChange,
+            invocation_path: format!("/api/assistant/operations/{OP_APPLY_MOVE_DEVICE_ROOM_PLAN}"),
             id: OP_APPLY_MOVE_DEVICE_ROOM_PLAN.to_string(),
             description: "Apply one explicitly confirmed device-room move while its server, contract, topology, plan, and source-placement preconditions remain current".to_string(),
             method: "POST".to_string(),
@@ -372,8 +465,9 @@ fn operation_registry() -> Vec<LightAssistantOperationDto> {
             verification: "durable_commit_and_canonical_readback".to_string(),
             physical_confirmation_required: false,
             input_schema: object_schema(
-                &["plan_id", "correlation_id", "operation", "contract_sha256", "server_instance_id", "topology_resource_sha256", "device_id", "to_room_id"],
+                &["plan_id", "correlation_id", "operation", "contract_sha256", "server_instance_id", "topology_resource_sha256", "device_id", "to_room_id", "confirmed"],
                 json!({
+                    "confirmed": {"const": true},
                     "plan_id": {"type": "string"},
                     "correlation_id": {"type": "string", "minLength": 1, "maxLength": MAX_CORRELATION_ID_LEN},
                     "operation": {"const": OP_APPLY_MOVE_DEVICE_ROOM_PLAN},
@@ -407,7 +501,21 @@ fn operation_registry() -> Vec<LightAssistantOperationDto> {
                 }),
             ),
         },
-    ]
+    ];
+    for (handler, operations) in [
+        (Handler::Lighting, lighting::operations()),
+        (Handler::Motion, motion::operations()),
+        (Handler::Information, information::operations()),
+        (Handler::Portable, portable::operations()),
+        (Handler::Automation, automation::operations()),
+        (Handler::Devices, devices::operations()),
+    ] {
+        entries.extend(operations.into_iter().map(|mut op| {
+            op.handler = handler;
+            op
+        }));
+    }
+    entries
 }
 
 fn canonical_json_sha256(value: &Value) -> String {
@@ -435,11 +543,15 @@ fn canonical_json_sha256(value: &Value) -> String {
 }
 
 pub fn light_assistant_contract_sha256() -> String {
-    canonical_json_sha256(&json!({
-        "schema_version": LIGHT_ASSISTANT_CONTRACT_SCHEMA_VERSION,
-        "topology_snapshot_path": LIGHT_ASSISTANT_TOPOLOGY_PATH,
-        "operations": operation_registry(),
-    }))
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        canonical_json_sha256(&json!({
+            "schema_version": LIGHT_ASSISTANT_CONTRACT_SCHEMA_VERSION,
+            "topology_snapshot_path": LIGHT_ASSISTANT_TOPOLOGY_PATH,
+            "operations": operation_registry(),
+        }))
+    })
+    .clone()
 }
 
 pub fn build_light_assistant_contract(
@@ -457,7 +569,7 @@ pub fn build_light_assistant_contract(
         contract_sha256: light_assistant_contract_sha256(),
         server_version,
         topology_snapshot_path: LIGHT_ASSISTANT_TOPOLOGY_PATH.to_string(),
-        operations: operation_registry(),
+        operations: operation_registry().to_vec(),
     })
 }
 
@@ -837,7 +949,13 @@ mod tests {
         let contract = build_light_assistant_contract(&state).unwrap();
         assert_eq!(contract.schema_version, 1);
         assert_eq!(contract.contract_sha256.len(), 64);
-        assert_eq!(contract.operations.len(), 4);
+        let ids: std::collections::HashSet<_> =
+            contract.operations.iter().map(|op| &op.id).collect();
+        assert_eq!(
+            ids.len(),
+            contract.operations.len(),
+            "duplicate assistant tool name"
+        );
         let identify = contract
             .operations
             .iter()

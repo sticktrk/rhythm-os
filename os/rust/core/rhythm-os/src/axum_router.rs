@@ -67,6 +67,35 @@ fn shared_routes() -> Router<SharedState> {
         .route("/health", get(health))
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(crate::auth::assistant_oauth::metadata),
+        )
+        .route(
+            "/api/assistant/oauth/authorize",
+            get(crate::auth::assistant_oauth::consent).post(crate::auth::assistant_oauth::approve),
+        )
+        .route(
+            "/api/assistant/oauth/token",
+            post(crate::auth::assistant_oauth::exchange),
+        )
+        .route(
+            "/api/auth/assistant-clients",
+            post(crate::auth::assistant_oauth::register),
+        )
+        .route(
+            "/api/auth/agent-tokens",
+            get(list_agent_tokens).post(issue_agent_token),
+        )
+        .route("/api/auth/agent-tokens/:id", delete(revoke_agent_token))
+        .route(
+            crate::assistant::MCP_PATH,
+            post(crate::assistant::transport::mcp),
+        )
+        .route(
+            crate::assistant::OPERATION_PATH,
+            post(crate::assistant::transport::rest),
+        )
         .route("/api/auth/support-token", post(post_auth_support_token))
         .route(
             "/api/auth/support-session-token",
@@ -354,6 +383,62 @@ async fn post_auth_claim(State(state): State<SharedState>, Json(body): Json<Valu
         .filter(|label| !label.is_empty())
         .map(str::to_string);
     crate::auth::handle_claim_owner_token(&state, label)
+}
+
+async fn list_agent_tokens(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+) -> Response {
+    if !info.is_some_and(|Extension(i)| {
+        i.role == Some(crate::auth::ApiTokenRole::Owner) && !i.via_remote_access
+    }) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(s) = state.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let clients = &s.api_auth.agent_clients;
+    let tokens: Vec<_> = clients
+        .iter()
+        .map(|c| serde_json::json!({"id":c.id,"kind":"home_assistant"}))
+        .chain(
+            s.api_auth
+                .agent_tokens
+                .iter()
+                .filter(|token| !clients.iter().any(|c| c.id == token.id))
+                .map(|token| serde_json::json!({"id":token.id,"kind":"bearer"})),
+        )
+        .collect();
+    (
+        [("cache-control", "no-store")],
+        Json(serde_json::json!({"tokens":tokens})),
+    )
+        .into_response()
+}
+
+async fn issue_agent_token(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+) -> Response {
+    (
+        [("cache-control", "no-store")],
+        run_blocking(move || {
+            crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), None)
+        })
+        .await,
+    )
+        .into_response()
+}
+
+async fn revoke_agent_token(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || {
+        crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), Some(&id))
+    })
+    .await
 }
 
 async fn post_auth_support_token(

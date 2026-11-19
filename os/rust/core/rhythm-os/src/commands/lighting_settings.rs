@@ -197,6 +197,10 @@ pub fn do_lighting_settings_import(
     state: &SharedState,
     payload: LightingSettingsImportPayload,
 ) -> Result<String> {
+    review_lighting_settings_import(state,payload,false,&|_| Ok(()))
+}
+
+pub(crate) fn review_lighting_settings_import(state:&SharedState, payload:LightingSettingsImportPayload, preview:bool, check: ReviewCheck<'_>) -> Result<String> {
     let mut incoming = portable_settings(payload.settings)?;
     let mut warnings: BTreeSet<String> = incoming.warnings.into_iter().collect();
     let mappings = payload.node_mappings;
@@ -248,7 +252,7 @@ pub fn do_lighting_settings_import(
         .collect::<Result<Vec<_>>>()?;
     let _scene_guard = scene_lock.try_lock().map_err(|_| busy())?;
     let _topology_guard = topology_lock.try_lock().map_err(|_| busy())?;
-    let (runtime, mut profiles, mut scenes, mut schedules, mut modes, active_mode, is_ha) = {
+    let (runtime, mut profiles, mut scenes, mut schedules, mut modes, active_mode) = {
         let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             app.hub_runtime(),
@@ -257,7 +261,6 @@ pub fn do_lighting_settings_import(
             app.light_schedules.clone(),
             app.mode_configs(),
             app.active_mode,
-            app.platform_context == "ha_addon",
         )
     };
     anyhow::ensure!(
@@ -444,11 +447,18 @@ pub fn do_lighting_settings_import(
     }
     // No validation failures below this boundary. Keep control paused after HA
     // transfers so review/selection and stopping the old writer happen first.
-    if is_ha {
-        do_light_breaker_set(state, false)?;
-    }
     {
         let mut app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        check(&app)?;
+        if preview {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "mapped_nodes": mappings, "skipped_nodes":incoming.nodes.len()-mappings.len(),
+                "resulting_profiles": profiles, "resulting_scenes":scenes,
+                "resulting_schedules": schedule_configs,"resulting_modes":modes,
+                "pauses_adaptation": app.platform_context == "ha_addon", "warnings":warnings
+            }))?);
+        }
+        pause_for_ha_settings_transfer(&mut app);
         // Global and named schedule modes can advance while the review is
         // validated. Read live modes at commit; source modes are never applied.
         let schedule_configs = schedule_configs

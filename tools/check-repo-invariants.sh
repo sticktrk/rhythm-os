@@ -55,3 +55,5 @@ for guard in check-supabase-single-root.sh check-shared-bluez-ownership.sh check
 done
 python3 tools/ci/check-commissioning-reuse.py
 python3 tools/ci/check-commissioning-reuse.py --self-test
+
+python3 tools/ci/check-assistant-routes.py

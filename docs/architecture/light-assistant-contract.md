@@ -136,3 +136,37 @@ hashes, plan bodies, and free-form errors are forbidden analytics properties.
 Receipts and sanitized logs retain only the opaque plan/correlation IDs,
 operation ID, bounded status, and verification outcome needed to reconstruct a
 field failure.
+
+## Agent connections
+
+The appliance serves stateless MCP Streamable HTTP at `/api/assistant/mcp`.
+Each POST carries a bearer credential issued specifically for the agent by a
+local authenticated owner. The same URL works on the authorized HTTPS tunnel
+and on the HA add-on's mobile listener. The SDK discovers the contract on the
+selected app connection. Staff use the selected hub's audited support proxy.
+
+Home Assistant's MCP Client accepts Streamable HTTP and exposes tools to an
+Assist conversation agent. Its 2026.11 setup accepts an OAuth client ID and
+secret. A plain bearer-header input is absent in this release. Use a scoped
+agent credential for integrations with static bearer support. Keep every
+credential in the transport layer, outside transcripts and tool arguments.
+
+[Home Assistant MCP Client](https://www.home-assistant.io/integrations/mcp/) ·
+[2026.11 client setup](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/mcp/config_flow.py) ·
+[MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+
+A local owner creates a bearer with `POST /api/auth/agent-tokens`, lists
+registrations with `GET /api/auth/agent-tokens`, and revokes one by sending
+`DELETE /api/auth/agent-tokens/{id}`. Revocation applies to the next request,
+including on installations that ordinarily allow local control without a key.
+
+For Home Assistant, create a registration with `POST /api/auth/assistant-clients`.
+In **Settings → Devices & services → Add integration → Model Context Protocol
+Client**, enter the add-on mobile URL ending in `/api/assistant/mcp`. Use the
+HTTPS tunnel when connecting across networks. Enter the issued client ID and
+secret, then paste the activation code on Rhythm's consent screen within ten
+minutes. This flow uses Home Assistant's built-in My Home Assistant redirect.
+Enable the Rhythm tools on the selected conversation agent. The access token
+lasts one hour. Refresh rotates the token, and deleting the registration revokes
+both access and refresh. Agent grants occupy separate fields in the existing
+auth store so an older installation can still read its owner credentials.

@@ -121,6 +121,26 @@ pub struct Update {
     expected_snapshot_revision: Option<String>,
 }
 
+/// Install the same identity-checked selection used by the ordinary panel.
+pub fn install_assistant(state:&SharedState) {
+    use rhythm_os::assistant::devices::{platform_receipt,unsupported_platform,PlatformAction};
+    state.lock().expect("state lock").assistant_devices.platform=Some(std::sync::Arc::new(|state,action|Box::pin(async move {
+        match action {
+            PlatformAction::ReadHaSelection=>{
+                let value=get(State(state)).await.0;
+                let available:Vec<_>=value["available"].as_array().into_iter().flatten().map(|row|json!({
+                    "entity_id":row["entity_id"],"name":row["name"],"reviewable":row["reviewable"]
+                })).collect();
+                Ok(json!({"entities":value["entities"],"available":available,"unresolved":value["unresolved"],"snapshot_revision":value["snapshot_revision"],"ready":value["ready"]}))
+            }
+            PlatformAction::SetHaSelection{entities,expected_entities,expected_revision}=>{
+                platform_receipt(put(State(state),Json(Update{entities,expected_entities,expected_snapshot_revision:Some(expected_revision)})).await).await
+            }
+            _=>Err(unsupported_platform())
+        }
+    })));
+}
+
 fn atomic_write(dir: &Path, name: &str, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write;
     let tmp = dir.join(format!("{name}.tmp"));
