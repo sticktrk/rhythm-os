@@ -249,6 +249,7 @@ fn busy() -> Error {
             .into(),
         retryable: true,
         mutation_may_have_applied: false,
+        trial_id: None,
     }
 }
 

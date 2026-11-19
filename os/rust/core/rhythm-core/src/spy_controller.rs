@@ -53,6 +53,7 @@ pub struct SpyLightController {
     any_lights_on_gate: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
     delays: Mutex<SpyControllerDelays>,
     fail_next_turn_off: Mutex<bool>,
+    fail_next_route: Mutex<Option<String>>,
     turn_on_room_delays: Mutex<HashMap<String, Duration>>,
 }
 
@@ -72,6 +73,7 @@ impl SpyLightController {
             any_lights_on_gate: Mutex::new(None),
             delays: Mutex::new(SpyControllerDelays::default()),
             fail_next_turn_off: Mutex::new(false),
+            fail_next_route: Mutex::new(None),
             turn_on_room_delays: Mutex::new(HashMap::new()),
         }
     }
@@ -84,6 +86,22 @@ impl SpyLightController {
     /// Fail the next Off after recording the attempted command.
     pub fn fail_next_turn_off(&self) {
         *self.fail_next_turn_off.lock().unwrap() = true;
+    }
+
+    /// Fail one recorded output request to the selected route.
+    pub fn fail_next_output_for(&self, id: &str) {
+        *self.fail_next_route.lock().unwrap() = Some(id.to_owned());
+    }
+
+    fn check_route(&self, id: &str) -> LightControlResult<()> {
+        let mut route = self.fail_next_route.lock().unwrap();
+        if route.as_deref() == Some(id) {
+            route.take();
+            return Err(LightControlError::CommandFailed(
+                "synthetic route failure".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Add a blocking delay before `turn_on` returns.
@@ -237,7 +255,7 @@ impl LightController for SpyLightController {
             room_id: room_id.to_string(),
             command,
         });
-        Ok(())
+        self.check_route(room_id)
     }
 
     async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
@@ -252,7 +270,7 @@ impl LightController for SpyLightController {
                 "synthetic Off failure".into(),
             ));
         }
-        Ok(())
+        self.check_route(room_id)
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {

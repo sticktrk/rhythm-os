@@ -91,6 +91,31 @@ impl fmt::Display for UnknownLightingReference {
 }
 impl std::error::Error for UnknownLightingReference {}
 
+#[derive(Debug)]
+pub(crate) struct TrialOutputError {
+    pub(crate) trial_id: String,
+    pub(crate) message: String,
+}
+impl fmt::Display for TrialOutputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (trial {})", self.message, self.trial_id)
+    }
+}
+impl std::error::Error for TrialOutputError {}
+
+#[derive(Debug)]
+struct FailedRestoreRoutes(BTreeSet<String>);
+impl fmt::Display for FailedRestoreRoutes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Restore failed for {}",
+            self.0.iter().cloned().collect::<Vec<_>>().join(", ")
+        )
+    }
+}
+impl std::error::Error for FailedRestoreRoutes {}
+
 pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6056,6 +6081,19 @@ fn do_scene_apply_definition_in_transaction(
         managed_dispatches,
     } = planned;
 
+    if let Some(id) = &preview_id {
+        let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if let Some(preview) = app.light_scene_previews.get(id) {
+            let coverage: BTreeSet<_> = plan
+                .affected_node_ids
+                .iter()
+                .flat_map(|node| light_scene_target_scope_node_ids(&app, &runtime, node))
+                .collect();
+            if coverage != preview.remaining_light_ids {
+                anyhow::bail!("Trial targets changed before output");
+            }
+        }
+    }
     apply_managed_scene_dispatches(
         state,
         &runtime,
@@ -7478,6 +7516,31 @@ fn do_native_scene_apply(
     preview_id: Option<String>,
     commit_state: bool,
 ) -> Result<SceneApplyResponse> {
+    do_native_scene_apply_with_recovery(
+        state,
+        scene_id,
+        request,
+        persist_state,
+        preview_id,
+        commit_state,
+        None,
+        None,
+    )
+}
+
+type BeforeSceneOutput<'a> = &'a dyn Fn(&[String]) -> Result<()>;
+
+#[allow(clippy::too_many_arguments)]
+fn do_native_scene_apply_with_recovery(
+    state: &SharedState,
+    scene_id: &str,
+    request: SceneApplyRequest,
+    persist_state: bool,
+    preview_id: Option<String>,
+    commit_state: bool,
+    before_output: Option<BeforeSceneOutput<'_>>,
+    restore: Option<&LightScenePreviewSession>,
+) -> Result<SceneApplyResponse> {
     let target_id = resolve_node_id(state, &request.target_id);
     let sources = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -7529,20 +7592,53 @@ fn do_native_scene_apply(
         if affected_node_ids.is_empty() {
             affected_node_ids.push(target_id.clone());
         }
-        discovery
-            .recall_scene(external_id, request.transition_ms)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "Failed to recall native scene '{}' on hub {}: {}",
-                    scene_id,
-                    hub_key,
-                    error
-                )
-            })?;
+        if let Some(before) = before_output {
+            before(&affected_node_ids)?;
+        }
+        let native_members: BTreeSet<_> = affected_node_ids
+            .iter()
+            .filter(|id| {
+                !companion_plan
+                    .as_ref()
+                    .is_some_and(|p| p.affected_node_ids.contains(id))
+            })
+            .cloned()
+            .collect();
+        let recall = || {
+            discovery
+                .recall_scene(external_id, request.transition_ms)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Failed to recall native scene '{}' on hub {}: {}",
+                        scene_id,
+                        hub_key,
+                        error
+                    )
+                })
+        };
+        let mut failed = BTreeSet::new();
+        if let Some(restore) = restore {
+            if !native_members.is_disjoint(&restore.remaining_light_ids)
+                && retry_route(restore, &target_id)
+                && recall().is_err()
+            {
+                failed.insert(target_id.clone());
+            }
+        } else {
+            recall()?;
+        }
         let mut unresolved_node_ids = Vec::new();
         if let Some(plan) = companion_plan {
-            dispatch_scene_plan(state, &runtime, &plan, !commit_state)?;
+            if let Some(restore) = restore {
+                restore_light_commands(state, &runtime, restore, &plan.commands, &mut failed);
+            } else {
+                dispatch_scene_plan(state, &runtime, &plan, !commit_state)?;
+            }
             unresolved_node_ids = plan.unresolved_node_ids;
+        }
+
+        if !failed.is_empty() {
+            return Err(FailedRestoreRoutes(failed).into());
         }
 
         if commit_state {
@@ -7661,34 +7757,90 @@ fn build_native_scene_companion_plan_locked(
 
 fn record_scene_preview_session(
     state: &SharedState,
-    preview_id: String,
-    target_id: String,
-    response: &SceneApplyResponse,
+    preview_id: &str,
+    scene_id: &str,
+    target_id: &str,
+    affected: &[String],
     duration_ms: Option<u64>,
     draft_scene: Option<SceneDefinition>,
+    individual: bool,
+    transaction: &std::sync::MutexGuard<'_, ()>,
 ) -> Result<()> {
-    let previous_mood_scene_id = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hub_runtime()
-            .and_then(|runtime| runtime.engine_effective_node_snapshot(&target_id))
-            .and_then(|snap| snap.profile_settings.mood_scene_id)
+    let (coverage, overlapping) = {
+        let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = app
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("Lighting runtime unavailable"))?;
+        let coverage: BTreeSet<String> = affected
+            .iter()
+            .flat_map(|id| light_scene_target_scope_node_ids(&app, &runtime, id))
+            .collect();
+        let overlapping: Vec<_> = app
+            .light_scene_previews
+            .values()
+            .filter(|p| !p.remaining_light_ids.is_disjoint(&coverage))
+            .map(|p| p.id.clone())
+            .collect();
+        (coverage, overlapping)
     };
+    // Retire overlaps before applying the replacement. Restore only lamps that
+    // the replacement leaves behind. Keep the previous token on failed recovery.
+    for id in overlapping {
+        let mut previous = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .light_scene_previews
+            .remove(&id)
+            .expect("serialized preview");
+        let common: BTreeSet<_> = previous
+            .remaining_light_ids
+            .intersection(&coverage)
+            .cloned()
+            .collect();
+        previous
+            .remaining_light_ids
+            .retain(|node| !common.contains(node));
+        if !previous.remaining_light_ids.is_empty() {
+            if let Err(error) = restore_scene_preview(state, &previous, transaction) {
+                previous.remaining_light_ids.extend(common);
+                // The replacement has not started. Keep the old token responsible
+                // for the common lights as well as any unrestored siblings.
+                previous.failed_restore_routes = None;
+                previous.restore_failed_at_epoch_ms = Some(current_epoch_ms());
+                state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .light_scene_previews
+                    .insert(id.clone(), previous);
+                return Err(TrialOutputError {
+                    trial_id: id,
+                    message: error.to_string(),
+                }
+                .into());
+            }
+        }
+    }
     let now = current_epoch_ms();
     let duration_ms = duration_ms
         .unwrap_or(DEFAULT_LIGHT_SCENE_PREVIEW_MS)
         .clamp(1_000, 10 * 60_000);
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    clear_scene_preview_sessions_locked(&mut s, &target_id, &response.affected_node_ids);
-    let rhythm_owned_at_start = s.rhythm_automation_allowed_for_node(&target_id);
+    let previous_mood_scene_id = s
+        .hub_runtime()
+        .and_then(|rt| rt.engine_effective_node_snapshot(target_id))
+        .and_then(|snap| snap.profile_settings.mood_scene_id);
+    let rhythm_owned_at_start = s.rhythm_automation_allowed_for_node(target_id);
     let breaker_enabled_at_start = s.light_breaker_enabled;
     s.light_scene_previews.insert(
-        preview_id.clone(),
+        preview_id.to_owned(),
         LightScenePreviewSession {
-            id: preview_id,
-            scene_id: response.scene_id.clone(),
-            target_node_id: target_id,
-            affected_node_ids: response.affected_node_ids.clone(),
-            assistant_individual_audition: false,
+            id: preview_id.to_owned(),
+            scene_id: scene_id.to_owned(),
+            target_node_id: target_id.to_owned(),
+            affected_node_ids: affected.to_vec(),
+            remaining_light_ids: coverage,
+            failed_restore_routes: None,
+            assistant_individual_audition: individual,
             assistant_time_offset_minutes: None,
             previous_mood_scene_id,
             rhythm_owned_at_start,
@@ -7711,12 +7863,21 @@ pub fn do_scene_preview(
         state,
         SceneApplySource::Stored(scene_id.to_string()),
         request,
+        false,
     )
 }
 
 pub fn do_scene_draft_preview(
     state: &SharedState,
     request: SceneDraftPreviewRequest,
+) -> Result<String> {
+    do_light_target_draft_preview(state, request, false)
+}
+
+pub(crate) fn do_light_target_draft_preview(
+    state: &SharedState,
+    request: SceneDraftPreviewRequest,
+    individual: bool,
 ) -> Result<String> {
     let mut scene = request.scene;
     scene.normalize();
@@ -7728,6 +7889,7 @@ pub fn do_scene_draft_preview(
             duration_ms: request.duration_ms,
             transition_ms: request.transition_ms,
         },
+        individual,
     )
 }
 
@@ -7735,6 +7897,7 @@ fn apply_scene_preview(
     state: &SharedState,
     source: SceneApplySource,
     request: ScenePreviewRequest,
+    individual: bool,
 ) -> Result<String> {
     let gate = state
         .lock()
@@ -7754,16 +7917,63 @@ fn apply_scene_preview(
         SceneApplySource::Definition(scene) => Some(scene.clone()),
         SceneApplySource::Stored(_) => None,
     };
-    let response = match source {
-        SceneApplySource::Stored(id) if is_native_scene_id(&id) => do_native_scene_apply(
+    let scene_id = match &source {
+        SceneApplySource::Stored(id) => id.clone(),
+        SceneApplySource::Definition(scene) => scene.id.clone(),
+    };
+    let register = |affected: &[String]| {
+        record_scene_preview_session(
             state,
-            &id,
+            &preview_id,
+            &scene_id,
+            &target_id,
+            affected,
+            request.duration_ms,
+            draft.clone(),
+            individual,
+            &transaction,
+        )
+    };
+    let result = if is_native_scene_id(&scene_id) && draft.is_none() {
+        do_native_scene_apply_with_recovery(
+            state,
+            &scene_id,
             apply_request,
             false,
             Some(preview_id.clone()),
             false,
-        )?,
-        source => do_scene_apply_definition_in_transaction(
+            Some(&register),
+            None,
+        )
+    } else {
+        // Determine physical coverage before the first controller call. The
+        // scene transaction protects the definition during overlap recovery.
+        let affected = {
+            let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let scene = draft
+                .as_ref()
+                .or_else(|| app.scenes.get(&scene_id))
+                .ok_or_else(|| {
+                    UnknownLightingReference(format!("Scene '{}' not found", scene_id))
+                })?;
+            let runtime = app
+                .hub_runtime()
+                .ok_or_else(|| anyhow::anyhow!("Lighting runtime unavailable"))?;
+            let plan = plan_scene_target_locked(
+                &app,
+                &runtime,
+                scene,
+                &target_id,
+                request.transition_ms,
+                PaletteWindow::default(),
+            )?;
+            if plan.plan.affected_node_ids.is_empty() {
+                anyhow::bail!("Scene has no routable lights");
+            }
+            plan.plan.affected_node_ids
+        };
+        register(&affected)?;
+        do_scene_apply_definition_in_transaction(
             state,
             source,
             apply_request,
@@ -7773,16 +7983,24 @@ fn apply_scene_preview(
             draft.is_some(),
             PaletteWindow::default(),
             &transaction,
-        )?,
+        )
     };
-    record_scene_preview_session(
-        state,
-        preview_id,
-        target_id,
-        &response,
-        request.duration_ms,
-        draft,
-    )?;
+    let response = result.map_err(|error| {
+        if state
+            .lock()
+            .is_ok_and(|s| s.light_scene_previews.contains_key(&preview_id))
+        {
+            TrialOutputError {
+                trial_id: preview_id.clone(),
+                message:
+                    "Trial output may have been partially applied. Use Undo to restore the target."
+                        .into(),
+            }
+            .into()
+        } else {
+            error
+        }
+    })?;
     Ok(serde_json::to_string(&response)?)
 }
 
@@ -7904,6 +8122,9 @@ fn finish_scene_preview(
             // The scene transaction prevents superseding previews or commits from
             // interleaving. Keep the token so a temporary I/O failure can recover.
             let now = current_epoch_ms();
+            if let Some(failed) = error.downcast_ref::<FailedRestoreRoutes>() {
+                preview.failed_restore_routes = Some(failed.0.clone());
+            }
             preview.restore_failed_at_epoch_ms = Some(now);
             preview.expires_at_epoch_ms = preview.expires_at_epoch_ms.min(now);
             state
@@ -7911,7 +8132,11 @@ fn finish_scene_preview(
                 .map_err(|_| anyhow::anyhow!("lock"))?
                 .light_scene_previews
                 .insert(preview.id.clone(), preview);
-            return Err(error);
+            return Err(TrialOutputError {
+                trial_id: preview_id.to_owned(),
+                message: error.to_string(),
+            }
+            .into());
         }
     };
     let restored = restoration == "restore_requested";
@@ -7937,7 +8162,7 @@ fn finish_scene_preview(
 fn restore_scene_preview(
     state: &SharedState,
     preview: &LightScenePreviewSession,
-    transaction: &std::sync::MutexGuard<'_, ()>,
+    _transaction: &std::sync::MutexGuard<'_, ()>,
 ) -> Result<&'static str> {
     let runtime = {
         let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -7970,25 +8195,133 @@ fn restore_scene_preview(
             transition_ms: None,
         };
         if is_native_scene_id(scene_id) {
-            do_native_scene_apply(state, scene_id, request, false, None, false)?;
-        } else {
-            do_scene_apply_definition_in_transaction(
+            do_native_scene_apply_with_recovery(
                 state,
-                SceneApplySource::Stored(scene_id.clone()),
+                scene_id,
                 request,
                 false,
+                None,
                 false,
-                Some(preview.id.clone()),
-                false,
-                stored_mood_palette_window(&runtime, &room.id),
-                transaction,
+                None,
+                Some(preview),
             )?;
+        } else {
+            let gate = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .external_topology_transaction_lock
+                .clone();
+            let topology = gate.lock().map_err(|_| anyhow::anyhow!("topology lock"))?;
+            let planned = {
+                let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                let scene = s
+                    .scenes
+                    .get(scene_id)
+                    .ok_or_else(|| anyhow::anyhow!("Bound scene unavailable"))?;
+                plan_scene_target_locked(
+                    &s,
+                    &runtime,
+                    scene,
+                    &room.id,
+                    None,
+                    stored_mood_palette_window(&runtime, &room.id),
+                )?
+            };
+            let mut failed = BTreeSet::new();
+            for managed in &planned.managed_dispatches {
+                let ids: Vec<_> = managed
+                    .projected_states
+                    .iter()
+                    .map(|(id, _)| id)
+                    .filter(|id| {
+                        preview.remaining_light_ids.contains(*id) && retry_route(preview, id)
+                    })
+                    .collect();
+                if !ids.is_empty()
+                    && apply_managed_scene_dispatches(
+                        state,
+                        &runtime,
+                        std::slice::from_ref(managed),
+                        false,
+                        Duration::ZERO,
+                        &mut false,
+                    )
+                    .is_err()
+                {
+                    failed.extend(ids.into_iter().cloned());
+                }
+            }
+            drop(topology);
+            let commands =
+                split_grouped_restore_commands(state, &runtime, preview, &planned.plan.commands)?;
+            restore_light_commands(state, &runtime, preview, &commands, &mut failed);
+            if !failed.is_empty() {
+                return Err(FailedRestoreRoutes(failed).into());
+            }
         }
     } else {
-        restore_preview_output(state, &runtime, &room)?;
+        restore_preview_output(state, &runtime, &room, preview)?;
     }
     emit_node_state_event_after_apply(state, &runtime, &room.id);
     Ok("restore_requested")
+}
+
+fn retry_route(preview: &LightScenePreviewSession, id: &str) -> bool {
+    preview
+        .failed_restore_routes
+        .as_ref()
+        .is_none_or(|routes| routes.contains(id))
+}
+
+fn restore_light_commands(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    preview: &LightScenePreviewSession,
+    commands: &[SceneLightCommand],
+    failed: &mut BTreeSet<String>,
+) {
+    for command in commands {
+        if retry_route(preview, &command.dispatch_node_id)
+            && (command.public_node_id == preview.target_node_id
+                || preview
+                    .remaining_light_ids
+                    .contains(&command.public_node_id))
+            && dispatch_scene_light_command(state, runtime, command, true).is_err()
+        {
+            failed.insert(command.dispatch_node_id.clone());
+        }
+    }
+}
+
+// A grouped command can only be reused when the complete room is still owned
+// by this trial. Direct siblings can be restored individually on supersession.
+fn split_grouped_restore_commands(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    preview: &LightScenePreviewSession,
+    commands: &[SceneLightCommand],
+) -> Result<Vec<SceneLightCommand>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let full = light_scene_target_scope_node_ids(&s, runtime, &preview.target_node_id);
+    Ok(commands
+        .iter()
+        .flat_map(|cmd| {
+            if cmd.dispatch_node_id == preview.target_node_id && full != preview.remaining_light_ids
+            {
+                preview
+                    .remaining_light_ids
+                    .intersection(&full)
+                    .map(|id| SceneLightCommand {
+                        public_node_id: id.clone(),
+                        dispatch_node_id: id.clone(),
+                        dispatch: cmd.dispatch.clone(),
+                    })
+                    .collect()
+            } else {
+                vec![cmd.clone()]
+            }
+        })
+        .collect())
 }
 
 /// Re-render the current preferences for each route without treating an ended
@@ -7997,10 +8330,27 @@ fn restore_preview_output(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     target: &rhythm_core::NodeSnapshot,
+    preview: &LightScenePreviewSession,
 ) -> Result<()> {
     let commands = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let routes = if target.kind.is_room() {
+        let partial_room = target.kind.is_room()
+            && light_scene_target_scope_node_ids(&s, runtime, &target.id)
+                != preview.remaining_light_ids;
+        let routes_by_id = (partial_room && s.composite_controller.is_some())
+            .then(|| s.topology.composite_routing(&s.canonical_registry));
+        let routes = if target.kind.is_room()
+            && s.composite_controller.is_none()
+            && (!preview.affected_node_ids.contains(&target.id) || partial_room)
+        {
+            preview
+                .remaining_light_ids
+                .iter()
+                .filter_map(|id| runtime.engine_effective_node_snapshot(id))
+                .filter(|snap| snap.parent_id.as_ref() == Some(&target.id))
+                .filter_map(|snap| crate::periodic::preview_dispatch_node_for_target(&snap))
+                .collect()
+        } else if target.kind.is_room() {
             crate::periodic::periodic_dispatch_nodes_from_state(&s, std::slice::from_ref(target))
         } else {
             crate::periodic::preview_dispatch_node_for_target(target)
@@ -8033,6 +8383,18 @@ fn restore_preview_output(
             .into_iter()
             .filter_map(|route| {
                 let snap = runtime.engine_effective_node_snapshot(&route.settings_node_id)?;
+                if let Some(table) = &routes_by_id {
+                    if snap.id == target.id
+                        && !table.get(&route.node_id).is_some_and(|group| {
+                            preview
+                                .remaining_light_ids
+                                .iter()
+                                .any(|id| table.get(id) == Some(group))
+                        })
+                    {
+                        return None;
+                    }
+                }
                 if !snap.rhythm_enabled
                     || snap.disabled
                     || !s.rhythm_automation_allowed_for_node(&snap.id)
@@ -8070,8 +8432,10 @@ fn restore_preview_output(
             })
             .collect::<Vec<_>>()
     };
-    for command in &commands {
-        dispatch_scene_light_command(state, runtime, command, true)?;
+    let mut failed = BTreeSet::new();
+    restore_light_commands(state, runtime, preview, &commands, &mut failed);
+    if !failed.is_empty() {
+        return Err(FailedRestoreRoutes(failed).into());
     }
     Ok(())
 }

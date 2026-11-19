@@ -41,6 +41,7 @@ async fn execute(
             message: "This hub does not advertise that operation".into(),
             retryable: false,
             mutation_may_have_applied: false,
+            trial_id: None,
         })?;
     let fields = args.as_object().ok_or_else(invalid_args)?;
     if op.tier == OperationTier::OwnerOnly {
@@ -50,6 +51,7 @@ async fn execute(
             message: "Hand this operation to the owner".into(),
             retryable: false,
             mutation_may_have_applied: false,
+            trial_id: None,
         });
     }
     if op.tier == OperationTier::PersistentChange
@@ -97,6 +99,7 @@ async fn execute(
         message: "Reread the affected resource before trying again".into(),
         retryable: false,
         mutation_may_have_applied: op.tier != OperationTier::Read,
+        trial_id: None,
     })??;
     if op.tier == OperationTier::Read && result["plan_id"].is_string() {
         let target = match op.id.as_str() {
@@ -146,6 +149,7 @@ fn identify_error(error: anyhow::Error) -> LightAssistantError {
             message: "The hub could not verify the Identify response. Ask the resident whether the light flashed before trying again.".into(),
             retryable: false,
             mutation_may_have_applied: true,
+            trial_id: None,
         },
     }
 }

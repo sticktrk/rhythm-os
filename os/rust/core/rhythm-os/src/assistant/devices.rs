@@ -893,6 +893,7 @@ fn changed(message: &str) -> Error {
         message: message.into(),
         retryable: false,
         mutation_may_have_applied: true,
+        trial_id: None,
     }
 }
 fn result_body(response: handlers::ApiResponse) -> Result<Value> {
@@ -1310,6 +1311,7 @@ pub async fn platform_receipt(response: axum::response::Response) -> Result<Valu
                 message: "Check this hub's status before repeating the platform operation.".into(),
                 retryable: false,
                 mutation_may_have_applied: status.is_server_error(),
+                trial_id: None,
             }
         });
     }

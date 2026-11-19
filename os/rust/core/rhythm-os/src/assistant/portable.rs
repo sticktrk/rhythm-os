@@ -382,6 +382,7 @@ fn apply(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     .into(),
                 retryable: false,
                 mutation_may_have_applied: true,
+                trial_id: None,
             }
         }
     })?;

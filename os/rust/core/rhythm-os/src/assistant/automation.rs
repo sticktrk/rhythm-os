@@ -768,6 +768,7 @@ pub(super) fn call(state: &SharedState, id: &str, args: Value) -> Result<Value> 
                     .into(),
             retryable: false,
             mutation_may_have_applied: true,
+            trial_id: None,
         }
     })?;
     let after = plan.edit.snapshot(&*state.lock().map_err(|_| {

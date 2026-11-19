@@ -185,6 +185,8 @@ pub struct LightAssistantErrorDto {
     pub message: String,
     pub retryable: bool,
     pub mutation_may_have_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -194,6 +196,7 @@ pub struct LightAssistantError {
     pub message: String,
     pub retryable: bool,
     pub mutation_may_have_applied: bool,
+    pub trial_id: Option<String>,
 }
 
 impl LightAssistantError {
@@ -204,6 +207,7 @@ impl LightAssistantError {
             message: message.into(),
             retryable: false,
             mutation_may_have_applied: false,
+            trial_id: None,
         }
     }
 
@@ -214,6 +218,7 @@ impl LightAssistantError {
             message: message.into(),
             retryable: true,
             mutation_may_have_applied: false,
+            trial_id: None,
         }
     }
 
@@ -224,6 +229,7 @@ impl LightAssistantError {
             message: message.into(),
             retryable: false,
             mutation_may_have_applied: false,
+            trial_id: None,
         }
     }
 
@@ -234,6 +240,7 @@ impl LightAssistantError {
             message: "The move may have applied, but canonical readback could not verify it; refresh topology before retrying".to_string(),
             retryable: false,
             mutation_may_have_applied: true,
+            trial_id: None,
         }
     }
 
@@ -244,6 +251,7 @@ impl LightAssistantError {
                 message: self.message.clone(),
                 retryable: self.retryable,
                 mutation_may_have_applied: self.mutation_may_have_applied,
+                trial_id: self.trial_id.clone(),
             },
         }
     }
@@ -465,7 +473,7 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
                 &["plan_id", "contract_sha256", "server_instance_id", "topology_resource_sha256", "device", "to_room", "requires_confirmation"],
                 json!({
                     "schema_version": {"type": "integer"},
-                    "plan_id": string_schema("Content identity of the reviewed move plan"),
+                    "plan_id": string_schema("Credential-bound identifier of the reviewed move plan"),
                     "correlation_id": {"type": "string"},
                     "operation": {"const": OP_APPLY_MOVE_DEVICE_ROOM_PLAN},
                     "contract_sha256": {"type": "string"},
@@ -777,6 +785,7 @@ fn map_guarded_move_error(error: anyhow::Error) -> LightAssistantError {
             message: "Rhythm could not confirm the reviewed move outcome; refresh topology before taking another action".to_string(),
             retryable: false,
             mutation_may_have_applied: true,
+            trial_id: None,
         };
     }
     let message = error.to_string();
@@ -809,6 +818,7 @@ fn map_guarded_move_error(error: anyhow::Error) -> LightAssistantError {
         message: "Rhythm could not confirm the reviewed move outcome; refresh topology before taking another action".to_string(),
         retryable: false,
         mutation_may_have_applied: true,
+        trial_id: None,
     }
 }
 

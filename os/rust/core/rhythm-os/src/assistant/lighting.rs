@@ -56,10 +56,17 @@ fn uncertain() -> Error {
         message: "Read room and device state before repeating this operation.".into(),
         retryable: false,
         mutation_may_have_applied: true,
+        trial_id: None,
     }
 }
 fn dispatch_error(error: anyhow::Error) -> Error {
-    if error.is::<commands::UnknownLightingReference>() {
+    if let Some(trial) = error.downcast_ref::<commands::TrialOutputError>() {
+        Error {
+            trial_id: Some(trial.trial_id.clone()),
+            message: trial.message.clone(),
+            ..uncertain()
+        }
+    } else if error.is::<commands::UnknownLightingReference>() {
         invalid(error.to_string())
     } else {
         uncertain()
@@ -889,14 +896,14 @@ fn preview_light_output(
             ));
         }
     }
-    if id == "preview_room_scene_draft" {
+    if matches!(id, "preview_room_scene_draft" | "audition_light") {
         let scene: crate::scenes::SceneDefinition =
             serde_json::from_value(args["scene"].clone())
                 .map_err(|_| invalid("Expected a Rhythm scene definition."))?;
         if scene.light.is_none() || crate::scenes::is_native_scene_id(&scene.id) {
             return Err(invalid("Select an editable light scene."));
         }
-        return commands::do_scene_draft_preview(
+        return commands::do_light_target_draft_preview(
             state,
             SceneDraftPreviewRequest {
                 target_id: room.id.clone(),
@@ -904,8 +911,9 @@ fn preview_light_output(
                 transition_ms: None,
                 duration_ms: Some(60_000),
             },
+            id == "audition_light",
         )
-        .map_err(|_| uncertain());
+        .map_err(dispatch_error);
     }
     if matches!(id, "apply_room_scene" | "preview_room_scene") {
         let scene_id = string(args, "scene_id")?;
@@ -990,7 +998,7 @@ fn preview_light_output(
             }),
         },
     };
-    commands::do_scene_draft_preview(state, request).map_err(|_| uncertain())
+    commands::do_scene_draft_preview(state, request).map_err(dispatch_error)
 }
 
 fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
@@ -1028,21 +1036,13 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                 }
                 output.to_command(None).map_err(invalid)?;
                 let scene = json!({"id":format!("trial-{}",uuid::Uuid::new_v4()),"name":"Single light trial","light":{"default_output":output}});
-                let raw = preview_light_output(
-                    state,
-                    "preview_room_scene_draft",
-                    &light,
-                    &json!({"scene":scene}),
-                )?;
+                let raw =
+                    preview_light_output(state, "audition_light", &light, &json!({"scene":scene}))?;
                 let result: SceneApplyResponse =
                     serde_json::from_str(&raw).map_err(|_| uncertain())?;
                 let trial = result.preview_id.ok_or_else(uncertain)?;
-                let mut app = lock(state)?;
-                let live = app
-                    .light_scene_previews
-                    .get_mut(&trial)
-                    .ok_or_else(uncertain)?;
-                live.assistant_individual_audition = true;
+                let app = lock(state)?;
+                let live = app.light_scene_previews.get(&trial).ok_or_else(uncertain)?;
                 receipt["trial_id"] = json!(trial);
                 receipt["expires_at_epoch_ms"] = json!(live.expires_at_epoch_ms);
                 receipt["status"] = json!("trial");
@@ -1059,7 +1059,7 @@ fn run(state: &SharedState, id: &str, args: &Value) -> Result<Value> {
                     return Err(stale());
                 }
                 let raw =
-                    commands::do_scene_preview_cancel(state, &trial).map_err(|_| uncertain())?;
+                    commands::do_scene_preview_cancel(state, &trial).map_err(dispatch_error)?;
                 let result: Value = serde_json::from_str(&raw).map_err(|_| uncertain())?;
                 receipt["status"] = result["restoration"].clone();
                 receipt["restoration"] = result["restoration"].clone();

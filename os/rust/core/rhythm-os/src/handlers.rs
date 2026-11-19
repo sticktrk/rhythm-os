@@ -4891,50 +4891,6 @@ pub fn handle_get_assistant_topology(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_post_assistant_move_plan(state: &SharedState, body: &Value) -> ApiResponse {
-    let request = match serde_json::from_value(body.clone()) {
-        Ok(request) => request,
-        Err(_) => {
-            return assistant_error_response(crate::assistant::LightAssistantError {
-                status: 400,
-                code: "invalid_request",
-                message: "The move plan request does not match the advertised contract".to_string(),
-                retryable: false,
-                mutation_may_have_applied: false,
-            })
-        }
-    };
-    match crate::assistant::plan_light_assistant_device_room_move(state, request) {
-        Ok(plan) => assistant_json_response(&plan),
-        Err(error) => assistant_error_response(error),
-    }
-}
-
-pub fn handle_post_assistant_move_apply(state: &SharedState, body: &Value) -> ApiResponse {
-    let mut body = body.clone();
-    if let Some(confirmed) = body.as_object_mut().and_then(|m| m.remove("confirmed")) {
-        if confirmed != Value::Bool(true) {
-            return ApiResponse::bad_request("Confirmation required");
-        }
-    }
-    let request = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(_) => {
-            return assistant_error_response(crate::assistant::LightAssistantError {
-                status: 400,
-                code: "invalid_request",
-                message: "The apply request does not match the advertised contract".to_string(),
-                retryable: false,
-                mutation_may_have_applied: false,
-            })
-        }
-    };
-    match crate::assistant::apply_light_assistant_device_room_move(state, request) {
-        Ok(receipt) => assistant_json_response(&receipt),
-        Err(error) => assistant_error_response(error),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Triage handlers
 // ---------------------------------------------------------------------------

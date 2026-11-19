@@ -512,6 +512,12 @@ pub struct LightScenePreviewSession {
     pub scene_id: String,
     pub target_node_id: String,
     pub affected_node_ids: Vec<String>,
+    /// Physical light coverage, including members reached by a room command.
+    #[serde(skip)]
+    pub remaining_light_ids: std::collections::BTreeSet<String>,
+    /// An explicit Undo after a partial restore retries only these dispatch routes.
+    #[serde(skip)]
+    pub failed_restore_routes: Option<std::collections::BTreeSet<String>>,
     /// A single-lamp audition may only reconcile through its independent device route.
     #[serde(skip)]
     pub assistant_individual_audition: bool,

@@ -1003,3 +1003,94 @@ async fn live_offset_audition_can_be_absorbed_and_an_ended_audition_cannot_be_sa
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_room_trials_restore_every_route_and_supersede_shared_lamps() {
+    let (h, spy) = TestHarness::with_spy_controller();
+    let (rooms, devices) = rooms_with_lights(&[("one", "One"), ("two", "Two"), ("three", "Three")]);
+    let h = h.with_discovery(rooms, devices);
+    h.sync();
+    let (room, mut lamps) = {
+        let mut app = h.state.lock().unwrap();
+        let room = app.topology.create_room("Reading");
+        let lamps = ["light-one", "light-two", "light-three"].map(|id| {
+            app.canonical_registry
+                .find_by_native_id(&h.hub_key, id)
+                .unwrap()
+                .id
+                .clone()
+        });
+        (room, lamps)
+    };
+    lamps.sort();
+    for lamp in &lamps {
+        rhythm_os::commands::do_canonical_assign_room(&h.state, lamp, Some(&room)).unwrap();
+    }
+    let rt = h.state.lock().unwrap().hub_runtime().unwrap();
+    rt.lights_off_room(&room, None).unwrap();
+    for lamp in &lamps {
+        rt.lights_off_room(lamp, None).unwrap();
+    }
+    let output = json!({"brightness":33,"color":{"kind":"kelvin","kelvin":2400}});
+    let entries = lamps
+        .iter()
+        .map(|id| json!({"target":{"kind":"node","node_id":id},"output":output}))
+        .collect::<Vec<_>>();
+    let draft =
+        json!({"room_id":room,"scene":{"id":"lamps","name":"Lamps","light":{"entries":entries}}});
+    spy.reset();
+    spy.fail_next_output_for(&lamps[1]);
+    let (status, failure) = operation(&h, "preview_room_scene_draft", draft.clone()).await;
+    assert_eq!(status, 503, "{failure}");
+    assert_eq!(spy.turn_on_calls().len(), 2);
+    let trial = failure["error"]["trial_id"].as_str().unwrap();
+    let args = json!({"room_id":room,"trial_id":trial});
+    spy.reset();
+    spy.fail_next_output_for(&lamps[1]);
+    let (status, failed) = operation(&h, "undo_room_trial", args.clone()).await;
+    assert_eq!(status, 503, "{failed}");
+    assert!(failed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&lamps[1]));
+    assert_eq!(spy.turn_off_calls(), lamps);
+    spy.reset();
+    assert_eq!(operation(&h, "undo_room_trial", args).await.0, 200);
+    assert_eq!(spy.turn_off_calls(), [lamps[1].clone()]);
+    let (status, first) = operation(
+        &h,
+        "set_room_color",
+        json!({"room_id":room,"red":20,"green":40,"blue":180}),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    spy.reset();
+    let (status, second) = operation(
+        &h,
+        "audition_light",
+        json!({"light_id":lamps[1],"output":output}),
+    )
+    .await;
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(spy.turn_off_calls(), [lamps[0].clone(), lamps[2].clone()]);
+    assert_eq!(
+        operation(
+            &h,
+            "undo_room_trial",
+            json!({"room_id":room,"trial_id":first["trial_id"]})
+        )
+        .await
+        .0,
+        409
+    );
+    assert_eq!(
+        operation(
+            &h,
+            "audition_light",
+            json!({"light_id":lamps[1],"trial_id":second["trial_id"]})
+        )
+        .await
+        .0,
+        200
+    );
+}
