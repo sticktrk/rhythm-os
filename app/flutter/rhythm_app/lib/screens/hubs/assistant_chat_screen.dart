@@ -91,7 +91,7 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
   _Args _lightArguments = {};
   bool _phoneSetup = false;
   String _lightOperation = '';
-  int? _trialMinutes;
+  num? _trialMinutes;
 
   bool get _active => mounted && widget.isCurrentTarget();
   Iterable<RhythmTopologyNode> get _rooms => _nodes.where((n) => n.isRoom);
@@ -278,6 +278,11 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
             _lightPlan = null;
             final result =
                 await _call(_lightApply!, {'plan_id': plan, 'confirmed': true});
+            if (_lightApply == 'apply_absorb_offset' &&
+                result['canonical_readback_verified'] == true) {
+              _trial = null;
+              _trialMinutes = null;
+            }
             _say(result['canonical_readback_verified'] == true
                 ? 'The hub verified the saved change.'
                 : 'Read the profile again to verify the saved change.');
@@ -392,10 +397,13 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
     if (current.containsKey('active_trial')) {
       final active = current['active_trial'];
       final id = active is Map ? active['trial_id'] : null;
-      if (id is String && (id != _trial || _room!.id != _trialRoom)) {
+      if (id is String && active is Map) {
+        final sameTrial = id == _trial && _room!.id == _trialRoom;
+        _trialMinutes = active.containsKey('offset_minutes')
+            ? active['offset_minutes'] as num?
+            : (sameTrial ? _trialMinutes : null);
         _trial = id;
         _trialRoom = _room!.id;
-        _trialMinutes = null;
       } else if (id == null && _trialRoom == _room!.id) {
         _trial = null;
         _trialMinutes = null;

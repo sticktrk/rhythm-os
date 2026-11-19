@@ -3,6 +3,7 @@
 import csv
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,9 +13,9 @@ TOKEN = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\w+|[^\s]')
 PAIRS = {"(": ")", "{": "}", "[": "]"}
 
 
-def routes():
+def routes(root=ROOT):
     constants = {}
-    files = list((ROOT / "os/rust").rglob("src/**/*.rs"))
+    files = list((root / "os/rust").rglob("src/**/*.rs"))
     for file in files:
         constants.update(re.findall(r'const\s+(\w+):\s*&str\s*=\s*"(/[^"]*)"', file.read_text()))
     found = set()
@@ -22,10 +23,11 @@ def routes():
         if file.name == "tests.rs" or "tests" in file.parts:
             continue
         source = file.read_text().split("#[cfg(test)]\nmod tests")[0]
-        if ".route" not in source:
-            continue
         tokens = [t for t in TOKEN.findall(source) if not t.startswith(("//", "/*"))]
-        for start in range(len(tokens) - 4):
+        for start in range(len(tokens) - 3):
+            if (tokens[start] == "." and tokens[start + 2] == "("
+                and tokens[start + 1] in {"nest", "nest_service", "route_service", "fallback", "fallback_service", "method_not_allowed_fallback"}):
+                raise ValueError(f"Classify the router registration {tokens[start + 1]} in {file}")
             if tokens[start:start+3] != [".", "route", "("]:
                 continue
             scoped = next(i for i in range(start+3, len(tokens)) if tokens[i] == ",")
@@ -47,12 +49,31 @@ def routes():
                     stack.pop()
             if not verbs:
                 raise ValueError(f"Unresolved method for {path} in {file}")
-            surface = "shared" if "rhythm-os" in file.relative_to(ROOT).parts else file.relative_to(ROOT).parts[3]
+            surface = "shared" if "rhythm-os" in file.relative_to(root).parts else file.relative_to(root).parts[3]
             found.update((surface, verb, path) for verb in verbs)
     return found
 
 
+def check_new_routes():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "os/rust/bins/new-hub/src/router.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text('Router::new().\nroute("/example", get(read).post(write))')
+        if routes(root) != {("new-hub", "GET", "/example"), ("new-hub", "POST", "/example")}:
+            raise ValueError("Coverage scanner did not detect a new route and both methods")
+        source.write_text('Router::new().nest_service("/example", service)')
+        try:
+            routes(root)
+        except ValueError as error:
+            if "nest_service" in str(error):
+                return
+            raise
+        raise ValueError("Coverage scanner silently skipped a nested service")
+
+
 def main():
+    check_new_routes()
     actual = routes()
     with LEDGER.open() as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
