@@ -30,7 +30,7 @@ rhythm-server	GET	/api/diag/logs	handoff	Staff diagnostic workflow checks the su
 rhythm-server	GET	/api/diag/logs/:source/stream	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
 rhythm-server	GET	/api/diag/logs/:source/tail	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
 rhythm-server	POST	/api/diag/reset-matter-fabric	handoff	Owner reviews installation backup, destructive reset and recovery.
-rhythm-server	GET	/api/discover	operation	read_hub_status
+rhythm-server	GET	/api/discover	handoff	The resident selects a nearby hub in the app before starting the hub-scoped conversation.
 rhythm-server	GET	/api/ota/capabilities	operation	check_hub_update
 rhythm-server	GET	/api/ota/check	operation	check_hub_update
 rhythm-server	GET	/api/ota/status	operation	read_appliance_update_status
@@ -77,14 +77,14 @@ shared	PUT	/api/device-attention/:id/still-installed	operation	plan_device_revie
 shared	DELETE	/api/devices	operation	plan_remove_device
 shared	GET	/api/devices/canonical	operation	get_topology_snapshot
 shared	DELETE	/api/devices/canonical/:id	handoff	Owner reviews archived identity before permanent deletion.
-shared	GET	/api/devices/canonical/:id	operation	get_topology_snapshot
+shared	GET	/api/devices/canonical/:id	operation	read_device_connections
 shared	PUT	/api/devices/canonical/:id	operation	plan_rename_device
 shared	POST	/api/devices/canonical/:id/flash	operation	identify_device
 shared	PUT	/api/devices/canonical/:id/parent	operation	plan_move_device_room
-shared	PUT	/api/devices/canonical/:id/preferred	handoff	Owner reviews the preferred native control endpoint.
-shared	PUT	/api/devices/canonical/:id/room	operation	plan_move_device_room
+shared	PUT	/api/devices/canonical/:id/preferred	operation	plan_preferred_endpoint
+shared	PUT	/api/devices/canonical/:id/room	operation	plan_unassign_device
 shared	POST	/api/devices/pair	operation	plan_nearby_hue_lights
-shared	DELETE	/api/devices/pair/:session_id	operation	guide_device_setup
+shared	DELETE	/api/devices/pair/:session_id	handoff	The resident cancels the matching commissioning session on the phone used for setup.
 shared	GET	/api/devices/pair/:session_id	operation	read_pairing_result
 shared	GET	/api/devices/removed	handoff	Owner reviews archived identity before permanent deletion.
 shared	POST	/api/devices/unpair	operation	plan_remove_device
@@ -95,7 +95,7 @@ shared	DELETE	/api/hub/credentials	handoff	Owner supplies or revokes the integra
 shared	PUT	/api/hub/credentials	handoff	Owner supplies or revokes the integration credential.
 shared	POST	/api/hub/retry	operation	plan_bridge_retry
 shared	GET	/api/hue/authority	operation	read_integrations
-shared	PUT	/api/hue/authority	handoff	Owner reviews changes to bridge automation and topology ownership.
+shared	PUT	/api/hue/authority	operation	plan_hue_authority
 shared	GET	/api/input-bindings	operation	read_automation_settings
 shared	POST	/api/input-bindings	operation	plan_input_binding_edit
 shared	DELETE	/api/input-bindings/:id	operation	plan_input_binding_edit
@@ -172,7 +172,7 @@ shared	PUT	/api/share-bundle	operation	plan_lighting_transfer
 shared	GET	/api/share-bundle/factory-default	operation	read_factory_profiles
 shared	POST	/api/share-bundle/reset	operation	plan_profile_bundle_reset
 shared	GET	/api/state	operation	read_lighting_state
-shared	POST	/api/sync	operation	plan_bridge_retry
+shared	POST	/api/sync	operation	plan_discovery_sync
 shared	GET	/api/topology/nodes	operation	get_topology_snapshot
 shared	PUT	/api/topology/nodes/:id/controls/:kind	operation	plan_control_targets
 shared	GET	/api/topology/rooms	operation	get_topology_snapshot
@@ -189,6 +189,6 @@ shared	PUT	/api/triage/:id/bind	operation	plan_device_review
 shared	PUT	/api/triage/:id/dismiss	operation	plan_device_review
 shared	PUT	/api/triage/:id/merge	operation	plan_device_review
 shared	PUT	/api/triage/:id/new	operation	plan_device_review
-shared	PUT	/api/triage/:id/room	operation	plan_device_review
+shared	PUT	/api/triage/:id/room	operation	plan_move_device_room
 shared	GET	/api/triage/count	operation	read_device_review
 shared	GET	/health	operation	read_hub_status

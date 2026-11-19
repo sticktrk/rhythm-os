@@ -2382,6 +2382,7 @@ impl RoomTopologyStore {
             }
         };
         absorb(hub_key.to_string().as_bytes());
+        absorb(&[u8::from(self.external_room_topology_sync_is_enabled(hub_key))]);
         for (room_id, name, owner) in self.external_automation_rooms_for_hub(hub_key) {
             absorb(room_id.as_bytes());
             absorb(&[0]);
