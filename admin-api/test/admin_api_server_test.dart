@@ -840,6 +840,8 @@ void main() {
       expect(
           request.headers['Authorization'], 'Bearer synthetic-short-session');
       if (path == '/api/state') {
+        expect(request.url.queryParameters['include'], 'base');
+        expect(request.followRedirects, isFalse);
         return _jsonResponse(
             {'server_instance_id': liveHub, 'version': '1', 'nodes': []});
       }
@@ -847,7 +849,8 @@ void main() {
       return _jsonResponse({'status': 'ok'});
     });
     final server = _testServer(client: client);
-    Future<int> proxy(String method, String path) async {
+    Future<int> proxy(String method, String path,
+        {String? expected = 'srv-test'}) async {
       final response = await server.handler(Request('POST',
           Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
           headers: {
@@ -857,15 +860,22 @@ void main() {
           body: jsonEncode({
             'method': method,
             'path': path,
-            'expectedServerInstanceId': 'srv-test',
+            if (expected != null) 'expectedServerInstanceId': expected,
             'requestId': 'assistant-test-1',
             'body': {'confirmed': true}
           })));
       return response.statusCode;
     }
 
+    const contract = 'api/assistant/contract';
     const plan = 'api/assistant/operations/plan_motion_target';
     const apply = 'api/assistant/operations/apply_motion_target';
+    expect(await proxy('GET', contract, expected: null), 200);
+    liveHub = 'replacement';
+    expect(await proxy('GET', contract, expected: null), 409);
+    expect(await proxy('POST', plan), 409);
+    liveHub = 'srv-test';
+    expect(await proxy('POST', plan, expected: 'previous-installation'), 409);
     expect(await proxy('POST', plan), 200);
     expect(await proxy('POST', 'api/assistant/plans/device-room-move'), 200);
     expect(await proxy('POST', apply), 403);
@@ -889,8 +899,12 @@ void main() {
     ]) {
       expect(await proxy('POST', path), 400);
     }
-    expect(
-        calls, ['/$plan', '/api/assistant/plans/device-room-move', '/$apply']);
+    expect(calls, [
+      '/$contract',
+      '/$plan',
+      '/api/assistant/plans/device-room-move',
+      '/$apply'
+    ]);
   });
 
   test('device config hashes match the shared numeric contract', () async {

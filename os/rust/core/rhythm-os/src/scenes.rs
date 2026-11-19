@@ -513,8 +513,17 @@ pub struct LightScenePreviewSession {
     pub target_node_id: String,
     pub affected_node_ids: Vec<String>,
     pub previous_mood_scene_id: Option<String>,
+    /// Scope of the explicit audition. Losing Rhythm authority or opening the
+    /// breaker during a trial supersedes its pending restoration.
+    #[serde(skip)]
+    pub rhythm_owned_at_start: bool,
+    #[serde(skip)]
+    pub breaker_enabled_at_start: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_scene: Option<SceneDefinition>,
+    /// After a failed restoration only a new explicit Undo may send output.
+    #[serde(skip)]
+    pub restore_failed_at_epoch_ms: Option<u64>,
     pub started_at_epoch_ms: u64,
     pub expires_at_epoch_ms: u64,
 }

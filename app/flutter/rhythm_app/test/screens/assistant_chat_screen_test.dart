@@ -16,12 +16,18 @@ class _Hub extends RhythmServerApi {
             'start_motion_walk',
             'inspect_motion_walk',
             'plan_motion_target',
-            'apply_motion_target'
+            'apply_motion_target',
+            'explain_room_output',
+            'try_room_offset',
+            'plan_absorb_offset'
           ])
             {
               'id': op,
-              'tier':
-                  op == 'apply_motion_target' ? 'persistent_change' : 'read',
+              'tier': switch (op) {
+                'apply_motion_target' => 'persistent_change',
+                'try_room_offset' => 'temporary_light_output',
+                _ => 'read',
+              },
               'invocation_path': '/api/assistant/operations/$op'
             }
         ]
@@ -46,6 +52,24 @@ class _Hub extends RhythmServerApi {
       Map<String, dynamic> args) async {
     calls.add((id, args));
     return switch (id) {
+      'explain_room_output' => {
+          'mode': 'day',
+          'state': 'active',
+          'profile_id': 'day',
+          'canonical_brightness': 50,
+          'canonical_kelvin': 3000,
+        },
+      'try_room_offset' => {'trial_id': 'trial-hall'},
+      'plan_absorb_offset' => {
+          'operation': 'apply_absorb_offset',
+          'room_id': args['room_id'],
+          'server_instance_id': 'hub1',
+          'plan_id': 'review-offset',
+          'profile_id': 'day',
+          'affected_rooms': [],
+          'cleared_offsets': [],
+          'samples': [],
+        },
       'start_motion_walk' when args['sensor_id'] == '' => {
           'status': 'handoff',
           'server_instance_id': 'hub1',
@@ -94,6 +118,36 @@ class _Hub extends RhythmServerApi {
 }
 
 void main() {
+  testWidgets(
+      'Save this look uses the trial that ran after cancelling another preview',
+      (tester) async {
+    final hub = _Hub();
+    await tester.pumpWidget(MaterialApp(
+        home: AssistantChatScreen(
+            api: () => hub,
+            serverId: 'hub1',
+            isCurrentTarget: () => true,
+            targetChanges: ValueNotifier(true),
+            openSetup: (_) async {})));
+    await tester.pumpAndSettle();
+
+    Future<void> send(String message) async {
+      await tester.enterText(find.byType(TextField), message);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    await send('Downstairs hall 1 hour earlier');
+    await send('Try 60 minutes earlier');
+    await send('Downstairs hall 30 minutes earlier');
+    await send('Cancel');
+    await send('Save this look');
+    expect(hub.calls.where((c) => c.$1 == 'try_room_offset').single.$2,
+        {'room_id': 'hall', 'offset_minutes': -60});
+    expect(hub.calls.last.$1, 'plan_absorb_offset');
+    expect(hub.calls.last.$2, {'room_id': 'hall', 'offset_minutes': -60});
+  });
+
   testWidgets(
       'resident resumes after setup on the same hub, reviews, confirms and retests',
       (tester) async {

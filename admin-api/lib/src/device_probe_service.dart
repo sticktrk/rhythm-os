@@ -536,21 +536,22 @@ class DeviceProbeService {
     try {
       String? verifiedServerInstanceId;
       String? preconditionBodySha256;
-      if (request.isMutation) {
-        final state = await _fetchState(baseUrl, authToken);
+      if (request.isMutation || request.isAssistant) {
+        final state = await _fetchState(baseUrl, authToken,
+            followRedirects: !request.isAssistant);
         if (state.authRequired) {
           return const _ProxyJsonEndpointResult.authRequired();
         }
         if (state.error != null) {
           return _ProxyJsonEndpointResult.error(
-            'mutation identity preflight failed: ${state.error}',
+            'device identity preflight failed: ${state.error}',
           );
         }
         verifiedServerInstanceId = cleanString(state.hello?.serverInstanceId);
         if (verifiedServerInstanceId == null ||
-            verifiedServerInstanceId != request.expectedServerInstanceId ||
+            ((request.isMutation || request.expectedServerInstanceId != null) &&
+                verifiedServerInstanceId != request.expectedServerInstanceId) ||
             (request.isAssistant &&
-                hub.serverInstanceId != null &&
                 verifiedServerInstanceId != hub.serverInstanceId)) {
           return _ProxyJsonEndpointResult.preconditionFailed(
             'live server identity did not match expectedServerInstanceId.',
@@ -812,19 +813,22 @@ class DeviceProbeService {
     }
   }
 
-  Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
+  Future<_StateFetchResult> _fetchState(String baseUrl, String? token,
+      {bool followRedirects = true}) async {
     try {
-      final response = await _http.get(
-        _uriWithAppendedPath(
-          baseUrl,
-          'api/state',
-          queryParameters: const {'include': 'base'},
-        ),
-        headers: {
+      final request = http.Request(
+          'GET',
+          _uriWithAppendedPath(baseUrl, 'api/state',
+              queryParameters: const {'include': 'base'}))
+        ..followRedirects = followRedirects
+        ..headers.addAll({
           'Accept': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
+        });
+      final response = await _http
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(const Duration(seconds: 5));
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _StateFetchResult.authRequired();
       }
