@@ -77,6 +77,8 @@ pub struct LightAssistantOperationDto {
     #[serde(skip)]
     handler: Handler,
     pub tier: OperationTier,
+    pub requires_owner_approval: bool,
+    pub observes_household: bool,
     pub invocation_path: String,
     pub location: &'static str,
     pub id: String,
@@ -344,6 +346,32 @@ fn operation(
     let path = format!("/api/assistant/operations/{id}");
     LightAssistantOperationDto {
         handler: Handler::Legacy,
+        requires_owner_approval: matches!(
+            id,
+            "plan_hub_update"
+                | "plan_hub_restart"
+                | "plan_update_settings_edit"
+                | "plan_managed_ha_lights"
+                | "plan_light_breaker_edit"
+                | "plan_remove_device"
+                | "plan_unassign_device"
+                | "plan_delete_room"
+                | "plan_merge_rooms"
+                | "plan_hue_authority"
+                | "plan_bridge_pairing"
+                | "plan_nearby_hue_lights"
+                | "plan_lighting_transfer"
+                | "plan_profile_bundle_reset"
+                | "plan_profile_reset"
+                | "plan_activity_upload"
+        ),
+        observes_household: matches!(
+            id,
+            "start_motion_walk"
+                | "inspect_motion_walk"
+                | "read_lighting_history"
+                | "export_lighting_settings"
+        ),
         tier,
         invocation_path: path.clone(),
         location: "hub",
@@ -370,7 +398,7 @@ pub fn operation_registry() -> &'static [LightAssistantOperationDto] {
 fn build_registry() -> Vec<LightAssistantOperationDto> {
     let mut entries = vec![
         LightAssistantOperationDto {
-            handler: Handler::Legacy, location: "hub", tier: OperationTier::Read,
+            handler: Handler::Legacy, requires_owner_approval: false, observes_household: false, location: "hub", tier: OperationTier::Read,
             invocation_path: format!("/api/assistant/operations/{OP_GET_TOPOLOGY_SNAPSHOT}"),
             id: OP_GET_TOPOLOGY_SNAPSHOT.to_string(),
             description: "Read the current public room, device, and control topology from the connected Rhythm appliance".to_string(),
@@ -396,7 +424,7 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
             ),
         },
         LightAssistantOperationDto {
-            handler: Handler::Legacy, location: "hub", tier: OperationTier::TemporaryLightOutput,
+            handler: Handler::Legacy, requires_owner_approval: false, observes_household: false, location: "hub", tier: OperationTier::TemporaryLightOutput,
             invocation_path: format!("/api/assistant/operations/{OP_IDENTIFY_DEVICE}"),
             id: OP_IDENTIFY_DEVICE.to_string(),
             description: "Briefly flash one canonical light so the user can confirm which physical device is being discussed".to_string(),
@@ -414,7 +442,7 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
             result_schema: object_schema(&["server_acknowledged", "physical_verification"], json!({"server_acknowledged":{"type":"boolean"},"physical_verification":{"const":"ask_resident"}})),
         },
         LightAssistantOperationDto {
-            handler: Handler::Legacy, location: "hub", tier: OperationTier::Read,
+            handler: Handler::Legacy, requires_owner_approval: false, observes_household: false, location: "hub", tier: OperationTier::Read,
             invocation_path: format!("/api/assistant/operations/{OP_PLAN_MOVE_DEVICE_ROOM}"),
             id: OP_PLAN_MOVE_DEVICE_ROOM.to_string(),
             description: "Prepare a non-mutating reviewed plan to move one canonical device into a Rhythm room".to_string(),
@@ -453,7 +481,7 @@ fn build_registry() -> Vec<LightAssistantOperationDto> {
             ),
         },
         LightAssistantOperationDto {
-            handler: Handler::Legacy, location: "hub", tier: OperationTier::PersistentChange,
+            handler: Handler::Legacy, requires_owner_approval: false, observes_household: false, location: "hub", tier: OperationTier::PersistentChange,
             invocation_path: format!("/api/assistant/operations/{OP_APPLY_MOVE_DEVICE_ROOM_PLAN}"),
             id: OP_APPLY_MOVE_DEVICE_ROOM_PLAN.to_string(),
             description: "Apply one explicitly confirmed device-room move while its server, contract, topology, plan, and source-placement preconditions remain current".to_string(),
