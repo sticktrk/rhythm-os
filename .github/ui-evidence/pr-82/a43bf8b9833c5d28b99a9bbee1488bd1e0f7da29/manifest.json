@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 82,
+  "head": "a43bf8b9833c5d28b99a9bbee1488bd1e0f7da29",
+  "uses_mock_data": true,
+  "source_test": "app/flutter/rhythm_app/test/screens/customer_assistant_screen_test.dart",
+  "screenshots": [
+    {
+      "file": "membership.png",
+      "caption": "Resident review before removing a home member"
+    }
+  ]
+}
