@@ -27,7 +27,10 @@ class _Auth extends RhythmAuthApi {
               planId: 'plan-1',
               operation: 'plan_room_tuning',
               credentialId: 'client-1',
-              review: {'before': 'low', 'after': 'medium'})
+              review: {
+                'before': 'Minimum brightness 15%',
+                'after': 'Minimum brightness 20%'
+              })
       ];
   @override
   Future<Map<String, dynamic>> decideAssistantApproval(String planId,
@@ -50,18 +53,22 @@ void main() {
     testWidgets(
         'owner reviews and ${approve ? "approves" : "declines"} a pending change',
         (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(412, 860);
+      addTearDown(tester.view.reset);
       final auth = _Auth()..pending = true;
       await tester.pumpWidget(MaterialApp(
+          debugShowCheckedModeBanner: false,
           home: AssistantAccessScreen(
               api: auth,
-              endpoint: 'fixture',
+              endpoint: 'https://hub.example/api/assistant/mcp',
               isCurrentTarget: () => true,
               targetChanges: ValueNotifier(true))));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('plan room tuning'));
+      await tester.tap(find.text('Room tuning'));
       await tester.pumpAndSettle();
-      expect(find.text('low'), findsOneWidget);
-      expect(find.text('medium'), findsOneWidget);
+      expect(find.text('Minimum brightness 15%'), findsOneWidget);
+      expect(find.text('Minimum brightness 20%'), findsOneWidget);
       final screenshot =
           Platform.environment['RHYTHM_AGENT_APPROVAL_SCREENSHOT'];
       if (approve && screenshot != null) {

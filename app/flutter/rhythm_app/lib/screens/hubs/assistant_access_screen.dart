@@ -129,6 +129,11 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
     });
   }
 
+  String _reviewLabel(String key) {
+    final words = key.replaceAll('_', ' ').trim();
+    return words.isEmpty ? words : words[0].toUpperCase() + words.substring(1);
+  }
+
   Future<void> _decide(RhythmAssistantApproval approval, bool approve) async {
     await _refresh(() async {
       final receipt = await widget.api
@@ -191,7 +196,8 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
                 Card(
                     child: ExpansionTile(
                         key: ValueKey(approval.planId),
-                        title: Text(approval.operation.replaceAll('_', ' ')),
+                        title: Text(_reviewLabel(approval.operation
+                            .replaceFirst(RegExp(r'^plan_'), ''))),
                         subtitle: Text('Requested by ${approval.credentialId}'),
                         childrenPadding: const EdgeInsets.all(12),
                         children: [
@@ -204,7 +210,7 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
                                 'server_instance_id'
                               }.contains(entry.key)))
                         ListTile(
-                            title: Text(field.key.replaceAll('_', ' ')),
+                            title: Text(_reviewLabel(field.key)),
                             subtitle: SelectableText(field.value is String
                                 ? field.value as String
                                 : const JsonEncoder.withIndent('  ')
