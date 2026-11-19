@@ -124,12 +124,16 @@ void _staffAssistantScenarios() {
           {'plan_id': preview['plan_id'], 'confirmed': false},
           failure: true);
       expect(service.writes, 0);
-      await service.call('staff_apply_plan',
+      final waiting = await service.call('staff_apply_plan',
           {...preview['apply_arguments'], 'confirmed': true});
-      expect(service.writes, 1);
-      await service.call('staff_apply_plan',
-          {...preview['apply_arguments'], 'confirmed': true},
-          failure: true);
+      expect(waiting['status'], 'awaiting_console_approval');
+      expect(service.writes, 0);
+      await service.approve(preview['plan_id'], origin: null, status: 403);
+      service.role = 'support';
+      await service.approve(preview['plan_id'], status: 403);
+      service.role = 'admin';
+      await service.approve(preview['plan_id']);
+      await service.approve(preview['plan_id'], status: 409);
       expect(service.writes, 1);
       expect(service.legacyRequests, 0);
     });
@@ -315,8 +319,7 @@ void _staffAssistantScenarios() {
       expect(walk.containsKey('detected_at_epoch_ms'), false);
       final preview = await invoke('plan_home_scene_edit',
           {'scene_id': 'scene', 'target_mode': 'rooms'});
-      final receipt = await service.call('staff_apply_plan',
-          {...preview['apply_arguments'], 'confirmed': true});
+      final receipt = await service.approve(preview['plan_id']);
       expect(receipt['status'], 'partially_applied');
       expect(receipt['dispatch']['failed_target_count'], 1);
       expect(
@@ -355,7 +358,10 @@ void _staffAssistantScenarios() {
         ...review['apply_arguments'] as Map<String, dynamic>,
         'confirmed': true
       };
-      final result = await service.call('staff_apply_plan', args);
+      final waiting = await service.call('staff_apply_plan', args);
+      expect(waiting['status'], 'awaiting_console_approval');
+      expect(service.uploads, 0);
+      final result = await service.approve(args['plan_id']);
       expect(result['status'], 'submitted');
       expect(result['issue_created'], true);
       expect(result['support_reference'], startsWith('ref_'));
@@ -372,19 +378,25 @@ void _staffAssistantScenarios() {
       final preview =
           await service.call('staff_plan_delete_hub', {'hub_ref': hub});
       final args = {'plan_id': preview['plan_id'], 'confirmed': true};
+      final waiting = await service.call('staff_apply_plan', args);
+      expect(waiting['status'], 'awaiting_console_approval');
+      expect(service.deleted, 0);
+      final listing = await service.server.handler(Request(
+          'GET', Uri.parse('http://admin.test/api/hubs/hub-1/assistant/plans'),
+          headers: {'authorization': 'Bearer staff-session'}));
+      expect(
+          jsonDecode(await listing.readAsString())['plans'].single['plan_id'],
+          preview['plan_id']);
       service.rowChanged = true;
-      await service.call('staff_apply_plan', args, failure: true);
+      await service.approve(preview['plan_id'], status: 409);
       expect(service.deleted, 0);
       service.rowChanged = false;
       final fresh =
           await service.call('staff_plan_delete_hub', {'hub_ref': hub});
-      final res = await service.call(
-          'staff_apply_plan', {'plan_id': fresh['plan_id'], 'confirmed': true});
+      final res = await service.approve(fresh['plan_id']);
       expect(res['status'], 'applied');
       expect(service.deleted, 1);
-      await service.call(
-          'staff_apply_plan', {'plan_id': fresh['plan_id'], 'confirmed': true},
-          failure: true);
+      await service.approve(fresh['plan_id'], status: 409);
       expect(service.deleted, 1);
     });
   });
@@ -418,6 +430,19 @@ class _StaffFixture {
     };
     f.server = _testServer(client: _HandlerClient(f.handle));
     return f;
+  }
+
+  Future<Map<String, dynamic>> approve(String id,
+      {String? origin = 'http://127.0.0.1:5173', int status = 200}) async {
+    final response = await server.handler(Request(
+        'POST', Uri.parse('http://admin.test/api/assistant/plans/$id/approve'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          if (origin != null) 'origin': origin
+        }));
+    final body = jsonDecode(await response.readAsString());
+    expect(response.statusCode, status, reason: '$body');
+    return body as Map<String, dynamic>;
   }
 
   Future<Map<String, dynamic>> rpc(

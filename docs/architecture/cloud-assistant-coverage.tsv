@@ -30,3 +30,5 @@ edge	INVOKE	matter-device-profiles	exclusion	Product capability catalog consumed
 edge	INVOKE	report-matter-bulb	handoff	The resident submits a hardware compatibility test from the app's Matter tester.
 edge	INVOKE	monster-device	handoff	The resident uses the app's vendor-device setup and trusted device broker.
 app_rpc	CALL	remove_home_member	operation	plan_customer_change (remove_member)
+staff	POST	/api/assistant/plans/<planId>/approve	handoff	The signed-in administrator approves the reviewed change in the staff console.
+staff	GET	/api/hubs/<hubId>/assistant/plans	handoff	The administrator reviews their pending changes for the selected hub in the staff console.

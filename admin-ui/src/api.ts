@@ -45,6 +45,14 @@ export async function runStaffAssistantTool(
   return asRecord(result.structuredContent);
 }
 
+export function approveStaffPlan(token: string, planId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`/api/assistant/plans/${encodeURIComponent(planId)}/approve`, token, { method: 'POST' });
+}
+
+export function pendingStaffPlans(token: string, hubId: string): Promise<{ plans: Record<string, unknown>[] }> {
+  return apiFetch(`/api/hubs/${encodeURIComponent(hubId)}/assistant/plans`, token);
+}
+
 export async function fetchHealth(): Promise<AdminApiHealth> {
   const response = await fetch(`${apiBaseUrl}/health`, {
     headers: { Accept: 'application/json' }

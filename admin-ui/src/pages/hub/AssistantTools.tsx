@@ -6,11 +6,12 @@ import { errorMessage } from '../../lib/format';
 
 type Obj = Record<string, unknown>;
 
-export function AssistantTools({operations, nodes, identity, canWrite, call}: {
+export function AssistantTools({operations, nodes, identity, canWrite, call, confirmPlan}: {
   operations: Obj[];
   nodes: Obj[];
   identity: string;
   canWrite: boolean;
+  confirmPlan: (review: Obj, id: string, args: Obj) => Promise<Obj>;
   call: (id: string, args: Obj) => Promise<Obj>;
 }) {
   const [id, setId] = useState('');
@@ -39,7 +40,7 @@ export function AssistantTools({operations, nodes, identity, canWrite, call}: {
         Object.assign(args, assistantArguments(asRecord(op.input_schema), fields, () => crypto.randomUUID()));
       }
       setBusy(true); setReceipt(null);
-      setReceipt(await call(tool, args));
+      setReceipt(confirm && receipt ? await confirmPlan(receipt, tool, args) : await call(tool, args));
     } catch (err) {
       setError(errorMessage(err) + (confirm ? ' Read the current state and preview again before retrying.' : ''));
     } finally { setBusy(false); }

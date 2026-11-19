@@ -45,6 +45,8 @@ class AdminApiServer {
       ..get('/api/me', _me)
       ..get('/api/assistant/mcp', _staffAssistant)
       ..post('/api/assistant/mcp', _staffAssistant)
+      ..get('/api/hubs/<hubId>/assistant/plans', _pendingAssistantPlans)
+      ..post('/api/assistant/plans/<planId>/approve', _approveAssistantPlan)
       ..get('/api/support/snapshot', _supportSnapshot)
       ..get('/api/fleet/hubs', _fleetHubs)
       ..delete('/api/hubs/<hubId>', _deleteHub)
@@ -132,6 +134,20 @@ class AdminApiServer {
     }
     final body = await _readJsonObject(request, 'Staff assistant request');
     return _assistant.handle(session, body);
+  }
+
+  Future<Response> _pendingAssistantPlans(Request request, String hubId) async {
+    final s = await _requireStaff(request);
+    return _json({'plans': _assistant.pendingForHub(s, hubId)});
+  }
+
+  Future<Response> _approveAssistantPlan(Request request, String planId) async {
+    final s = await _requireStaff(request);
+    if (!_config.allowsOrigin(request.headers['origin']) || !s.staff.isAdmin) {
+      throw const AdminApiException(
+          403, 'Approval requires an administrator in the staff console.');
+    }
+    return _json(await _assistant.approve(s, planId));
   }
 
   Future<Response> _me(Request request) async {
@@ -273,7 +289,14 @@ class AdminApiServer {
       );
       status = result.statusCode;
       receipt = result.body;
-      return _json(result.toJson());
+      final json = result.toJson();
+      final preview = asStringMap(result.body);
+      if (status >= 200 && status < 300 && preview?['apply_arguments'] is Map) {
+        final id = await _assistant.registerConsolePreview(
+            session, hubId, proxyRequest.path, preview!);
+        if (id != null) json['body'] = {...preview, 'console_plan_id': id};
+      }
+      return _json(json);
     } on AdminApiException catch (error) {
       status = error.statusCode;
       rethrow;

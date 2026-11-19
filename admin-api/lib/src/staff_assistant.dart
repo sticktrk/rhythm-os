@@ -231,7 +231,7 @@ const _tools = [
       ['hub_ref']),
   _Tool(
       'staff_apply_plan',
-      'Apply one reviewed staff proposal after explicit human confirmation. This requires the admin role.',
+      'Request console approval for a reviewed staff proposal. An administrator must open the selected hub in the staff console and approve it.',
       _plan,
       ['plan_id', 'confirmed'],
       tier: 'persistent_change'),
@@ -244,7 +244,8 @@ const _denied = AdminApiException(403,
     'This action requires an enabled admin and any customer grant for the selected hub.');
 
 class _Proposal {
-  _Proposal(this.hub, this.operation, this.arguments);
+  _Proposal(this.hub, this.operation, this.arguments, this.review);
+  final _Json review;
   final SupportHubDto hub;
   final String operation;
   final _Json arguments;
@@ -301,7 +302,7 @@ class StaffAssistant {
           'serverInfo': {'name': 'rhythm-staff', 'version': '1'},
           'capabilities': {'tools': {}, 'resources': {}},
           'instructions':
-              'Select the intended hub. Confirm with the person before applying a proposal. Read back after an uncertain response.'
+              'Select the intended hub. Send proposed changes to the selected hub in the staff console for administrator approval. Read back after an uncertain response.'
         };
       case 'ping':
         result = {};
@@ -564,7 +565,16 @@ class StaffAssistant {
         if (offset + 100 < matches.length) 'next_offset': offset + 100,
       };
     }
-    if (id == 'staff_apply_plan') return _apply(s, args);
+    if (id == 'staff_apply_plan') {
+      if (args['confirmed'] != true || !s.staff.isAdmin) throw _denied;
+      _resolve(s, '', 'plan', args['plan_id']);
+      return {
+        'status': 'awaiting_console_approval',
+        'plan_id': args['plan_id'],
+        'next_check':
+            'Open the selected hub in the staff console and approve the pending change.'
+      };
+    }
     final h = await _hub(s, _resolve(s, '', 'hub', args['hub_ref']) as String);
     if (id == 'staff_plan_delete_hub') {
       return _preview(s, h, 'delete', {}, {
@@ -861,7 +871,7 @@ class StaffAssistant {
             'Ask an administrator to run a fresh preview before confirming this change.'
       };
     }
-    final plan = _reference(s, '', 'plan', _Proposal(h, op, args));
+    final plan = _reference(s, '', 'plan', _Proposal(h, op, args, review));
     return {
       ...base,
       'operation': 'staff_apply_plan',
@@ -870,10 +880,48 @@ class StaffAssistant {
     };
   }
 
-  Future<_Json> _apply(AdminSession s, _Json args) async {
-    if (args['confirmed'] != true || !s.staff.isAdmin) throw _denied;
-    final p =
-        _resolve(s, '', 'plan', args['plan_id'], consume: true) as _Proposal;
+  List<_Json> pendingForHub(AdminSession s, String hubId) {
+    if (!s.staff.isAdmin) throw _denied;
+    final now = DateTime.now().toUtc();
+    return [
+      for (final entry in _refs.entries)
+        if (entry.value.actor == s.user.id &&
+            entry.value.kind == 'plan' &&
+            entry.value.expires.isAfter(now) &&
+            entry.value.value is _Proposal)
+          if (entry.value.value as _Proposal case final proposal
+              when proposal.hub.id == hubId &&
+                  proposal.operation != 'console_hub')
+            {
+              'plan_id': entry.key,
+              'operation': proposal.operation,
+              'review': proposal.review
+            },
+    ];
+  }
+
+  Future<String?> registerConsolePreview(
+      AdminSession s, String hubId, String path, _Json body) async {
+    if (!s.staff.isAdmin ||
+        !path.startsWith('api/assistant/operations/') ||
+        _trustedHubOperations[path.split('/').last]?['tier'] != 'read')
+      return null;
+    final operation = body['operation'];
+    final args = asStringMap(body['apply_arguments']);
+    if (_trustedHubOperations[operation]?['tier'] != 'persistent_change' ||
+        args == null ||
+        body['plan_id'] is! String ||
+        args['plan_id'] != body['plan_id']) return null;
+    final h = await _hub(s, hubId);
+    if (h.serverInstanceId == null ||
+        body['server_instance_id'] != h.serverInstanceId) throw _stale;
+    return _reference(s, '', 'plan',
+        _Proposal(h, 'console_hub', {'id': operation, 'arguments': args}, {}));
+  }
+
+  Future<_Json> approve(AdminSession s, String planId) async {
+    if (!s.staff.isAdmin) throw _denied;
+    final p = _resolve(s, '', 'plan', planId, consume: true) as _Proposal;
     final h = await _hub(s, p.hub.id);
     if (h.homeId != p.hub.homeId ||
         h.serverInstanceId != p.hub.serverInstanceId ||
@@ -889,7 +937,7 @@ class StaffAssistant {
         final finding = FleetFindingReportRequestDto.fromJson({
           'title': 'Staff diagnostic: ${p.arguments['category']}',
           'severity': p.arguments['severity'],
-          'scanRunId': args['plan_id'],
+          'scanRunId': planId,
           'detectedAt': DateTime.now().toUtc().toIso8601String()
         });
         final report = await reports.report(
@@ -900,7 +948,7 @@ class StaffAssistant {
         outcome = 'submitted';
         return {
           'status': 'submitted',
-          'plan_id': args['plan_id'],
+          'plan_id': planId,
           'support_reference':
               _reference(s, h.id, 'report', report.submissionId),
           'issue_created': report.reportResult['issue_created'] == true
@@ -911,7 +959,7 @@ class StaffAssistant {
         if (catalog[id]?['tier'] != 'persistent_change') throw _denied;
         final result = await _request(
             s, h, 'POST', 'api/assistant/operations/$id',
-            requestId: args['plan_id'] as String,
+            requestId: planId,
             body: {...p.arguments['arguments'] as _Json, 'confirmed': true});
         final projected = _project(s, h.id, result) as _Json;
         outcome = switch (projected['status']) {
@@ -922,16 +970,12 @@ class StaffAssistant {
           'uncertain' => 'uncertain',
           _ => 'acknowledged'
         };
-        return projected;
+        return p.operation == 'console_hub' ? result : projected;
       }
       outcome = 'applied';
-      return {
-        'status': 'applied',
-        'operation': p.operation,
-        'plan_id': args['plan_id']
-      };
+      return {'status': 'applied', 'operation': p.operation, 'plan_id': planId};
     } finally {
-      _audit(s, h, p.operation, outcome, args['plan_id'] as String);
+      _audit(s, h, p.operation, outcome, planId);
     }
   }
 
