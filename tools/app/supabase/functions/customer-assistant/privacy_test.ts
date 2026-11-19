@@ -83,7 +83,8 @@ Deno.test("every customer MCP tool emits exactly its approved provider fields", 
     requires_confirmation: true,
     previous_grant_active: true,
     operation: "apply_customer_plan",
-    description: "Revoke the active Rhythm staff support grant for this hub.",
+    description:
+      "Revoke the active Rhythm staff support grant for this hub. After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
   };
   const rows: Record<string, [Fields, Fields]> = {
     list_homes: [{ homes: [{ ...prohibited, home_id: home, role: "owner" }] }, {

@@ -12,11 +12,12 @@ const choice = (values: string[]) => ({ type: "string", enum: values });
 export const changes = {
   grant_support:
     "Grant Rhythm staff support access to this hub, including diagnostics and authorized changes. The resident can revoke this in hub settings.",
-  revoke_support: "Revoke the active Rhythm staff support grant for this hub.",
+  revoke_support:
+    "Revoke the active Rhythm staff support grant for this hub. After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
   remove_member:
     "Remove this member from the home. Their access to the home and its hubs ends.",
   enable_remote:
-    "Set up remote access to this hub. The phone will configure the device and check reachability.",
+    "Set up remote access to this hub. The phone will configure the device and check reachability. After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
   submit_report:
     "Send the reviewed report to Rhythm support, with the selected diagnostic bundle only if included.",
   join_home:

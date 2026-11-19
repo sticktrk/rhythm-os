@@ -230,3 +230,24 @@ Deno.test("MCP can hand a review to the resident but cannot claim or complete it
   }
   equal(steps, ["confirm"]);
 });
+
+Deno.test("support revocation and remote setup disclose future support approval", async () => {
+  const { invoke } = fixture((_step, args) => ({
+    ...args,
+    status: "review",
+    plan_id: actor,
+  }));
+  for (const change of ["revoke_support", "enable_remote"]) {
+    const plan = await invoke({
+      operation: "plan_customer_change",
+      arguments: { change, home_id: homeId, hub_id: hubId },
+    });
+    equal(plan.status, 200);
+    equal(
+      (await plan.json()).description.includes(
+        "After this change, Rhythm support access for this hub is granted only when a resident reviews and approves it.",
+      ),
+      true,
+    );
+  }
+});
