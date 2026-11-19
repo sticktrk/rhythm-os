@@ -306,7 +306,7 @@ impl<C: LightController> RhythmEngine<C> {
     }
 
     /// Create a curve context for the given hour.
-    fn create_context(&self, current_hour: f32) -> CurveContext {
+    pub(crate) fn create_context(&self, current_hour: f32) -> CurveContext {
         CurveContext::new(current_hour, self.solar, self.sun_times)
     }
 

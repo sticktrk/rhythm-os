@@ -50,6 +50,57 @@ Display names are present because a user-facing setup flow needs them. They
 must not be copied into analytics, logs, plan IDs, or model-provider telemetry
 unless a separately reviewed privacy contract requires it.
 
+### Running an operation
+
+The same descriptor drives MCP discovery and the app's typed SDK. Each entry
+includes an operation ID, location, tier, input and result schemas, and an
+invocation path. The app and per-hub staff console discover the selected
+server's catalog and send JSON to `POST /api/assistant/operations/{id}`.
+An MCP client uses `tools/call` with the same ID and arguments. Both receive
+the same operation result. The account and fleet services own the operations
+that run outside the hub.
+
+Read operations include previews. A temporary-output tool can change lights
+immediately. A persistent tool accepts explicit confirmation and the arguments
+from its preview. Plans are bound to the creating credential. By default an agent's
+apply request returns `awaiting_owner_approval`. The hub owner reviews the
+change under **Assistant access**. Owners can also list pending plans with
+`GET /api/assistant/approvals` and submit `approve` or `decline` to
+`POST /api/assistant/approvals/{plan_id}`. The creating client polls
+`read_plan_outcome` for the decision and receipt.
+
+An owner can enable `unattended_changes` when issuing an agent credential.
+Operations marked `requires_owner_approval` still require the owner's decision.
+The `observes_household` descriptor marks reads restricted to administrators
+when using the staff service.
+
+Older device-room move endpoints retain their original
+request format for existing clients. Owner actions return a handoff that
+identifies the person, the surface to open and the hub on which to resume.
+
+| Resident's request | Tools and evidence |
+| --- | --- |
+| “A little brighter” or “warmer at this brightness” | Read the current room output, then use the brightness or warmth adjustment. Check the returned per-light evidence. |
+| “Try this color on one lamp” | Use `audition_light` with the delegated lamp ID and its output. The trial expires after one minute. Use its trial ID to end it early. Lamps with a room-only route require a room-wide preview. |
+| “Keep the kitchen brighter after dusk” | Inspect the active mode and profile. Preview a room tuning and compare dusk and later samples before applying it. |
+| “Show me an hour earlier” | Try a negative offset. Undo the returned trial, keep a room offset, or review Absorb's shared profile and offset changes. |
+| “Why didn't the hall turn on?” | Start a short walk for the chosen sensor. Inspect detection, targets, room policy, dispatch and fresh light observations. Review a target repair, then walk again. |
+| “Change my saved lighting” | Discover scene, schedule, transition, profile, binding and room-preference plans. The preview names the affected settings and the apply arguments. |
+
+The catalog also covers room and device management, pairing and triage, HA
+managed-light selection, portable settings, activity uploads and appliance
+maintenance. Sensitive pairing, HA-owned configuration, installation backups,
+full restore and factory reset direct the person to the appropriate app or HA
+surface. Portable lighting exports contain household labels for mapping and
+belong in the resident's trusted client.
+
+The route ledger records the classification of each shared, platform and add-on
+HTTP route. Run `tools/check-repo-invariants.sh` when changing routes. Regenerate
+the staff proxy's read classification with
+`cargo run --quiet -p rhythm-os --example assistant_read_policy > admin-api/lib/src/assistant_read_operations.dart`.
+
+[Hub route coverage](assistant-route-coverage.tsv)
+
 ### Device-room move plan and apply
 
 `POST /api/assistant/plans/device-room-move` is read-only. It validates current
@@ -118,7 +169,17 @@ contract in the same change:
 7. Add tests for serialization, auth/route registration, rejection, stale
    state, authoritative readback, mixed versions, and prohibited analytics
    values.
-8. Run the assistant-contract parity check.
+8. Run the add-on route tests and the client parity check. CI starts a fresh
+   standalone server and shares its live contract with the Dart SDK, Flutter
+   tool picker, staff proxy and admin console tests. To reproduce with the
+   package dependencies installed, run the following from the repository root.
+
+   ```sh
+   cargo build --locked -p rhythm-server
+   python3 tools/ci/smoke-server.py --assistant-contract /tmp/hub-contract.json
+   tools/ci/check-assistant-clients.sh /tmp/hub-contract.json
+   cargo test --locked -p rhythm-addon mcp_on_mobile_listener
+   ```
 
 Do not expose a generic topology-write or arbitrary light-command tool. Each
 assistant operation must be narrow enough for deterministic validation and an
@@ -136,3 +197,37 @@ hashes, plan bodies, and free-form errors are forbidden analytics properties.
 Receipts and sanitized logs retain only the opaque plan/correlation IDs,
 operation ID, bounded status, and verification outcome needed to reconstruct a
 field failure.
+
+## Agent connections
+
+The appliance serves stateless MCP Streamable HTTP at `/api/assistant/mcp`.
+Each POST carries a bearer credential issued specifically for the agent by a
+local authenticated owner. The same URL works on the authorized HTTPS tunnel
+and on the HA add-on's mobile listener. The SDK discovers the contract on the
+selected app connection. Staff use the selected hub's audited support proxy.
+
+Home Assistant's MCP Client accepts Streamable HTTP and exposes tools to an
+Assist conversation agent. Its 2026.11 setup accepts an OAuth client ID and
+secret. A plain bearer-header input is absent in this release. Use a scoped
+agent credential for integrations with static bearer support. Keep every
+credential in the transport layer, outside transcripts and tool arguments.
+
+[Home Assistant MCP Client](https://www.home-assistant.io/integrations/mcp/) ·
+[2026.11 client setup](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/mcp/config_flow.py) ·
+[MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+
+A local owner creates a bearer with `POST /api/auth/agent-tokens`, lists
+registrations with `GET /api/auth/agent-tokens`, and revokes one by sending
+`DELETE /api/auth/agent-tokens/{id}`. Revocation applies to the next request,
+including on installations that ordinarily allow local control without a key.
+
+For Home Assistant, create a registration with `POST /api/auth/assistant-clients`.
+In **Settings → Devices & services → Add integration → Model Context Protocol
+Client**, enter the add-on mobile URL ending in `/api/assistant/mcp`. Use the
+HTTPS tunnel when connecting across networks. Enter the issued client ID and
+secret, then paste the activation code on Rhythm's consent screen within ten
+minutes. This flow uses Home Assistant's built-in My Home Assistant redirect.
+Enable the Rhythm tools on the selected conversation agent. Home Assistant Assist uses the MCP tools and their descriptions. Its MCP client does not read the contract resource. The access token
+lasts one hour. Refresh rotates the token, and deleting the registration revokes
+both access and refresh. Agent grants occupy separate fields in the existing
+auth store so an older installation can still read its owner credentials.

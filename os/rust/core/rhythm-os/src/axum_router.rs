@@ -67,6 +67,39 @@ fn shared_routes() -> Router<SharedState> {
         .route("/health", get(health))
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
+        .route(
+            "/.well-known/oauth-authorization-server/api/assistant/mcp",
+            get(crate::auth::assistant_oauth::metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(crate::auth::assistant_oauth::metadata),
+        )
+        .route(
+            "/api/assistant/oauth/authorize",
+            get(crate::auth::assistant_oauth::consent).post(crate::auth::assistant_oauth::approve),
+        )
+        .route(
+            "/api/assistant/oauth/token",
+            post(crate::auth::assistant_oauth::exchange),
+        )
+        .route(
+            "/api/auth/assistant-clients",
+            post(crate::auth::assistant_oauth::register),
+        )
+        .route(
+            "/api/auth/agent-tokens",
+            get(list_agent_tokens).post(issue_agent_token),
+        )
+        .route("/api/auth/agent-tokens/:id", delete(revoke_agent_token))
+        .route(
+            crate::assistant::MCP_PATH,
+            post(crate::assistant::transport::mcp),
+        )
+        .route(
+            crate::assistant::OPERATION_PATH,
+            post(crate::assistant::transport::rest),
+        )
         .route("/api/auth/support-token", post(post_auth_support_token))
         .route(
             "/api/auth/support-session-token",
@@ -77,6 +110,14 @@ fn shared_routes() -> Router<SharedState> {
             post(post_auth_support_session_token_revoke),
         )
         .route("/api/auth/settings", put(put_auth_settings))
+        .route(
+            "/api/assistant/approvals",
+            get(crate::assistant::approvals::list),
+        )
+        .route(
+            "/api/assistant/approvals/:plan_id",
+            post(crate::assistant::approvals::decide),
+        )
         .route(LIGHT_ASSISTANT_CONTRACT_PATH, get(get_assistant_contract))
         .route(LIGHT_ASSISTANT_TOPOLOGY_PATH, get(get_assistant_topology))
         .route(
@@ -356,6 +397,72 @@ async fn post_auth_claim(State(state): State<SharedState>, Json(body): Json<Valu
     crate::auth::handle_claim_owner_token(&state, label)
 }
 
+async fn list_agent_tokens(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+) -> Response {
+    if !info.is_some_and(|Extension(i)| {
+        i.role == Some(crate::auth::ApiTokenRole::Owner) && !i.via_remote_access
+    }) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(s) = state.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let clients = &s.api_auth.agent_clients;
+    let tokens: Vec<_> = clients
+        .iter()
+        .map(|c| serde_json::json!({"id":c.id,"kind":"home_assistant","unattended_changes":c.unattended_changes}))
+        .chain(
+            s.api_auth
+                .agent_tokens
+                .iter()
+                .filter(|token| !clients.iter().any(|c| c.id == token.id))
+                .map(|token| serde_json::json!({"id":token.id,"kind":"bearer","unattended_changes":token.unattended_changes})),
+        )
+        .collect();
+    (
+        [("cache-control", "no-store")],
+        Json(serde_json::json!({"tokens":tokens})),
+    )
+        .into_response()
+}
+
+async fn issue_agent_token(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let options = match crate::auth::AgentOptions::parse(&body) {
+        Ok(options) => options,
+        Err(status) => return status.into_response(),
+    };
+    (
+        [("cache-control", "no-store")],
+        run_blocking(move || {
+            crate::auth::manage_agent_token(
+                &state,
+                info.map(|Extension(i)| i),
+                None,
+                options.unattended_changes,
+            )
+        })
+        .await,
+    )
+        .into_response()
+}
+
+async fn revoke_agent_token(
+    State(state): State<SharedState>,
+    info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || {
+        crate::auth::manage_agent_token(&state, info.map(|Extension(i)| i), Some(&id), false)
+    })
+    .await
+}
+
 async fn post_auth_support_token(
     State(state): State<SharedState>,
     auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
@@ -372,12 +479,14 @@ async fn post_auth_support_token(
 
 async fn post_auth_support_session_token(
     State(state): State<SharedState>,
+    issuer: Option<Extension<crate::auth::VerifiedApiToken>>,
     auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
     crate::auth::handle_issue_support_session_token(
         &state,
         auth_info.map(|Extension(info)| info),
+        issuer.as_ref().map(|Extension(token)| token.id.as_str()),
         &body,
     )
 }
@@ -1053,16 +1162,42 @@ async fn get_assistant_topology(State(state): State<SharedState>) -> ApiResponse
 
 async fn post_assistant_move_plan(
     State(state): State<SharedState>,
+    auth: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    credential: Option<Extension<crate::auth::VerifiedApiToken>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
-) -> ApiResponse {
-    run_blocking(move || handlers::handle_post_assistant_move_plan(&state, &body)).await
+) -> Response {
+    crate::assistant::transport::invoke_rest(
+        state,
+        crate::assistant::OP_PLAN_MOVE_DEVICE_ROOM,
+        auth,
+        credential,
+        headers,
+        body,
+    )
+    .await
 }
 
 async fn post_assistant_move_apply(
     State(state): State<SharedState>,
-    Json(body): Json<Value>,
-) -> ApiResponse {
-    run_blocking(move || handlers::handle_post_assistant_move_apply(&state, &body)).await
+    auth: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    credential: Option<Extension<crate::auth::VerifiedApiToken>>,
+    headers: axum::http::HeaderMap,
+    Json(mut body): Json<Value>,
+) -> Response {
+    // The legacy owner/support endpoint predates the confirmed argument.
+    if let Some(fields) = body.as_object_mut() {
+        fields.entry("confirmed").or_insert(Value::Bool(true));
+    }
+    crate::assistant::transport::invoke_rest(
+        state,
+        crate::assistant::OP_APPLY_MOVE_DEVICE_ROOM_PLAN,
+        auth,
+        credential,
+        headers,
+        body,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,6 +1742,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::NodesChanged => "nodes_changed",
         ServerEvent::TriageChanged { .. } => "triage_changed",
         ServerEvent::PairingProgress { .. } => "pairing_progress",
+        ServerEvent::ScenePreviewExpired { .. } => "scene_preview_expired",
         ServerEvent::OtaUpdateProgress { .. } => "ota_update_progress",
     }
 }

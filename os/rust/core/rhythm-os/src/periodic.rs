@@ -154,7 +154,7 @@ fn periodic_settings_node_kind(
     }
 }
 
-pub(crate) fn periodic_dispatch_nodes_from_state(
+pub(crate) fn routed_dispatch_nodes_from_state(
     state: &AppState,
     room_snapshots: &[rhythm_core::NodeSnapshot],
 ) -> Vec<PeriodicDispatchNode> {
@@ -173,7 +173,7 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
 
-    let mut dispatch_nodes = if !has_composite_controller {
+    if !has_composite_controller {
         eligible_room_ids
             .into_iter()
             .map(|room_id| PeriodicDispatchNode {
@@ -220,8 +220,14 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
             }
         }
         dispatch_nodes
-    };
+    }
+}
 
+pub(crate) fn periodic_dispatch_nodes_from_state(
+    state: &AppState,
+    room_snapshots: &[rhythm_core::NodeSnapshot],
+) -> Vec<PeriodicDispatchNode> {
+    let mut dispatch_nodes = routed_dispatch_nodes_from_state(state, room_snapshots);
     let active_scene_node_ids: HashSet<&str> = room_snapshots
         .iter()
         .filter(|node| node.mood_active && node.profile_settings.mood_scene_id.is_some())
@@ -678,6 +684,47 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
 }
 
 fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Duration {
+    if let Err(error) = crate::commands::recover_interrupted_light_trials(&state) {
+        log::warn!(target:"cmd","Unable to load interrupted light trials: {}",error);
+    }
+    // Expiry also restores hard-off and scene-owned rooms whose ordinary
+    // adaptive ticks may be suppressed. A superseding trial has a different ID.
+    let expired_previews: Vec<_> = state
+        .lock()
+        .ok()
+        .map(|mut s| {
+            let now = crate::state::current_epoch_ms();
+            // A failed undo is retained briefly for an explicit retry. Never
+            // resend partially applied commands on every scheduler tick.
+            let stale: Vec<_> = s
+                .light_scene_previews
+                .values()
+                .filter(|preview| {
+                    preview
+                        .restore_failed_at_epoch_ms
+                        .is_some_and(|at| now.saturating_sub(at) >= 300_000)
+                })
+                .map(|p| p.id.clone())
+                .collect();
+            if crate::commands::update_trial_recovery_locked(&s, &stale, None).is_ok() {
+                for id in stale {
+                    s.light_scene_previews.remove(&id);
+                }
+            }
+            s.light_scene_previews
+                .values()
+                .filter(|p| {
+                    !p.interrupted
+                        && p.restore_failed_at_epoch_ms.is_none()
+                        && p.expires_at_epoch_ms <= now
+                })
+                .map(|p| p.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in expired_previews {
+        let _ = crate::commands::expire_scene_preview(&state, &id);
+    }
     let (
         utc_offset,
         profile_registry,
@@ -2978,6 +3025,72 @@ mod tests {
     }
 
     #[test]
+    fn expired_trial_retires_without_reactivating_a_paused_room() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["room-a"]);
+        install_runtime(&state, runtime.clone());
+        let request = serde_json::from_value(serde_json::json!({
+            "target_id":"room-a", "scene":{"id":"trial","name":"Trial","light":{"default_output":{"brightness":60,"color":{"kind":"kelvin","kelvin":3000}}}}
+        })).unwrap();
+        let result: crate::scenes::SceneApplyResponse = serde_json::from_str(
+            &crate::commands::do_scene_draft_preview(&state, request).unwrap(),
+        )
+        .unwrap();
+        let id = result.preview_id.unwrap();
+        let mut paused = RestoredNodeState::from(&runtime.engine_node_snapshot("room-a").unwrap());
+        paused.rhythm_enabled = false;
+        runtime.restore_node_state("room-a", paused);
+        state
+            .lock()
+            .unwrap()
+            .light_scene_previews
+            .get_mut(&id)
+            .unwrap()
+            .expires_at_epoch_ms = 0;
+        assert!(crate::commands::do_scene_preview_commit(&state, &id).is_err());
+        run_periodic_cycle::<fn()>(state.clone(), None);
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        assert!(
+            !runtime
+                .engine_node_snapshot("room-a")
+                .unwrap()
+                .rhythm_enabled
+        );
+    }
+
+    #[test]
+    fn scheduler_retires_a_failed_restore_without_sending_it_again() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["room-a"]);
+        install_runtime(&state, runtime);
+        let request = serde_json::from_value(serde_json::json!({
+            "target_id":"room-a", "scene":{"id":"trial","name":"Trial","light":{"default_output":{"brightness":60,"color":{"kind":"kelvin","kelvin":3000}}}}
+        })).unwrap();
+        let result: crate::scenes::SceneApplyResponse = serde_json::from_str(
+            &crate::commands::do_scene_draft_preview(&state, request).unwrap(),
+        )
+        .unwrap();
+        let id = result.preview_id.unwrap();
+        {
+            let mut app = state.lock().unwrap();
+            let preview = app.light_scene_previews.get_mut(&id).unwrap();
+            preview.restore_failed_at_epoch_ms = Some(crate::state::current_epoch_ms());
+            preview.expires_at_epoch_ms = 0;
+        }
+        assert!(crate::commands::expire_scene_preview(&state, &id).is_err());
+        run_periodic_cycle::<fn()>(state.clone(), None);
+        state
+            .lock()
+            .unwrap()
+            .light_scene_previews
+            .get_mut(&id)
+            .unwrap()
+            .restore_failed_at_epoch_ms = Some(0);
+        run_periodic_cycle::<fn()>(state.clone(), None);
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+    }
+
+    #[test]
     fn run_periodic_cycle_uses_fallback_work_queue_when_periodic_queue_is_absent() {
         let state = make_state();
         install_runtime(&state, runtime_with_rooms(&["room-b"]));
@@ -3541,7 +3654,15 @@ mod tests {
                 scene_id: "icy-glow".to_string(),
                 target_node_id: "room-a".to_string(),
                 affected_node_ids: vec!["room-a".to_string()],
+                interrupted: false,
+                remaining_light_ids: Default::default(),
+                failed_restore_routes: None,
+                assistant_individual_audition: false,
+                assistant_time_offset_minutes: None,
                 previous_mood_scene_id: None,
+                rhythm_owned_at_start: true,
+                breaker_enabled_at_start: true,
+                restore_failed_at_epoch_ms: None,
                 draft_scene: None,
                 started_at_epoch_ms: now,
                 expires_at_epoch_ms: now + 30_000,

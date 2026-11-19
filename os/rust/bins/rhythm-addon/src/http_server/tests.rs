@@ -1600,6 +1600,15 @@ async fn ha_rejected_commissioning_stays_unknown_until_explicit_review() {
 
 #[tokio::test]
 async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_results() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        exercise_ha_administration_waits(),
+    )
+    .await
+    .expect("HA administration concurrency scenario deadlocked");
+}
+
+async fn exercise_ha_administration_waits() {
     use futures_util::{SinkExt, StreamExt};
     use rhythm_ha::{matter::HaMatterClient, transport::HaConnectionConfig};
     use tokio_tungstenite::tungstenite::Message;
@@ -1756,7 +1765,7 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 ))
                 .layer(Extension(f.access.clone()));
             let token = phone["token"].as_str().unwrap().to_owned();
-            let operation = tokio::spawn(async move {
+            let mut operation = tokio::spawn(async move {
                 json_request(
                     router,
                     if remove { Method::DELETE } else { Method::POST },
@@ -1766,23 +1775,26 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 )
                 .await
             });
-            tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
-                .await
-                .unwrap()
-                .unwrap();
-            // A real control write completes while HA deliberately stays blocked.
-            let light = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                json_request(
-                    f.mobile(),
-                    Method::PUT,
-                    "/api/light-breaker",
-                    phone["token"].as_str(),
+            tokio::select! {
+                entered = entered_rx => entered.expect("upstream never received the HA command"),
+                result = &mut operation => panic!("HA administration ended before its command: {result:?}"),
+            }
+            // The upstream has received the command and cannot answer until
+            // finish_tx is sent. Check the lock directly, then require the
+            // real write and durable reset to finish ahead of that response.
+            drop(
+                f.access
+                    .mutation_gate
+                    .try_lock()
+                    .expect("HA held the mutation gate during network I/O"),
+            );
+            let light = tokio::select! {
+                response = json_request(
+                    f.mobile(), Method::PUT, "/api/light-breaker", phone["token"].as_str(),
                     json!({"enabled":true}),
-                ),
-            )
-            .await
-            .expect("HA administration blocked an unrelated light write");
+                ) => response,
+                result = &mut operation => panic!("HA administration finished before the light write: {result:?}"),
+            };
             assert_eq!(light.0, StatusCode::OK);
             if reset {
                 let controller = Arc::new(
@@ -1790,23 +1802,16 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
                 );
                 crate::install_factory_reset_hook(&f.state, f.access.clone(), controller).unwrap();
                 f.state.lock().unwrap().after_factory_reset_fn = None;
-                assert_eq!(
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        json_request(
-                            f.admin(),
-                            Method::POST,
-                            "/api/factory-reset",
-                            Some(ADMIN),
-                            json!({}),
-                        )
-                    )
-                    .await
-                    .expect("reset waited on HA network I/O")
-                    .0,
-                    StatusCode::OK
-                );
+                let reset = tokio::select! {
+                    response = json_request(f.admin(), Method::POST, "/api/factory-reset", Some(ADMIN), json!({})) => response,
+                    result = &mut operation => panic!("HA administration finished before factory reset: {result:?}"),
+                };
+                assert_eq!(reset.0, StatusCode::OK);
             }
+            assert!(
+                !operation.is_finished(),
+                "HA operation completed before upstream release"
+            );
             finish_tx.send(()).unwrap();
             let result = operation.await.unwrap();
             upstream.await.unwrap();
@@ -1835,4 +1840,79 @@ async fn ha_administration_waits_leave_light_writes_usable_and_reset_fences_resu
             }
         }
     }
+}
+
+#[tokio::test]
+async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
+    let f = Fixture::new();
+    // HA starts RFC 8414 discovery from the full configured MCP URL.
+    let (status, metadata) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/.well-known/oauth-authorization-server/api/assistant/mcp",
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        metadata["authorization_endpoint"],
+        "/api/assistant/oauth/authorize"
+    );
+    assert_eq!(metadata["token_endpoint"], "/api/assistant/oauth/token");
+    let (status, issued) = json_request(
+        f.admin(),
+        Method::POST,
+        "/api/auth/agent-tokens",
+        Some(ADMIN),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = Some(issued["token"].as_str().unwrap());
+    let req = |method, params| json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+    let (status, tools) = json_request(
+        f.mobile(),
+        Method::POST,
+        rhythm_os::assistant::MCP_PATH,
+        token,
+        req("tools/list", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for op in rhythm_os::assistant::operation_registry()
+        .iter()
+        .filter(|op| op.tier != rhythm_os::assistant::OperationTier::OwnerOnly)
+    {
+        assert!(crate::policy::allows(&Method::POST, &op.invocation_path));
+        assert!(tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == op.id));
+    }
+    let mobile = f.mobile();
+    for op in rhythm_os::assistant::operation_registry() {
+        // A malformed input reaches a known handler without invoking native
+        // I/O. An unregistered or policy-denied mobile route fails this check.
+        let (status, error) = json_request(
+            mobile.clone(),
+            Method::POST,
+            &op.invocation_path,
+            token,
+            json!({"unknown_parity_argument": true}),
+        )
+        .await;
+        if op.tier == rhythm_os::assistant::OperationTier::OwnerOnly {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{}", op.id);
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {error}", op.id);
+        }
+    }
+    let (_,result)=json_request(f.mobile(),Method::POST,rhythm_os::assistant::MCP_PATH,token,req("tools/call",json!({
+        "name":"plan_move_device_room","arguments":{"device_id":"lamp","to_room_id":"office","correlation_id":"test"}}))).await;
+    let handoff: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(handoff["status"], "handoff");
+    assert_eq!(handoff["actor"], "ha_administrator");
 }

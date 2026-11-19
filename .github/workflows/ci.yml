@@ -90,7 +90,38 @@ jobs:
       - name: Build the contributor server
         run: cargo build --locked -p rhythm-server
       - name: Fresh server startup without cloud configuration
-        run: python3 tools/ci/smoke-server.py --binary target/debug/rhythm-server
+        run: python3 tools/ci/smoke-server.py --binary target/debug/rhythm-server --assistant-contract "${RUNNER_TEMP}/hub-contract.json"
+      - name: Share this server's live descriptors with the client parity tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-assistant-contract
+          path: ${{ runner.temp }}/hub-contract.json
+          retention-days: 1
+  assistant-clients:
+    name: Client and hub contract parity
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-assistant-contract
+          path: ${{ runner.temp }}
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - run: dart pub get
+        working-directory: sdk
+      - run: dart pub get
+        working-directory: admin-api
+      - run: flutter pub get
+        working-directory: app/flutter/rhythm_app
+      - run: tools/ci/check-assistant-clients.sh "${RUNNER_TEMP}/hub-contract.json"
   dart:
     name: Dart tests (${{ matrix.package }})
     runs-on: ubuntu-latest
@@ -150,7 +181,7 @@ jobs:
   required:
     name: Public contributor checks
     if: always()
-    needs: [changes, source, flutter, healthkit, rust, dart, admin-ui, matter-migration]
+    needs: [changes, source, flutter, healthkit, rust, dart, admin-ui, matter-migration, assistant-clients]
     runs-on: ubuntu-latest
     steps:
       - name: Require all contributor checks to pass

@@ -360,12 +360,21 @@ class DeviceProbeService {
     required String hubId,
     required DeviceAdminProxyRequestDto request,
   }) async {
+    if (request.needsAdmin && !session.staff.isAdmin) {
+      throw const AdminApiException(403,
+          'An enabled admin account is required for this device operation.');
+    }
     final hub = await _loadHub(session: session, hubId: hubId);
-    final candidates = _endpointCandidates(hub);
+    final candidates = _endpointCandidates(hub)
+        .where(
+            (candidate) => !request.isAssistant || candidate.route == 'remote')
+        .toList();
     if (candidates.isEmpty) {
-      throw const AdminApiException(
-        400,
-        'No endpoint is configured for this Light Box.',
+      throw AdminApiException(
+        request.isAssistant ? 403 : 400,
+        request.isAssistant
+            ? 'This hub needs a verified remote support route.'
+            : 'No endpoint is configured for this Light Box.',
       );
     }
 
@@ -374,22 +383,32 @@ class DeviceProbeService {
     var sawPreconditionFailure = false;
     for (final candidate in candidates) {
       final baseUrl = candidate.endpoint.baseUrl;
-      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final token = request.isAssistant
+          ? await _supportAccessSessionToken(session, hub, baseUrl,
+              assistantRequest: true)
+          : await _authTokenForEndpoint(session, hub, baseUrl);
+      if (request.isAssistant && token == null) {
+        sawAuthRequired = true;
+        continue;
+      }
       var result = await _proxyJsonFromEndpoint(
         hub: hub,
         candidate: candidate,
         request: request,
         authToken: token,
       );
-      if (result.authRequired && hub.authToken == null && token != null) {
+      if (result.authRequired &&
+          (request.isAssistant || hub.authToken == null) &&
+          token != null) {
         // The cached support-session token was rejected (revoked or the
         // device restarted); mint a fresh one and retry this endpoint once.
         _supportAccess?.invalidateSessionToken(
           hubId: hub.id,
           baseUrl: baseUrl,
         );
-        final freshToken =
-            await _supportAccessSessionToken(session, hub, baseUrl);
+        final freshToken = await _supportAccessSessionToken(
+            session, hub, baseUrl,
+            assistantRequest: request.isAssistant);
         if (freshToken != null && freshToken != token) {
           result = await _proxyJsonFromEndpoint(
             hub: hub,
@@ -416,7 +435,9 @@ class DeviceProbeService {
     if (sawAuthRequired) {
       throw AdminApiException(
         403,
-        _operationAuthRequiredMessage(hub, request.path),
+        request.isAssistant
+            ? 'An active customer support grant for this hub is required.'
+            : _operationAuthRequiredMessage(hub, request.path),
       );
     }
 
@@ -519,19 +540,23 @@ class DeviceProbeService {
     try {
       String? verifiedServerInstanceId;
       String? preconditionBodySha256;
-      if (request.isMutation) {
-        final state = await _fetchState(baseUrl, authToken);
+      if (request.isMutation || request.isAssistant) {
+        final state = await _fetchState(baseUrl, authToken,
+            followRedirects: !request.isAssistant);
         if (state.authRequired) {
           return const _ProxyJsonEndpointResult.authRequired();
         }
         if (state.error != null) {
           return _ProxyJsonEndpointResult.error(
-            'mutation identity preflight failed: ${state.error}',
+            'device identity preflight failed: ${state.error}',
           );
         }
         verifiedServerInstanceId = cleanString(state.hello?.serverInstanceId);
         if (verifiedServerInstanceId == null ||
-            verifiedServerInstanceId != request.expectedServerInstanceId) {
+            ((request.isMutation || request.expectedServerInstanceId != null) &&
+                verifiedServerInstanceId != request.expectedServerInstanceId) ||
+            (request.isAssistant &&
+                verifiedServerInstanceId != hub.serverInstanceId)) {
           return _ProxyJsonEndpointResult.preconditionFailed(
             'live server identity did not match expectedServerInstanceId.',
           );
@@ -572,6 +597,7 @@ class DeviceProbeService {
             request.queryParameters.isEmpty ? null : request.queryParameters,
       );
       final outbound = http.Request(request.method, uri)
+        ..followRedirects = false
         ..headers.addAll({
           'Accept': 'application/json',
           if (authToken != null) 'Authorization': 'Bearer $authToken',
@@ -592,7 +618,8 @@ class DeviceProbeService {
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _ProxyJsonEndpointResult.authRequired();
       }
-      if (request.resourcePrecondition != null && response.statusCode == 409) {
+      if ((request.resourcePrecondition != null || request.isAssistant) &&
+          response.statusCode == 409) {
         return _ProxyJsonEndpointResult.preconditionFailed(
           '${request.method} /${request.path} was rejected by the device because its live preconditions changed'
           '${_responseErrorSuffix(response)}.',
@@ -790,19 +817,22 @@ class DeviceProbeService {
     }
   }
 
-  Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
+  Future<_StateFetchResult> _fetchState(String baseUrl, String? token,
+      {bool followRedirects = true}) async {
     try {
-      final response = await _http.get(
-        _uriWithAppendedPath(
-          baseUrl,
-          'api/state',
-          queryParameters: const {'include': 'base'},
-        ),
-        headers: {
+      final request = http.Request(
+          'GET',
+          _uriWithAppendedPath(baseUrl, 'api/state',
+              queryParameters: const {'include': 'base'}))
+        ..followRedirects = followRedirects
+        ..headers.addAll({
           'Accept': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
+        });
+      final response = await _http
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(const Duration(seconds: 5));
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _StateFetchResult.authRequired();
       }
@@ -999,12 +1029,15 @@ class DeviceProbeService {
   Future<String?> _supportAccessSessionToken(
     AdminSession session,
     _ProbeHub hub,
-    String baseUrl,
-  ) {
+    String baseUrl, {
+    bool assistantRequest = false,
+  }) {
     return _supportAccess?.createSessionToken(
           session: session,
           hubId: hub.id,
           baseUrl: baseUrl,
+          assistantRequest: assistantRequest,
+          expectedServerInstanceId: hub.serverInstanceId,
         ) ??
         Future<String?>.value();
   }

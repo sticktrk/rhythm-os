@@ -27,6 +27,50 @@ pub struct SharedRoute {
 /// - Platform-specific OTA: `/api/ota/version`, `/api/ota/upload`, `/api/ota/capabilities`, `/api/ota/status`, `/api/ota/check`, `/api/ota/update`
 pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     SharedRoute {
+        path: "/.well-known/oauth-authorization-server/api/assistant/mcp",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/.well-known/oauth-authorization-server",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/assistant/oauth/authorize",
+        methods: &["GET", "POST"],
+    },
+    SharedRoute {
+        path: "/api/assistant/oauth/token",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/auth/assistant-clients",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: crate::assistant::MCP_PATH,
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/assistant/approvals",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/assistant/approvals/:plan_id",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: crate::assistant::OPERATION_PATH,
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/auth/agent-tokens",
+        methods: &["GET", "POST"],
+    },
+    SharedRoute {
+        path: "/api/auth/agent-tokens/:id",
+        methods: &["DELETE"],
+    },
+    SharedRoute {
         path: "/health",
         methods: &["GET"],
     },

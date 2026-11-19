@@ -6,7 +6,7 @@
 
 use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
-use crate::lighting::LightingCommand;
+use crate::lighting::{LightingCommand, SceneLightDispatch};
 use crate::primitives::{ManualDispatchPlan, PeriodicTickPlan};
 use crate::room::{LightNodeKind, ModeConfig, RoomProfileSettings};
 use crate::solar::{SolarTime, SunTimes};
@@ -182,6 +182,17 @@ pub trait RuntimeHandle: Send + Sync {
         self.restore_room_state(node_id, RestoredRoomState::from(&state));
     }
 
+    /// Compare all reviewed destinations and update the profile and offsets under
+    /// one engine write lock. A stale or unsupported edit leaves the engine intact.
+    fn apply_reviewed_light_edit(
+        &self,
+        _nodes: &[NodeSnapshot],
+        _base: &LightProfileConfig,
+        _edit: &ReviewedLightEdit,
+    ) -> Result<bool> {
+        anyhow::bail!("Runtime does not support reviewed lighting edits")
+    }
+
     /// Apply portable preferences atomically without replaying a snapshot's live
     /// mode, manual offsets, or motion state. Resolve every destination's mode
     /// before changing its ancestors, using the caller's authoritative global
@@ -234,6 +245,11 @@ pub trait RuntimeHandle: Send + Sync {
 
     /// Apply an explicit rendered lighting command to a room.
     fn apply_room_command(&self, room_id: &str, command: LightingCommand) -> Result<()>;
+
+    /// Render a temporary look without changing the node's operating state.
+    fn render_scene_preview(&self, _node_id: &str, _output: &SceneLightDispatch) -> Result<()> {
+        anyhow::bail!("Runtime does not support temporary scene output")
+    }
 
     /// Turn a room fully off, optionally fading out first.
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()>;
@@ -291,6 +307,11 @@ pub trait RuntimeHandle: Send + Sync {
     /// Get the current local hour from the time provider (0.0–24.0).
     fn current_hour(&self) -> f32;
 
+    /// Solar context used by the active engine to render its current commands.
+    fn current_curve_context(&self) -> Option<crate::CurveContext> {
+        None
+    }
+
     /// Set the active light profile by ID. Returns true if found.
     fn set_light_profile(&self, id: &str) -> bool;
 
@@ -340,7 +361,7 @@ pub struct RestoredRoomState {
 }
 
 /// Read-only snapshot of any addressable runtime node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeSnapshot {
     pub id: String,
     pub name: String,
@@ -355,6 +376,51 @@ pub struct NodeSnapshot {
     pub standby_enabled: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
+}
+
+/// A durable lighting preference proposed for one room, or a shared profile
+/// edit that absorbs the current look and clears top-level time offsets.
+#[derive(Debug, Clone)]
+pub enum ReviewedLightEdit {
+    RoomOverride {
+        room_id: String,
+        change: crate::LightProfileNodeOverride,
+    },
+    Absorb {
+        config: LightProfileConfig,
+    },
+}
+
+impl ReviewedLightEdit {
+    pub fn includes(&self, snapshot: &NodeSnapshot) -> bool {
+        snapshot.kind.is_light_addressable()
+            && match self {
+                Self::RoomOverride { room_id, .. } => {
+                    snapshot.id == *room_id || snapshot.parent_id.as_ref() == Some(room_id)
+                }
+                Self::Absorb { .. } => true,
+            }
+    }
+}
+
+impl From<&crate::Room> for NodeSnapshot {
+    fn from(node: &crate::Room) -> Self {
+        Self {
+            id: node.id.clone(),
+            name: node.name.clone(),
+            kind: node.kind,
+            parent_id: node.parent_id.clone(),
+            rhythm_enabled: node.rhythm_enabled,
+            disabled: node.disabled,
+            time_offset_minutes: node.time_offset_minutes,
+            brightness_offset: node.brightness_offset,
+            soft_off: node.soft_off,
+            mood_active: node.mood_active,
+            standby_enabled: node.standby_enabled,
+            hard_off: node.hard_off,
+            profile_settings: node.profile_settings.clone(),
+        }
+    }
 }
 
 impl NodeSnapshot {
@@ -789,46 +855,14 @@ where
     fn engine_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
         let engine = self.engine().read().ok()?;
         let node = engine.rooms().get(node_id)?;
-        Some(NodeSnapshot {
-            id: node.id.clone(),
-            name: node.name.clone(),
-            kind: node.kind,
-            parent_id: node.parent_id.clone(),
-            rhythm_enabled: node.rhythm_enabled,
-            disabled: node.disabled,
-            time_offset_minutes: node.time_offset_minutes,
-            brightness_offset: node.brightness_offset,
-            soft_off: node.soft_off,
-            mood_active: node.mood_active,
-            standby_enabled: node.standby_enabled,
-            hard_off: node.hard_off,
-            profile_settings: node.profile_settings.clone(),
-        })
+        Some(NodeSnapshot::from(node))
     }
 
     fn engine_all_node_snapshots(&self) -> Vec<NodeSnapshot> {
         let Ok(engine) = self.engine().read() else {
             return Vec::new();
         };
-        engine
-            .rooms()
-            .iter()
-            .map(|node| NodeSnapshot {
-                id: node.id.clone(),
-                name: node.name.clone(),
-                kind: node.kind,
-                parent_id: node.parent_id.clone(),
-                rhythm_enabled: node.rhythm_enabled,
-                disabled: node.disabled,
-                time_offset_minutes: node.time_offset_minutes,
-                brightness_offset: node.brightness_offset,
-                soft_off: node.soft_off,
-                mood_active: node.mood_active,
-                standby_enabled: node.standby_enabled,
-                hard_off: node.hard_off,
-                profile_settings: node.profile_settings.clone(),
-            })
-            .collect()
+        engine.rooms().iter().map(NodeSnapshot::from).collect()
     }
 
     fn engine_effective_node_snapshot(&self, node_id: &str) -> Option<NodeSnapshot> {
@@ -919,6 +953,58 @@ where
 
     fn restore_node_state(&self, node_id: &str, state: RestoredNodeState) {
         self.restore_room_state(node_id, RestoredRoomState::from(&state));
+    }
+
+    fn apply_reviewed_light_edit(
+        &self,
+        expected: &[NodeSnapshot],
+        base: &LightProfileConfig,
+        edit: &ReviewedLightEdit,
+    ) -> Result<bool> {
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|_| anyhow::anyhow!("engine lock"))?;
+        let mut live: Vec<_> = engine
+            .rooms()
+            .iter()
+            .map(NodeSnapshot::from)
+            .filter(|node| edit.includes(node))
+            .collect();
+        live.sort_by(|a, b| a.id.cmp(&b.id));
+        if live != expected || engine.profile_registry().profile_config(&base.id) != Some(base) {
+            return Ok(false);
+        }
+        match edit {
+            ReviewedLightEdit::RoomOverride { room_id, change } => {
+                let room = engine
+                    .rooms_mut()
+                    .get_mut(room_id)
+                    .ok_or_else(|| anyhow::anyhow!("Reviewed room unavailable"))?;
+                room.profile_settings
+                    .profile_overrides
+                    .entry(base.id.clone())
+                    .or_default()
+                    .merge_from(change);
+                engine.invalidate_periodic_cache_for_room(room_id);
+            }
+            ReviewedLightEdit::Absorb { config } => {
+                if config.id != base.id || !engine.set_light_profile_config(config.clone()) {
+                    return Ok(false);
+                }
+                for node in live {
+                    if node.parent_id.is_none() {
+                        engine
+                            .rooms_mut()
+                            .get_mut(&node.id)
+                            .unwrap()
+                            .set_time_offset(0.0);
+                    }
+                    engine.invalidate_periodic_cache_for_room(&node.id);
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn apply_light_node_preferences(
@@ -1094,6 +1180,26 @@ where
         .map_err(|e| anyhow::anyhow!("apply_room_command failed: {}", e))
     }
 
+    fn render_scene_preview(&self, node_id: &str, output: &SceneLightDispatch) -> Result<()> {
+        let gate = self.dispatch_lock(node_id);
+        let _guard = gate.lock().map_err(|_| anyhow::anyhow!("dispatch gate"))?;
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|_| anyhow::anyhow!("engine lock"))?;
+            match output {
+                SceneLightDispatch::On(command) => {
+                    engine.plan_non_periodic_turn_on(node_id, command.clone())
+                }
+                SceneLightDispatch::Off(transition) => {
+                    engine.plan_non_periodic_turn_off(node_id, *transition)
+                }
+            }
+        };
+        dispatch_manual_plan(self, dispatch)
+    }
+
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {
         let dispatch_lock = self.dispatch_lock(room_id);
         let _dispatch_guard = dispatch_lock
@@ -1242,6 +1348,14 @@ where
 
     fn current_hour(&self) -> f32 {
         RhythmRuntime::current_hour(self)
+    }
+
+    fn current_curve_context(&self) -> Option<crate::CurveContext> {
+        let hour = self.current_hour();
+        self.engine()
+            .read()
+            .ok()
+            .map(|engine| engine.create_context(hour))
     }
 
     fn set_light_profile(&self, id: &str) -> bool {

@@ -153,6 +153,12 @@ pub type StoredLightRuntimeState = BTreeMap<String, BTreeMap<String, BTreeMap<St
 pub trait Storage: Send + Sync {
     fn load_rooms(&self) -> Result<RoomManager>;
     fn save_rooms(&self, rooms: &RoomManager) -> Result<()>;
+    fn load_trial_recovery(&self) -> Result<Vec<crate::scenes::StoredTrialRecovery>> {
+        Ok(Vec::new())
+    }
+    fn save_trial_recovery(&self, _records: &[crate::scenes::StoredTrialRecovery]) -> Result<()> {
+        Ok(())
+    }
     fn load_light_profiles(&self) -> Result<StoredLightProfiles>;
     fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()>;
     fn load_location(&self) -> Result<StoredLocation>;
@@ -1352,6 +1358,18 @@ fn validate_integration_backup_path(path: &str) -> Result<std::path::PathBuf> {
 }
 
 impl Storage for FileStorage {
+    fn load_trial_recovery(&self) -> Result<Vec<crate::scenes::StoredTrialRecovery>> {
+        match std::fs::read(self.file_path("light-trial-recovery.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn save_trial_recovery(&self, records: &[crate::scenes::StoredTrialRecovery]) -> Result<()> {
+        self.write_atomic_durable("light-trial-recovery.json", &serde_json::to_vec(records)?)
+    }
+
     fn load_rooms(&self) -> Result<rhythm_core::room::RoomManager> {
         self.read_json("rooms.json")
     }
@@ -2273,6 +2291,8 @@ impl Storage for FileStorage {
     fn clear_factory_reset_state(&self) -> Result<()> {
         for name in [
             "rooms.json",
+            "light-trial-recovery.json",
+            "light-trial-recovery.json.tmp",
             "managed-ha-lights.json",
             "managed-ha-lights.json.tmp",
             "managed-ha-lights-v2.json",
@@ -2483,6 +2503,9 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         return;
     }
 
+    if let Err(error) = crate::commands::load_interrupted_trials(s) {
+        warn!(target: "sys", "Unable to load interrupted light trials: {}", error);
+    }
     ensure_server_instance_id(s);
 
     if let Some(storage) = s.storage.as_ref() {
@@ -6613,7 +6636,13 @@ mod tests {
             std::fs::write(path.join("local_ble").join("devices.json"), "{}").unwrap();
             std::fs::write(path.join("aidot_ble").join("devices.json"), "{}").unwrap();
 
-            for name in ["managed-ha-lights.json", "managed-ha-lights.json.tmp", "managed-ha-lights-v2.json", "managed-ha-lights-v2.json.tmp", "managed-ha-lights-v1.rollback.json"] {
+            for name in [
+                "managed-ha-lights.json",
+                "managed-ha-lights.json.tmp",
+                "managed-ha-lights-v2.json",
+                "managed-ha-lights-v2.json.tmp",
+                "managed-ha-lights-v1.rollback.json",
+            ] {
                 std::fs::write(path.join(name), "{}").unwrap();
             }
             storage.clear_factory_reset_state().unwrap();

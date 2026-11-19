@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 
-use super::identity::{CanonicalDevice, DiscoveredIdentity, HardwareId, HubKey, IntegrationEndpoint};
+use super::identity::{
+    CanonicalDevice, DiscoveredIdentity, HardwareId, HubKey, IntegrationEndpoint,
+};
 use super::triage::{
     CandidateMatch, MatchReason, TriageDiscoveredDevice, TriageEntry, TriageKind, TriageQueue,
     TriageStatus,

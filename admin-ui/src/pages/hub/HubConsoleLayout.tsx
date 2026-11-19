@@ -13,6 +13,7 @@ import {
   Lightbulb,
   Loader2,
   Moon,
+  MessageSquare,
   Network,
   Palette,
   RefreshCw,
@@ -39,6 +40,7 @@ const NAV_ITEMS: Array<{
   label: string;
   icon: React.ReactNode;
 }> = [
+  { to: 'assistant', label: 'Lighting assistant', icon: <MessageSquare size={17} /> },
   { to: 'overview', label: 'Overview', icon: <Gauge size={17} /> },
   { to: 'nodes', label: 'Rooms & Nodes', icon: <Lightbulb size={17} /> },
   { to: 'profiles', label: 'Profiles & Curves', icon: <Activity size={17} /> },

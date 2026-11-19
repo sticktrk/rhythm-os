@@ -109,17 +109,22 @@ pub fn sync_from_hub(state: &SharedState) -> Result<SyncReport> {
 /// Returns a combined report. Errors from individual hubs are logged but don't
 /// prevent syncing from other hubs.
 pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
-    let discover_devices = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.platform.full_device_discovery
-    };
+    sync_all_hubs_reviewed(state, &|_| Ok(()))
+}
 
-    let hub_keys: Vec<_> = {
+pub(crate) fn sync_all_hubs_reviewed(
+    state: &SharedState,
+    check: commands::ReviewCheck<'_>,
+) -> Result<SyncReport> {
+    let (discover_devices, hub_keys) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hubs
+        check(&s)?;
+        let keys: Vec<_> = s
+            .hubs
             .iter()
             .filter_map(|(key, hub)| hub.discovery.as_ref().map(|_| key.clone()))
-            .collect()
+            .collect();
+        (s.platform.full_device_discovery, keys)
     };
 
     if hub_keys.is_empty() {

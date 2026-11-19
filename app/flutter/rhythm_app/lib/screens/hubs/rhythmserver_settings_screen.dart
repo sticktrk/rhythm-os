@@ -36,6 +36,8 @@ import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
+import 'assistant_chat_screen.dart';
+import 'assistant_access_screen.dart';
 import 'device_pairing_flow.dart';
 import 'device_pairing_scanner_screen.dart';
 import 'hue_authority_screen.dart';
@@ -239,6 +241,35 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       _currentHub,
       syncProvider: context.read<ServerSyncProvider>(),
     );
+  }
+
+  Future<void> _openAssistantAccess() async {
+    final hub = _currentHub;
+    final homes = context.read<HomeProvider>();
+    final sync = context.read<ServerSyncProvider>();
+    final identity = sync.connectedServerInstanceId;
+    final home = homes.currentHome?.id;
+    if (identity == null || sync.connectedServerHub?.id != hub.id) return;
+    final direct = DirectHubAccess.capture();
+    final local = ServerEndpointResolver.local(hub);
+    bool sameTarget() =>
+        direct.isSameSelection &&
+        sync.connection.connected &&
+        sync.connectedServerInstanceId == identity &&
+        sync.connectedServerHub?.id == hub.id &&
+        homes.currentHome?.id == home &&
+        homes.activeServerHub?.id == hub.id;
+    await Navigator.push<void>(
+        context,
+        MaterialPageRoute(
+            builder: (_) => AssistantAccessScreen(
+                api: local.authApi(),
+                endpoint: Uri.parse('${local.baseUrl}/')
+                    .resolve('api/assistant/mcp')
+                    .toString(),
+                isCurrentTarget: sameTarget,
+                targetChanges:
+                    Listenable.merge([sync, homes, DirectHubAccess.changes]))));
   }
 
   Future<RhythmDiagnosticsApi> _diagnosticsClient() async {
@@ -475,6 +506,22 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
+                      if (widget.homeManaged &&
+                          context
+                                  .read<ServerSyncProvider>()
+                                  .connectedServerHub
+                                  ?.id ==
+                              widget.hub.id) ...[
+                        ListTile(
+                          leading: const Icon(Icons.chat_bubble_outline),
+                          title: const Text('Lighting assistant'),
+                          onTap: () => AssistantChatScreen.show(context),
+                        ),
+                        ListTile(
+                            leading: const Icon(Icons.key_outlined),
+                            title: const Text('Assistant access'),
+                            onTap: _openAssistantAccess),
+                      ],
                       if (widget.homeManaged) _buildSettingsNavigationSection(),
                       if (_supportsWifiChange) ...[
                         const SizedBox(height: 16),

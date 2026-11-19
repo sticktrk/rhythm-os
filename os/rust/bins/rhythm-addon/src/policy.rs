@@ -13,6 +13,10 @@ use rhythm_os::state::SharedState;
 use serde_json::json;
 
 const READ_PATHS: &[&str] = &[
+    "/api/auth/agent-tokens",
+    "/api/assistant/approvals",
+    "/api/assistant/contract",
+    "/api/assistant/topology",
     "/health",
     "/api/state",
     "/api/events",
@@ -56,6 +60,11 @@ const READ_PATHS: &[&str] = &[
 ];
 
 const WRITE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/api/assistant/approvals/:plan_id"),
+    ("POST", "/api/assistant/mcp"),
+    ("POST", "/api/auth/assistant-clients"),
+    ("POST", "/api/auth/agent-tokens"),
+    ("DELETE", "/api/auth/agent-tokens/:id"),
     ("POST", "/api/addon/matter/pair"),
     ("DELETE", "/api/addon/matter/pairing/:session"),
     ("POST", "/api/addon/matter/pairing/:session/device"),
@@ -148,11 +157,19 @@ fn matches_path(pattern: &str, path: &str) -> bool {
 }
 
 pub fn allows(method: &Method, path: &str) -> bool {
+    if rhythm_os::auth::assistant_oauth::public_route(method, path) {
+        return true;
+    }
     if path.contains('\\') {
         return false;
     }
     if method == Method::GET {
         return READ_PATHS.iter().any(|pattern| matches_path(pattern, path));
+    }
+    if method == Method::POST && path.starts_with("/api/assistant/operations/") {
+        return rhythm_os::assistant::operation_registry().iter().any(|op| {
+            op.invocation_path == path && op.tier != rhythm_os::assistant::OperationTier::OwnerOnly
+        });
     }
     WRITE_PATHS
         .iter()

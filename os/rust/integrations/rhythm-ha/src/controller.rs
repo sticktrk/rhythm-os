@@ -793,9 +793,11 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
                 .map_err(|_| LightControlError::Internal("HA registry lock".into()))?
                 .get_light_entities(room_id),
         };
-        let (selected, admission) = self.selected_devices(&ids)?;
+        let (selected, admission) = self
+            .selected_devices(&ids)
+            .map_err(|e| LightControlError::NotDispatched(e.to_string()))?;
         if self.managed_addon && selected.is_empty() {
-            return Err(LightControlError::CommandFailed(
+            return Err(LightControlError::NotDispatched(
                 "No reviewed HA light selected for identification".into(),
             ));
         }
@@ -827,13 +829,13 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
                                 let message = format!(
                                     "Home Assistant exposes no supported identification control for {id}"
                                 );
-                                LightControlError::CommandFailed(message)
+                                LightControlError::NotDispatched(message)
                             })
                     })
                     .collect::<LightControlResult<Vec<_>>>()?
             };
             if actions.is_empty() {
-                return Err(LightControlError::CommandFailed(
+                return Err(LightControlError::NotDispatched(
                     "No HA lights available for identification".into(),
                 ));
             }
@@ -852,7 +854,7 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
             return Ok(());
         }
         if self.managed_addon {
-            return Err(LightControlError::CommandFailed(
+            return Err(LightControlError::NotDispatched(
                 "HA identification inventory unavailable".into(),
             ));
         }
@@ -866,7 +868,7 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
                 serde_json::json!({"area_id":control_id})
             }
             _ => {
-                return Err(LightControlError::CommandFailed(
+                return Err(LightControlError::NotDispatched(
                     "HA flash: no entity_ids supplied".into(),
                 ))
             }

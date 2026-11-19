@@ -80,6 +80,7 @@ async fn image_health(request: Request<Body>, next: Next) -> Response {
 }
 
 pub fn create_mobile_router(state: SharedState, access: Arc<MobileAccess>) -> Router {
+    crate::selection::install_assistant(&state);
     let api = shared_routes()
         .route(
             "/api/addon/enrollment/exchange",
@@ -99,6 +100,7 @@ pub fn create_mobile_router(state: SharedState, access: Arc<MobileAccess>) -> Ro
 }
 
 pub fn create_admin_router(state: SharedState, access: Arc<MobileAccess>) -> Router {
+    crate::selection::install_assistant(&state);
     let api = shared_routes()
         .route(
             "/api/addon/enrollment",
@@ -243,7 +245,10 @@ async fn mobile_auth(
         )
             .into_response();
     }
-    if path == "/api/addon/enrollment/exchange" || path == "/api/addon/status" {
+    if rhythm_os::auth::assistant_oauth::public_route(request.method(), path)
+        || path == "/api/addon/enrollment/exchange"
+        || path == "/api/addon/status"
+    {
         return next.run(request).await;
     }
     let role =

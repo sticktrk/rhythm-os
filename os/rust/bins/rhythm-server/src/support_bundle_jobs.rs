@@ -780,6 +780,8 @@ mod tests {
             .api_auth
             .tokens
             .push(rhythm_os::auth::StoredApiToken {
+                support_principal: None,
+                unattended_changes: false,
                 id: "support-session".to_string(),
                 role: rhythm_os::auth::ApiTokenRole::Support,
                 token_hash: "mutable-token-hash".to_string(),

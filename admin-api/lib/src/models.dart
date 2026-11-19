@@ -1,3 +1,5 @@
+import 'assistant_read_operations.dart';
+
 class AdminApiException implements Exception {
   const AdminApiException(this.statusCode, this.message);
 
@@ -904,8 +906,19 @@ class DeviceAdminProxyRequestDto {
   final String? expectedServerInstanceId;
   final DeviceAdminResourcePreconditionDto? resourcePrecondition;
 
+  bool get isAssistant => path.startsWith('api/assistant/');
+  bool get observesHousehold =>
+      path.startsWith('api/assistant/operations/') &&
+      assistantHouseholdOperations.contains(path.split('/').last);
+  bool get needsAdmin => isMutation || observesHousehold;
   bool get isReadOnly =>
-      method == 'GET' || (method == 'POST' && path == 'api/curve');
+      method == 'GET' ||
+      (method == 'POST' &&
+          (path == 'api/curve' ||
+              path == 'api/assistant/plans/device-room-move' ||
+              (path.startsWith('api/assistant/operations/') &&
+                  assistantReadOperations.contains(
+                      path.substring('api/assistant/operations/'.length)))));
 
   bool get isMutation => !isReadOnly;
 
@@ -1007,12 +1020,30 @@ class DeviceAdminProxyRequestDto {
     var path = value.trim();
     if (path.startsWith('/')) path = path.substring(1);
     final lower = path.toLowerCase();
+    // IDs in existing device routes may be percent-encoded. Route families
+    // that select credentials or authorization policy must be unambiguous.
+    final segments = path.split('/');
+    var ambiguous = false;
+    if (path.contains('%')) {
+      try {
+        final decoded = Uri.decodeComponent(path);
+        ambiguous = segments.take(2).any((part) => part.contains('%')) ||
+            decoded.startsWith('api/auth/') ||
+            decoded.startsWith('api/assistant/') ||
+            decoded.contains('\\') ||
+            decoded.split('/').any((part) => part == '..' || part == '.') ||
+            RegExp(r'%25[0-9a-f]{2}').hasMatch(lower);
+      } on ArgumentError {
+        ambiguous = true;
+      }
+    }
     if (lower.startsWith('http://') ||
         lower.startsWith('https://') ||
         path.contains('?') ||
         path.contains('#') ||
         path.contains('\\') ||
-        path.split('/').any((part) => part == '..')) {
+        ambiguous ||
+        segments.any((part) => part.isEmpty || part == '.' || part == '..')) {
       throw const AdminApiException(
         400,
         'Device admin path must be a relative device API path.',
@@ -1024,7 +1055,15 @@ class DeviceAdminProxyRequestDto {
         'Device admin path must target health or /api/*.',
       );
     }
-    if (path == 'api/diag/debug-bundle' || path == 'api/ota/upload') {
+    if (path == 'api/diag/debug-bundle' ||
+        path == 'api/ota/upload' ||
+        path == 'api/auth/agent-tokens' ||
+        path.startsWith('api/auth/agent-tokens/') ||
+        path == 'api/auth/assistant-clients' ||
+        path == 'api/assistant/approvals' ||
+        path.startsWith('api/assistant/approvals/') ||
+        path == 'api/assistant/mcp' ||
+        path.startsWith('api/assistant/oauth/')) {
       throw const AdminApiException(
         400,
         'This endpoint is not available through the JSON device admin proxy.',

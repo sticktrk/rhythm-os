@@ -88,6 +88,7 @@ pub async fn get(State(state): State<SharedState>) -> Json<serde_json::Value> {
             cache.lights.iter().map(|(entity_id, entry)| json!({
         "entity_id": entity_id, "name": entry.name, "area_id": entry.area_id,
         "identity": entry.identity, "reviewable": entry.identity.is_some() && cache.lights_ready,
+        "reviewed_identity_current": entry.identity.as_ref().is_some_and(|identity| cache.reviewed.values().any(|proof| proof == identity)),
         "observation": entry.observation, "capabilities": entry.capabilities,
     })).collect()
         })
@@ -119,6 +120,47 @@ pub struct Update {
     entities: BTreeSet<String>,
     expected_entities: BTreeSet<String>,
     expected_snapshot_revision: Option<String>,
+}
+
+/// Install the same identity-checked selection used by the ordinary panel.
+pub fn install_assistant(state: &SharedState) {
+    use rhythm_os::assistant::devices::{platform_receipt, unsupported_platform, PlatformAction};
+    state.lock().expect("state lock").assistant_devices.platform = Some(std::sync::Arc::new(
+        |state, action| {
+            Box::pin(async move {
+                match action {
+                    PlatformAction::ReadHaSelection => {
+                        let value = get(State(state)).await.0;
+                        let available:Vec<_>=value["available"].as_array().into_iter().flatten().map(|row|json!({
+                    "entity_id":row["entity_id"],"name":row["name"],"reviewable":row["reviewable"],"reviewed_identity_current":row["reviewed_identity_current"]
+                })).collect();
+                        Ok(
+                            json!({"entities":value["entities"],"available":available,"unresolved":value["unresolved"],"snapshot_revision":value["snapshot_revision"],"ready":value["ready"]}),
+                        )
+                    }
+                    PlatformAction::SetHaSelection {
+                        entities,
+                        expected_entities,
+                        expected_revision,
+                    } => {
+                        platform_receipt(
+                            put(
+                                State(state),
+                                Json(Update {
+                                    entities,
+                                    expected_entities,
+                                    expected_snapshot_revision: Some(expected_revision),
+                                }),
+                            )
+                            .await,
+                        )
+                        .await
+                    }
+                    _ => Err(unsupported_platform()),
+                }
+            })
+        },
+    ));
 }
 
 fn atomic_write(dir: &Path, name: &str, value: &impl serde::Serialize) -> anyhow::Result<()> {

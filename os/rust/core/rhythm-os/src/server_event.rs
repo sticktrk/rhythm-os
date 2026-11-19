@@ -110,6 +110,14 @@ pub enum ServerEvent {
     ConfigChanged,
     /// Topology graph changed (client should re-hello).
     NodesChanged,
+    /// A temporary scene or light audition reached its expiry deadline.
+    ScenePreviewExpired {
+        trial_id: String,
+        target_id: String,
+        restoration: String,
+        restored: bool,
+    },
+
     /// Triage queue changed (new entries or resolutions).
     TriageChanged {
         /// Total pending entries.

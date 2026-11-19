@@ -24,11 +24,18 @@ class RhythmLogInterceptor extends Interceptor {
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
     final status = err.response?.statusCode;
+    // Dio exceptions carry the complete request and response. Assistant
+    // receipts may contain household evidence and registration responses can
+    // contain one-time secrets. Log only transport status on these routes.
+    final path = err.requestOptions.uri.path;
+    final sensitive = path.contains('/api/assistant/') ||
+        path.contains('/api/auth/agent-tokens') ||
+        path.endsWith('/api/auth/assistant-clients');
     _log.warning(
       '${err.type.name} ${err.requestOptions.method} '
       '${err.requestOptions.uri}'
       '${status != null ? ' [$status]' : ''}',
-      err,
+      sensitive ? null : err,
     );
     handler.next(err);
   }

@@ -1,0 +1,197 @@
+surface	method	path	classification	reason_or_operation
+rhythm-addon	POST	/api/addon/enrollment	handoff	Owner manages credentials and enrollment on their device.
+rhythm-addon	POST	/api/addon/enrollment/exchange	handoff	Owner manages credentials and enrollment on their device.
+rhythm-addon	GET	/api/addon/lights	operation	read_managed_ha_lights
+rhythm-addon	PUT	/api/addon/lights	operation	plan_managed_ha_lights
+rhythm-addon	GET	/api/addon/matter	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	DELETE	/api/addon/matter/devices/:id	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	POST	/api/addon/matter/pair	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	DELETE	/api/addon/matter/pairing/:session	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	GET	/api/addon/matter/pairing/:session	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	POST	/api/addon/matter/pairing/:session/device	handoff	HA administrator uses HA Matter management and reviews the physical target.
+rhythm-addon	GET	/api/addon/matter/setup-code/:id	handoff	Owner reviews the private pairing code in the commissioning interface.
+rhythm-addon	PUT	/api/addon/matter/setup-code/:id	handoff	Owner reviews the private pairing code in the commissioning interface.
+rhythm-addon	POST	/api/addon/matter/share/:id	handoff	Owner reviews the private pairing code in the commissioning interface.
+rhythm-addon	GET	/api/addon/mobile-tokens	handoff	Owner manages credentials and enrollment on their device.
+rhythm-addon	DELETE	/api/addon/mobile-tokens/:id	handoff	Owner manages credentials and enrollment on their device.
+rhythm-addon	GET	/api/addon/status	operation	read_hub_status
+rhythm-linux-appliance	DELETE	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-linux-appliance	GET	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-linux-appliance	PUT	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-linux-appliance	PUT	/api/wifi/profile/:id	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-linux-appliance	POST	/api/wifi/verify	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-linux-appliance	GET	/api/wifi/verify/:operation_id	handoff	Owner provisions or changes networks using the phone and local hub.
+rhythm-monster	GET	/local_lan/commands.json	exclusion	Integration protocol between the lamp and its driver.
+rhythm-monster	POST	/local_lan/key_exchange.json	exclusion	Integration protocol between the lamp and its driver.
+rhythm-monster	POST	/local_lan/property/datapoint.json	exclusion	Integration protocol between the lamp and its driver.
+rhythm-monster	PUT	/local_lan/property/datapoint.json	exclusion	Integration protocol between the lamp and its driver.
+rhythm-server	POST	/api/diag/debug-bundle	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
+rhythm-server	GET	/api/diag/logs	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
+rhythm-server	GET	/api/diag/logs/:source/stream	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
+rhythm-server	GET	/api/diag/logs/:source/tail	handoff	Staff diagnostic workflow checks the support grant and sanitizes the evidence.
+rhythm-server	POST	/api/diag/reset-matter-fabric	handoff	Owner reviews installation backup, destructive reset and recovery.
+rhythm-server	GET	/api/discover	handoff	The resident selects a nearby hub in the app before starting the hub-scoped conversation.
+rhythm-server	GET	/api/ota/capabilities	operation	check_hub_update
+rhythm-server	GET	/api/ota/check	operation	check_hub_update
+rhythm-server	GET	/api/ota/status	operation	read_appliance_update_status
+rhythm-server	POST	/api/ota/update	operation	plan_hub_update
+rhythm-server	POST	/api/restart	operation	plan_hub_restart
+shared	GET	/.well-known/oauth-authorization-server	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	GET	/.well-known/oauth-authorization-server/api/assistant/mcp	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	DELETE	/api/activity-cloud/config	handoff	Account holder provisions the activity upload credential in Rhythm.
+shared	GET	/api/activity-cloud/config	operation	read_activity_upload
+shared	PUT	/api/activity-cloud/config	operation	plan_activity_upload
+shared	GET	/api/assistant/approvals	handoff	The owner reviews pending agent changes on this hub.
+shared	POST	/api/assistant/approvals/:plan_id	handoff	The owner approves or declines the reviewed change.
+shared	GET	/api/assistant/contract	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	POST	/api/assistant/mcp	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	GET	/api/assistant/oauth/authorize	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	POST	/api/assistant/oauth/authorize	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	POST	/api/assistant/oauth/token	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	POST	/api/assistant/operations/:operation_id	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	POST	/api/assistant/plans/device-room-move	operation	plan_move_device_room
+shared	POST	/api/assistant/plans/device-room-move/apply	operation	apply_move_device_room_plan
+shared	GET	/api/assistant/topology	operation	get_topology_snapshot
+shared	GET	/api/auth/agent-tokens	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/agent-tokens	handoff	Owner manages credentials and enrollment on their device.
+shared	DELETE	/api/auth/agent-tokens/:id	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/assistant-clients	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/claim	handoff	Owner manages credentials and enrollment on their device.
+shared	PUT	/api/auth/settings	handoff	Owner manages credentials and enrollment on their device.
+shared	GET	/api/auth/status	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/support-session-token	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/support-session-token/revoke	handoff	Owner manages credentials and enrollment on their device.
+shared	POST	/api/auth/support-token	handoff	Owner manages credentials and enrollment on their device.
+shared	GET	/api/backup	handoff	Owner reviews installation backup, destructive reset and recovery.
+shared	PUT	/api/backup	handoff	Owner reviews installation backup, destructive reset and recovery.
+shared	POST	/api/cloud/join-proof	handoff	Owner manages credentials and enrollment on their device.
+shared	GET	/api/config	operation	export_lighting_settings
+shared	PUT	/api/config	operation	plan_profile_edit
+shared	POST	/api/config/absorb-offset	operation	plan_absorb_offset
+shared	POST	/api/config/reset	operation	plan_profile_reset
+shared	GET	/api/curve	operation	read_profile_curve
+shared	POST	/api/curve	operation	read_profile_curve
+shared	GET	/api/curve/now	operation	read_profile_curve
+shared	GET	/api/curve/solar	operation	read_profile_curve
+shared	GET	/api/device-attention	operation	read_device_review
+shared	PUT	/api/device-attention/:id/removal-selected	operation	plan_device_review
+shared	PUT	/api/device-attention/:id/snooze	operation	plan_device_review
+shared	PUT	/api/device-attention/:id/still-installed	operation	plan_device_review
+shared	DELETE	/api/devices	operation	plan_remove_device
+shared	GET	/api/devices/canonical	operation	get_topology_snapshot
+shared	DELETE	/api/devices/canonical/:id	handoff	Owner reviews archived identity before permanent deletion.
+shared	GET	/api/devices/canonical/:id	operation	read_device_connections
+shared	PUT	/api/devices/canonical/:id	operation	plan_rename_device
+shared	POST	/api/devices/canonical/:id/flash	operation	identify_device
+shared	PUT	/api/devices/canonical/:id/parent	operation	plan_move_device_room
+shared	PUT	/api/devices/canonical/:id/preferred	operation	plan_preferred_endpoint
+shared	PUT	/api/devices/canonical/:id/room	operation	plan_unassign_device
+shared	POST	/api/devices/pair	operation	plan_nearby_hue_lights
+shared	DELETE	/api/devices/pair/:session_id	handoff	The resident cancels the matching commissioning session on the phone used for setup.
+shared	GET	/api/devices/pair/:session_id	operation	read_pairing_result
+shared	GET	/api/devices/removed	handoff	Owner reviews archived identity before permanent deletion.
+shared	POST	/api/devices/unpair	operation	plan_remove_device
+shared	GET	/api/events	exclusion	Unbounded transport stream. Walk operations expose time-limited evidence for the selected sensor.
+shared	POST	/api/factory-reset	handoff	Owner reviews installation backup, destructive reset and recovery.
+shared	GET	/api/history	operation	read_lighting_history
+shared	DELETE	/api/hub/credentials	handoff	Owner supplies or revokes the integration credential.
+shared	PUT	/api/hub/credentials	handoff	Owner supplies or revokes the integration credential.
+shared	POST	/api/hub/retry	operation	plan_bridge_retry
+shared	GET	/api/hue/authority	operation	read_integrations
+shared	PUT	/api/hue/authority	operation	plan_hue_authority
+shared	GET	/api/input-bindings	operation	read_automation_settings
+shared	POST	/api/input-bindings	operation	plan_input_binding_edit
+shared	DELETE	/api/input-bindings/:id	operation	plan_input_binding_edit
+shared	PUT	/api/input-bindings/:id	operation	plan_input_binding_edit
+shared	GET	/api/light-breaker	operation	read_hub_status
+shared	PUT	/api/light-breaker	operation	plan_light_breaker_edit
+shared	PUT	/api/light-profile	exclusion	Retired route always rejects global profile selection. Use set_house_lighting_mode or plan_mode_settings_edit.
+shared	GET	/api/light-runtime	operation	read_automation_settings
+shared	PUT	/api/light-runtime	operation	plan_light_runtime_edit
+shared	GET	/api/light-runtimes	operation	read_automation_settings
+shared	DELETE	/api/light-runtimes/:runtime_id/*path	exclusion	Runtime-specific extension accepts arbitrary plugin-defined requests.
+shared	GET	/api/light-runtimes/:runtime_id/*path	exclusion	Runtime-specific extension accepts arbitrary plugin-defined requests.
+shared	PATCH	/api/light-runtimes/:runtime_id/*path	exclusion	Runtime-specific extension accepts arbitrary plugin-defined requests.
+shared	POST	/api/light-runtimes/:runtime_id/*path	exclusion	Runtime-specific extension accepts arbitrary plugin-defined requests.
+shared	PUT	/api/light-runtimes/:runtime_id/*path	exclusion	Runtime-specific extension accepts arbitrary plugin-defined requests.
+shared	GET	/api/light-runtimes/:runtime_id/manifest	operation	read_automation_settings
+shared	GET	/api/light-schedules	operation	read_automation_settings
+shared	PUT	/api/light-schedules	operation	plan_light_schedule_edit
+shared	POST	/api/light-schedules/:schedule_id/transitions/:transition_id/trigger	operation	run_schedule_transition
+shared	PUT	/api/light-schedules/assignment	operation	plan_schedule_assignment_edit
+shared	PUT	/api/light-schedules/override	operation	plan_schedule_override_edit
+shared	GET	/api/lighting-settings	operation	export_lighting_settings
+shared	PUT	/api/lighting-settings	operation	plan_lighting_transfer
+shared	POST	/api/lighting-settings/preview	operation	plan_lighting_transfer
+shared	PUT	/api/location	handoff	Phone location consent or HA administrator location selection is required.
+shared	POST	/api/matter/audition/report	handoff	Resident verifies physical bulb behavior in the device audition flow.
+shared	POST	/api/matter/audition/run	handoff	Resident verifies physical bulb behavior in the device audition flow.
+shared	POST	/api/matter/bulb-test/report	handoff	Resident verifies physical bulb behavior in the device audition flow.
+shared	POST	/api/matter/bulb-test/run	handoff	Resident verifies physical bulb behavior in the device audition flow.
+shared	GET	/api/matter/captures	exclusion	Raw protocol capture can contain private commissioning data.
+shared	GET	/api/matter/captures/:id	exclusion	Raw protocol capture can contain private commissioning data.
+shared	GET	/api/matter/setup-code/:id	handoff	Owner reviews the private pairing code in the commissioning interface.
+shared	GET	/api/matter/wifi-change	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	POST	/api/matter/wifi-change	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/matter/wifi-change/:id	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/matter/wifi-network/:id	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/mode	operation	read_room_lighting_setup
+shared	PUT	/api/mode	operation	set_house_lighting_mode
+shared	PUT	/api/nodes/action	operation	control_room_power
+shared	PUT	/api/nodes/brightness	operation	adjust_room_brightness
+shared	PUT	/api/nodes/color	operation	set_room_color
+shared	PUT	/api/nodes/curve	operation	step_room_curve
+shared	PUT	/api/nodes/motion-activation	operation	plan_node_preferences_edit
+shared	PUT	/api/nodes/offset	operation	set_room_offset
+shared	PUT	/api/nodes/preferences	operation	plan_node_preferences_edit
+shared	PUT	/api/nodes/profile-overrides	operation	plan_node_preferences_edit
+shared	GET	/api/nodes/state	operation	read_lighting_state
+shared	GET	/api/pairing/wifi-credentials	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/pairing/wifi-profiles	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	PUT	/api/pairing/wifi-profiles	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/pairing/wifi-profiles/:id/credentials	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/profile-bundle	operation	export_lighting_settings
+shared	PUT	/api/profile-bundle	operation	plan_lighting_transfer
+shared	GET	/api/profile-bundle/factory-default	operation	read_factory_profiles
+shared	POST	/api/profile-bundle/reset	operation	plan_profile_bundle_reset
+shared	GET	/api/profiles	operation	export_lighting_settings
+shared	DELETE	/api/remote-access/config	handoff	Owner configures the authorized tunnel from the selected home.
+shared	PUT	/api/remote-access/config	handoff	Owner configures the authorized tunnel from the selected home.
+shared	GET	/api/remote-access/status	handoff	Owner configures the authorized tunnel from the selected home.
+shared	POST	/api/scene-previews/:id/cancel	operation	undo_room_trial
+shared	POST	/api/scene-previews/:id/commit	operation	plan_scene_preview_commit_edit
+shared	GET	/api/scenes	operation	read_room_lighting_setup
+shared	POST	/api/scenes	operation	plan_scene_edit
+shared	DELETE	/api/scenes/:id	operation	plan_scene_edit
+shared	PUT	/api/scenes/:id	operation	plan_scene_edit
+shared	POST	/api/scenes/:id/apply	operation	apply_room_scene
+shared	POST	/api/scenes/:id/apply-home	operation	plan_home_scene_edit
+shared	POST	/api/scenes/:id/preview	operation	preview_room_scene
+shared	POST	/api/scenes/preview	operation	preview_room_scene_draft
+shared	GET	/api/settings	operation	read_automation_settings
+shared	PUT	/api/settings	operation	plan_update_settings_edit
+shared	GET	/api/share-bundle	operation	export_lighting_settings
+shared	PUT	/api/share-bundle	operation	plan_lighting_transfer
+shared	GET	/api/share-bundle/factory-default	operation	read_factory_profiles
+shared	POST	/api/share-bundle/reset	operation	plan_profile_bundle_reset
+shared	GET	/api/state	operation	read_lighting_state
+shared	POST	/api/sync	operation	plan_discovery_sync
+shared	GET	/api/topology/nodes	operation	get_topology_snapshot
+shared	PUT	/api/topology/nodes/:id/controls/:kind	operation	plan_control_targets
+shared	GET	/api/topology/rooms	operation	get_topology_snapshot
+shared	POST	/api/topology/rooms	operation	plan_create_room
+shared	DELETE	/api/topology/rooms/:id	operation	plan_delete_room
+shared	PUT	/api/topology/rooms/:id	operation	plan_rename_room
+shared	PUT	/api/topology/rooms/:id/devices/move	operation	plan_move_device_room
+shared	PUT	/api/topology/rooms/:id/merge	operation	plan_merge_rooms
+shared	GET	/api/transitions	operation	read_room_lighting_setup
+shared	PUT	/api/transitions	operation	plan_mode_transitions_edit
+shared	POST	/api/transitions/:id/trigger	operation	run_mode_transition
+shared	GET	/api/triage	operation	read_device_review
+shared	PUT	/api/triage/:id/bind	operation	plan_device_review
+shared	PUT	/api/triage/:id/dismiss	operation	plan_device_review
+shared	PUT	/api/triage/:id/merge	operation	plan_device_review
+shared	PUT	/api/triage/:id/new	operation	plan_device_review
+shared	PUT	/api/triage/:id/room	operation	plan_move_device_room
+shared	GET	/api/triage/count	operation	read_device_review
+shared	GET	/health	operation	read_hub_status

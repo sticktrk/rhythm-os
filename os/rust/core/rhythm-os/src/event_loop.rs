@@ -13,6 +13,7 @@ use log::{debug, info, warn};
 use rhythm_core::ButtonAction;
 use rhythm_runtime_api::{RuntimeEvent, RuntimeInputEvent, TickContext};
 
+use crate::assistant::motion::{self as walk_test, WalkStep};
 use crate::canonical::identity::HubKey;
 use crate::commands;
 use crate::hub::{HubEvent, HubType};
@@ -556,6 +557,10 @@ pub fn dim_node_inline(state: &SharedState, node_id: &str, factor: f32) -> bool 
 /// Used by motion - always turns ON (never toggles), skipping the
 /// `any_lights_on` HTTP round-trip that `toggle` would perform.
 pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
+    turn_on_node_with_dispatch_count(state, node_id).is_some()
+}
+
+fn turn_on_node_with_dispatch_count(state: &SharedState, node_id: &str) -> Option<usize> {
     let command_id = logging::next_command_id("motion");
     let span = tracing::info_span!(
         target: "evt",
@@ -568,13 +573,11 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     let runtime = {
         let Ok(s) = state.lock() else {
             warn!(target: "evt", "turn_on_node_inline: state lock poisoned");
-            return false;
+            return None;
         };
         s.hub_runtime()
     };
-    let Some(runtime) = runtime else {
-        return false;
-    };
+    let runtime = runtime?;
     match crate::light_runtime::turn_on_room_route_aware(state, runtime.as_ref(), node_id) {
         Ok(dispatch_count) => {
             tracing::info!(
@@ -605,7 +608,7 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
                 node_id,
                 true,
             );
-            true
+            Some(dispatch_count)
         }
         Err(e) => {
             tracing::warn!(
@@ -616,7 +619,7 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
                 "Motion: turn_on node '{}' failed",
                 node_id
             );
-            false
+            None
         }
     }
 }
@@ -903,15 +906,22 @@ fn spawn_input_binding_action(
     }
 }
 
-fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl FnOnce()) {
+fn run_motion_action_if_allowed(
+    state: &SharedState,
+    node_id: &str,
+    walk_event: Option<u64>,
+    action: impl FnOnce(),
+) {
     let Some(transaction) = state
         .lock()
         .ok()
         .map(|s| s.motion_scene_transaction_lock.clone())
     else {
+        walk_test::record_step(state, walk_event, node_id, WalkStep::Uncertain);
         return;
     };
     let Ok(_guard) = transaction.read() else {
+        walk_test::record_step(state, walk_event, node_id, WalkStep::Uncertain);
         return;
     };
     let reason = if !commands::rhythm_automation_allowed_for_node(state, node_id) {
@@ -927,6 +937,7 @@ fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl
             reason,
             "Queued motion action retired after its target changed"
         );
+        walk_test::record_step(state, walk_event, node_id, WalkStep::Suppressed(reason));
         return;
     }
     // Hold arbitration through I/O: a home scene must not commit between the
@@ -934,10 +945,18 @@ fn run_motion_action_if_allowed(state: &SharedState, node_id: &str, action: impl
     action();
 }
 
-fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
-    run_motion_action_if_allowed(state, node_id, || {
+fn run_motion_turn_on_action(state: &SharedState, node_id: &str, walk_event: Option<u64>) {
+    run_motion_action_if_allowed(state, node_id, walk_event, || {
         // Motion ingress is fast lane for occupancy responsiveness.
-        if !turn_on_node_inline(state, node_id) {
+        walk_test::record_step(state, walk_event, node_id, WalkStep::Dispatching);
+        let count = turn_on_node_with_dispatch_count(state, node_id);
+        let step = match count {
+            Some(0) => WalkStep::NoDispatch,
+            Some(_) => WalkStep::Acknowledged,
+            None => WalkStep::Uncertain,
+        };
+        walk_test::record_step(state, walk_event, node_id, step);
+        if count.is_none() {
             return;
         }
         let runtime = {
@@ -950,26 +969,26 @@ fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
     });
 }
 
-fn spawn_motion_turn_on_action(state: &SharedState, node_id: String) {
+fn spawn_motion_turn_on_action(state: &SharedState, node_id: String, walk_event: Option<u64>) {
     let builder = std::thread::Builder::new().name("evt-motion".to_string());
 
     let state_clone = state.clone();
     let node_id_clone = node_id.clone();
 
     if let Err(error) = builder.spawn(move || {
-        run_motion_turn_on_action(&state_clone, &node_id_clone);
+        run_motion_turn_on_action(&state_clone, &node_id_clone, walk_event);
     }) {
         warn!(
             target: "evt",
             "Failed to spawn motion dispatch thread: {}",
             error
         );
-        run_motion_turn_on_action(state, &node_id);
+        run_motion_turn_on_action(state, &node_id, walk_event);
     }
 }
 
 fn run_motion_dim_action(state: &SharedState, node_id: &str, factor: f32) {
-    run_motion_action_if_allowed(state, node_id, || {
+    run_motion_action_if_allowed(state, node_id, None, || {
         dim_node_inline(state, node_id, factor);
     });
 }
@@ -1888,6 +1907,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 return;
             };
             if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                walk_test::record_detection(state, &source_node_id, detected, &[], true);
                 tracing::info!(
                     target: "evt",
                     event = "motion_node_control_suppressed",
@@ -1904,6 +1924,13 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 state,
                 &source_node_id,
                 &NodeControlKind::Motion,
+            );
+            let walk_event = walk_test::record_detection(
+                state,
+                &source_node_id,
+                detected,
+                &target_node_ids,
+                false,
             );
             if target_node_ids.is_empty() {
                 emit_motion_input_event(
@@ -1941,6 +1968,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     },
                 );
                 if !commands::rhythm_automation_allowed_for_node(state, &target_node_id) {
+                    walk_test::record_step(
+                        state,
+                        walk_event,
+                        &target_node_id,
+                        WalkStep::Suppressed("external_room_authority"),
+                    );
                     tracing::info!(
                         target: "evt",
                         event = "motion_node_control_suppressed",
@@ -1955,6 +1988,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     continue;
                 }
                 if !light_breaker_enabled {
+                    walk_test::record_step(
+                        state,
+                        walk_event,
+                        &target_node_id,
+                        WalkStep::Suppressed("light_breaker_disabled"),
+                    );
                     tracing::info!(
                         target: "evt",
                         event = "motion_node_control_suppressed",
@@ -1969,6 +2008,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     continue;
                 }
                 if let Some(reason) = motion_suppression_reason_for_target(state, &target_node_id) {
+                    walk_test::record_step(
+                        state,
+                        walk_event,
+                        &target_node_id,
+                        WalkStep::Suppressed(reason),
+                    );
                     tracing::info!(
                         target: "evt",
                         event = "motion_node_control_suppressed",
@@ -2019,6 +2064,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                             && !target_is_semantically_idle;
 
                         if target_was_already_on {
+                            walk_test::record_step(
+                                state,
+                                walk_event,
+                                &target_node_id,
+                                WalkStep::NotNeeded("already_on"),
+                            );
                             info!(
                                 target: "evt",
                                 "Motion: new activation source {} -> target {} already on; tracking without ownership or turn_on",
@@ -2034,6 +2085,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                                     && !prior_motion_turn_on_requested);
 
                             if should_turn_on {
+                                walk_test::record_step(
+                                    state,
+                                    walk_event,
+                                    &target_node_id,
+                                    WalkStep::Queued,
+                                );
                                 motion
                                     .motion_turn_on_requested
                                     .insert(target_node_id.clone());
@@ -2044,8 +2101,18 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                                     target_node_id
                                 );
 
-                                spawn_motion_turn_on_action(state, target_node_id.clone());
+                                spawn_motion_turn_on_action(
+                                    state,
+                                    target_node_id.clone(),
+                                    walk_event,
+                                );
                             } else {
+                                walk_test::record_step(
+                                    state,
+                                    walk_event,
+                                    &target_node_id,
+                                    WalkStep::NotNeeded("active_countdown"),
+                                );
                                 info!(
                                     target: "evt",
                                     "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
@@ -2055,6 +2122,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                             }
                         }
                     } else {
+                        walk_test::record_step(
+                            state,
+                            walk_event,
+                            &target_node_id,
+                            WalkStep::NotNeeded("already_tracking"),
+                        );
                         info!(
                             target: "evt",
                             "Motion: continued/refreshed source {} -> target {}",
@@ -2316,6 +2389,18 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 {
                     return;
                 }
+                let observed_ms = observation
+                    .source_at_epoch_ms
+                    .map(|t| t.max(0) as u64)
+                    .unwrap_or(observation.received_at_epoch_ms)
+                    .min(observation.received_at_epoch_ms);
+                walk_test::record_light_report(
+                    &mut s,
+                    &node_id,
+                    &observation.availability,
+                    observation.lights_on,
+                    observed_ms,
+                );
                 s.light_observations
                     .insert(node_id.clone(), observation.clone());
                 // Unknown and unavailable invalidate power evidence rather than
@@ -2354,7 +2439,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 match runtime.pause_light_node(&node_id) {
                     Ok(true) => commands::persist_rooms(state),
                     Ok(false) => {}
-                    Err(error) => warn!(target: "evt", "Failed to pause HA light '{}': {}", node_id, error),
+                    Err(error) => {
+                        warn!(target: "evt", "Failed to pause HA light '{}': {}", node_id, error)
+                    }
                 }
             }
             commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
@@ -2396,6 +2483,15 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            if let Ok(mut s) = state.lock() {
+                walk_test::record_light_report(
+                    &mut s,
+                    &node_id,
+                    "available",
+                    Some(lights_on),
+                    current_epoch_ms(),
+                );
+            }
             info!(
                 target: "evt",
                 "Light power report from {:?}:{} resolved to {} lights_on={}",
@@ -2711,7 +2807,7 @@ fn run_motion_timeout_restore(
     mode_default: Option<rhythm_core::RoomModeState>,
     command_id: &str,
 ) {
-    run_motion_action_if_allowed(state, target_node_id, || {
+    run_motion_action_if_allowed(state, target_node_id, None, || {
         run_motion_timeout_restore_inner(state, target_node_id, mode_default, command_id);
     });
 }
@@ -3464,7 +3560,7 @@ pub fn apply_pending_motion_seeds(
             "Motion: active startup seed source -> target {} (owned=true)",
             target_node_id
         );
-        spawn_motion_turn_on_action(state, target_node_id);
+        spawn_motion_turn_on_action(state, target_node_id, None);
     }
 
     let applied_count = active_count + owned_inactive_count + idle_count;
@@ -8202,7 +8298,7 @@ mod tests {
         for action in 0..6 {
             let callback_state = state.clone();
             callbacks.push(std::thread::spawn(move || match action {
-                0 => run_motion_turn_on_action(&callback_state, "room_a"),
+                0 => run_motion_turn_on_action(&callback_state, "room_a", None),
                 1 => run_motion_dim_action(&callback_state, "room_a", 0.5),
                 2 => run_motion_dim_action(&callback_state, "room_a", 1.0),
                 3 => run_motion_timeout_restore(&callback_state, "room_a", None, "stale-timeout"),
@@ -8303,7 +8399,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let motion_state = state.clone();
         let motion = std::thread::spawn(move || {
-            run_motion_action_if_allowed(&motion_state, "room_a", || {
+            run_motion_action_if_allowed(&motion_state, "room_a", None, || {
                 entered_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(turn_on_node_inline(&motion_state, "room_a"));
@@ -8344,7 +8440,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let slow_state = state.clone();
         let slow = std::thread::spawn(move || {
-            run_motion_action_if_allowed(&slow_state, "room_a", || {
+            run_motion_action_if_allowed(&slow_state, "room_a", None, || {
                 entered_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(turn_on_node_inline(&slow_state, "room_a"));
@@ -8354,7 +8450,7 @@ mod tests {
         let (completed_tx, completed_rx) = std::sync::mpsc::channel();
         let sibling_state = state.clone();
         let sibling = std::thread::spawn(move || {
-            run_motion_turn_on_action(&sibling_state, "room_b");
+            run_motion_turn_on_action(&sibling_state, "room_b", None);
             completed_tx.send(()).unwrap();
         });
         let sibling_completed = completed_rx.recv_timeout(Duration::from_secs(1)).is_ok();
@@ -8399,6 +8495,351 @@ mod tests {
 
         assert_eq!(motion_suppression_reason_for_target(&state, "room_a"), None);
         assert!(motion_activation_enabled_for_target(&state, "room_a"));
+    }
+
+    #[tokio::test]
+    async fn assistant_motion_walk_respects_managed_ha_selection_on_each_read() {
+        use crate::assistant::motion::call;
+        use serde_json::json;
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("hall", false, false),
+        ]));
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::HA);
+        let hub = only_hub_key(&state);
+        let sensor = add_canonical_control_source(
+            &state,
+            &hub,
+            "binary_sensor.motion",
+            "hall",
+            DeviceType::Motion,
+        );
+        let selected =
+            add_canonical_control_source(&state, &hub, "light.managed", "hall", DeviceType::Light);
+        let other =
+            add_canonical_control_source(&state, &hub, "light.other", "hall", DeviceType::Light);
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_context = "ha_addon";
+            s.managed_ha_lights = Some(["light.managed".to_string()].into());
+        }
+        let walk = call(
+            &state,
+            "start_motion_walk",
+            json!({"sensor_id":sensor,"room_id":"hall"}),
+        )
+        .await
+        .unwrap();
+        let inspect = json!({"walk_id":walk["walk_id"]});
+        let report = call(&state, "inspect_motion_walk", inspect.clone())
+            .await
+            .unwrap();
+        assert_eq!(report["lights"].as_array().unwrap().len(), 1);
+        assert_eq!(report["lights"][0]["device_id"], selected);
+        assert!(!report.to_string().contains(&other));
+        state
+            .lock()
+            .unwrap()
+            .managed_ha_lights
+            .as_mut()
+            .unwrap()
+            .clear();
+        assert_eq!(
+            call(&state, "inspect_motion_walk", inspect)
+                .await
+                .unwrap_err()
+                .code,
+            "walk_scope_changed"
+        );
+    }
+
+    struct MotionWalkClients {
+        router: axum::Router,
+        resident: String,
+        staff: String,
+        agent: String,
+    }
+
+    impl MotionWalkClients {
+        async fn new(state: &SharedState) -> Self {
+            let resident = crate::auth::issue_local_owner_token(state, None)
+                .unwrap()
+                .token;
+            let staff = crate::auth::issue_support_session_token(state, None, None)
+                .unwrap()
+                .0
+                .token;
+            let router = crate::axum_router::api_routes()
+                .with_state(state.clone())
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth::require_api_auth_middleware,
+                ));
+            let issued = Self::post(
+                &router,
+                "/api/auth/agent-tokens",
+                &resident,
+                serde_json::json!({}),
+            )
+            .await;
+            Self {
+                router,
+                resident,
+                staff,
+                agent: issued["token"].as_str().unwrap().into(),
+            }
+        }
+
+        async fn post(
+            router: &axum::Router,
+            path: &str,
+            token: &str,
+            body: serde_json::Value,
+        ) -> serde_json::Value {
+            use axum::{
+                body::{to_bytes, Body},
+                http::{Request, StatusCode},
+            };
+            use tower::ServiceExt;
+            let request = Request::post(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap()
+        }
+
+        async fn verify(&self, expected: &serde_json::Value) {
+            let args = serde_json::json!({"walk_id":expected["walk_id"]});
+            for token in [&self.resident, &self.staff] {
+                let rest = Self::post(
+                    &self.router,
+                    "/api/assistant/operations/inspect_motion_walk",
+                    token,
+                    args.clone(),
+                )
+                .await;
+                assert_eq!(&rest, expected);
+            }
+            let rpc = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_motion_walk","arguments":args}});
+            let response =
+                Self::post(&self.router, crate::assistant::MCP_PATH, &self.agent, rpc).await;
+            assert_eq!(response["result"]["isError"], false);
+            let evidence: serde_json::Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(&evidence, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_motion_walk_repair_and_retest_observes_actual_routing_and_individual_reports(
+    ) {
+        use crate::assistant::motion::call;
+        use serde_json::json;
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("kitchen", false, false),
+            room_snapshot_with_flags("hall", false, false),
+        ]));
+        let state = make_state_with_runtime(runtime);
+        let clients = MotionWalkClients::new(&state).await;
+        let hub = only_hub_key(&state);
+        let sensor =
+            add_canonical_control_source(&state, &hub, "sensor", "kitchen", DeviceType::Motion);
+        let lamp = add_canonical_control_source(&state, &hub, "lamp", "hall", DeviceType::Light);
+        let second =
+            add_canonical_control_source(&state, &hub, "second", "hall", DeviceType::Light);
+        let target = json!({"sensor_id":sensor,"room_id":"hall"});
+        let unknown = call(
+            &state,
+            "start_motion_walk",
+            json!({"sensor_id":"","room_id":"hall"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unknown["handoff"]["surface"], "rhythm_app");
+        let walk = call(&state, "start_motion_walk", target.clone())
+            .await
+            .unwrap();
+        let inspect = |walk: &serde_json::Value| {
+            call(
+                &state,
+                "inspect_motion_walk",
+                json!({"walk_id":walk["walk_id"]}),
+            )
+        };
+        let waiting = inspect(&walk).await.unwrap();
+        assert_eq!(waiting["reason"], "no_fresh_detection");
+        clients.verify(&waiting).await;
+        let mut timers = MotionTimerState::new();
+        let event = |detected| HubEvent::Motion {
+            hub_key: Some(hub.clone()),
+            room_id: "kitchen".into(),
+            sensor_id: "sensor".into(),
+            detected,
+        };
+        handle_hub_event(&state, event(false), &mut timers);
+        assert_eq!(
+            inspect(&walk).await.unwrap()["reason"],
+            "no_fresh_detection"
+        );
+        handle_hub_event(&state, event(true), &mut timers);
+        let missing = inspect(&walk).await.unwrap();
+        assert_eq!(missing["reason"], "missing_target");
+        clients.verify(&missing).await;
+        let plan_args = json!({"sensor_id":sensor,"room_id":"hall","correlation_id":"walk-link"});
+        let plan = call(&state, "plan_motion_target", plan_args.clone())
+            .await
+            .unwrap();
+        assert_eq!(plan["before_targets"], json!(["kitchen"]));
+        assert_eq!(plan["after_targets"], json!(["hall", "kitchen"]));
+        let apply = |p: &serde_json::Value, confirmed| {
+            call(
+                &state,
+                "apply_motion_target",
+                json!({"plan_id":p["plan_id"],"server_instance_id":p["server_instance_id"],"confirmed":confirmed}),
+            )
+        };
+        assert_eq!(
+            apply(&plan, false).await.unwrap_err().code,
+            "confirmation_required"
+        );
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .rename_room("hall", "Hallway");
+        assert_eq!(
+            apply(&plan, true).await.unwrap_err().code,
+            "topology_changed"
+        );
+        let fresh = call(&state, "plan_motion_target", plan_args.clone())
+            .await
+            .unwrap();
+        let receipt = apply(&fresh, true).await.unwrap();
+        assert_eq!(receipt["physical_room_id"], "kitchen");
+        assert_eq!(receipt["control_targets"], json!(["hall", "kitchen"]));
+        assert_eq!(apply(&fresh, true).await.unwrap(), receipt);
+        assert_eq!(state.lock().unwrap().light_activity.len(), 1);
+        assert_eq!(
+            call(&state, "plan_motion_target", plan_args).await.unwrap()["status"],
+            "already_linked"
+        );
+
+        let blocked_walk = call(&state, "start_motion_walk", target.clone())
+            .await
+            .unwrap();
+        state.lock().unwrap().light_breaker_enabled = false;
+        handle_hub_event(&state, event(true), &mut timers);
+        let suppressed = inspect(&blocked_walk).await.unwrap();
+        assert_eq!(suppressed["reason"], "light_breaker_disabled");
+        clients.verify(&suppressed).await;
+        state.lock().unwrap().light_breaker_enabled = true;
+        let retest = call(&state, "start_motion_walk", target).await.unwrap();
+        assert_eq!(
+            inspect(&retest).await.unwrap()["reason"],
+            "no_fresh_detection"
+        );
+        handle_hub_event(&state, event(true), &mut timers);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while inspect(&retest).await.unwrap()["stage"] != "command_acknowledged" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the motion worker should acknowledge the room command");
+        let result = inspect(&retest).await.unwrap();
+        assert!(result["lights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["readback"] == "no_fresh_readback"));
+        for (device, power, available) in [
+            ("lamp", Some(true), "available"),
+            ("second", None, "unavailable"),
+        ] {
+            handle_hub_event(
+                &state,
+                HubEvent::LightObserved {
+                    hub_key: Some(hub.clone()),
+                    device_id: device.into(),
+                    identity_proof: None,
+                    observation_epoch: None,
+                    external_user_change: false,
+                    observation: crate::hub::LightObservation {
+                        availability: available.into(),
+                        lights_on: power,
+                        brightness: None,
+                        kelvin: None,
+                        xy: None,
+                        rgb: None,
+                        context_id: None,
+                        source_at_epoch_ms: None,
+                        received_at_epoch_ms: current_epoch_ms(),
+                    },
+                },
+                &mut timers,
+            );
+        }
+        // A delayed report generated before the command cannot supersede a current observation.
+        {
+            let mut s = state.lock().unwrap();
+            walk_test::record_light_report(&mut s, &lamp, "available", Some(false), 1);
+        }
+        let result = inspect(&retest).await.unwrap();
+        let lights = result["lights"].as_array().unwrap();
+        let on = lights.iter().find(|l| l["device_id"] == lamp).unwrap();
+        assert_eq!(on["readback"], "fresh_device_readback");
+        assert_eq!(on["power_on"], true);
+        let off = lights.iter().find(|l| l["device_id"] == second).unwrap();
+        assert_eq!(off["availability"], "unavailable");
+        assert!(off["power_on"].is_null());
+        assert_eq!(off["readback"], "no_fresh_readback");
+        clients.verify(&result).await;
+        let visual = call(&state, "inspect_motion_walk", json!({
+            "walk_id":retest["walk_id"],"resident_observations":[{"device_id":second,"power_on":false}]
+        })).await.unwrap();
+        assert_eq!(visual["resident_confirmation"], "reported");
+        let observed = visual["lights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["device_id"] == second)
+            .unwrap();
+        assert_eq!(observed["resident_power_on"], false);
+        assert!(observed["power_on"].is_null());
+        assert_eq!(inspect(&retest).await.unwrap(), visual);
+        {
+            let mut s = state.lock().unwrap();
+            walk_test::record_light_report(&mut s, &second, "unknown", None, current_epoch_ms());
+        }
+        let report = inspect(&retest).await.unwrap();
+        let now_unknown = report["lights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["device_id"] == second)
+            .unwrap();
+        assert_eq!(now_unknown["availability"], "unknown");
+        assert_eq!(now_unknown["resident_power_on"], false);
+
+        call(&state, "inspect_motion_walk", json!({
+            "walk_id":retest["walk_id"],"resident_observations":[{"device_id":lamp,"power_on":true}]
+        })).await.unwrap();
+        let refreshed = inspect(&retest).await.unwrap();
+        let lights = refreshed["lights"].as_array().unwrap();
+        assert_eq!(refreshed["resident_confirmation"], "reported");
+        assert_eq!(
+            lights.iter().find(|l| l["device_id"] == lamp).unwrap()["resident_power_on"],
+            true
+        );
+        let previous = lights.iter().find(|l| l["device_id"] == second).unwrap();
+        assert_eq!(previous["resident_power_on"], false);
+        assert!(previous["power_on"].is_null());
+        clients.verify(&refreshed).await;
+
+        assert_eq!(inspect(&walk).await.unwrap()["reason"], "missing_target");
     }
 
     #[test]
@@ -8504,7 +8945,7 @@ mod tests {
         let state = make_state_with_runtime(runtime);
         let mut event_rx = subscribe_events(&state);
 
-        run_motion_turn_on_action(&state, "room_a");
+        run_motion_turn_on_action(&state, "room_a", None);
 
         let mut saw_node_state = false;
         while let Ok(event) = event_rx.try_recv() {

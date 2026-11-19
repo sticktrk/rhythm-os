@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:cryptography/cryptography.dart';
 import 'package:rhythm_admin_api/src/config.dart';
 import 'package:rhythm_admin_api/src/device_probe_service.dart';
 import 'package:rhythm_admin_api/src/fleet_report_service.dart';
@@ -774,6 +775,154 @@ void main() {
     expect(deviceRequested, isFalse);
   });
 
+  test(
+      'assistant preview requires a current grant; writes require an admin and reviewed hub',
+      () async {
+    const aad = 'hub:hub-1:token:t1:scope:beta_admin';
+    final digest = await Sha256().hash(utf8.encode('support-key'));
+    final encrypted = await AesGcm.with256bits().encrypt(
+        utf8.encode('synthetic-support'),
+        secretKey: SecretKey(digest.bytes),
+        aad: utf8.encode(aad));
+    var role = 'support', liveHub = 'srv-test';
+    var granted = true;
+    var pinned = true;
+    final calls = <String>[];
+    final client = _HandlerClient((request) async {
+      final staff = _staffAuthResponse(request, role: role);
+      if (staff != null) return staff;
+      final path = request.url.path;
+      if (path == '/rest/v1/hub_support_access_grants') {
+        expect(request.url.queryParameters['hub_id'], 'eq.hub-1');
+        expect(request.url.queryParameters['revoked_at'], 'is.null');
+        return _jsonResponse([
+          if (granted)
+            {
+              'id': 'grant1',
+              'home_id': 'home-1',
+              'hub_id': 'hub-1',
+              'token_id': 't1',
+              'scope': 'beta_admin',
+              'encrypted_token': {
+                'version': 'support_access_token_v1',
+                'algorithm': 'aes-gcm-256',
+                'key_derivation': 'sha256-env-v1',
+                'key_id': 'default',
+                'aad': aad,
+                'ciphertext': base64Url.encode(encrypted.cipherText),
+                'nonce': base64Url.encode(encrypted.nonce),
+                'mac': base64Url.encode(encrypted.mac.bytes),
+              }
+            }
+        ]);
+      }
+      if (path == '/rest/v1/hub_remote_access') {
+        expect(
+            request.url.queryParameters['server_instance_id'], 'eq.srv-test');
+        expect(request.url.queryParameters['hostname'], 'eq.hub-1.relay.test');
+        return _jsonResponse([
+          if (pinned) {'hostname': 'hub-1.relay.test'}
+        ]);
+      }
+      if (path == '/rest/v1/hubs') {
+        final rows = jsonDecode(_supabaseResponse(request).body) as List;
+        rows.first['remote_endpoint']['host'] = 'hub-1.relay.test';
+        return _jsonResponse(rows);
+      }
+      if (request.url.host == 'supabase.test') {
+        return _supabaseResponse(request);
+      }
+      expect(request.url.host, 'hub-1.relay.test');
+      if (path == '/api/auth/support-session-token') {
+        expect(request.headers['Authorization'], 'Bearer synthetic-support');
+        final mint = jsonDecode((request as http.Request).body) as Map;
+        expect(mint['actor_id'], 'staff-user');
+        expect(mint['grant_id'], 'grant1');
+        return _jsonResponse({'token': 'synthetic-short-session'});
+      }
+      expect(
+          request.headers['Authorization'], 'Bearer synthetic-short-session');
+      if (path == '/api/state') {
+        expect(request.url.queryParameters['include'], 'base');
+        expect(request.followRedirects, isFalse);
+        return _jsonResponse(
+            {'server_instance_id': liveHub, 'version': '1', 'nodes': []});
+      }
+      calls.add(path);
+      return _jsonResponse({'status': 'ok'});
+    });
+    final audit = <Map<String, dynamic>>[];
+    final server = _testServer(
+        client: client, auditLog: (line) => audit.add(jsonDecode(line)));
+    Future<int> proxy(String method, String path,
+        {String? expected = 'srv-test'}) async {
+      final response = await server.handler(Request('POST',
+          Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+          headers: {
+            'authorization': 'Bearer staff-session',
+            'content-type': 'application/json'
+          },
+          body: jsonEncode({
+            'method': method,
+            'path': path,
+            if (expected != null) 'expectedServerInstanceId': expected,
+            'requestId': 'assistant-test-1',
+            'body': {'confirmed': true}
+          })));
+      return response.statusCode;
+    }
+
+    const contract = 'api/assistant/contract';
+    const plan = 'api/assistant/operations/plan_motion_target';
+    const apply = 'api/assistant/operations/apply_motion_target';
+    expect(await proxy('GET', contract, expected: null), 200);
+    liveHub = 'replacement';
+    expect(await proxy('GET', contract, expected: null), 409);
+    expect(await proxy('POST', plan), 409);
+    liveHub = 'srv-test';
+    expect(await proxy('POST', plan, expected: 'previous-installation'), 409);
+    expect(await proxy('POST', plan), 200);
+    expect(await proxy('POST', 'api/assistant/plans/device-room-move'), 200);
+    expect(
+        await proxy('POST', 'api/assistant/operations/start_motion_walk'), 403);
+    expect(
+        await proxy('POST', 'api/assistant/operations/read_hub_status'), 200);
+    expect(audit.last, containsPair('status', 200));
+    expect(audit.last,
+        containsPair('operation', 'api/assistant/operations/read_hub_status'));
+    expect(await proxy('POST', apply), 403);
+    expect(audit.last, containsPair('status', 403));
+    expect(audit.last, containsPair('operation', apply));
+    expect(jsonEncode(audit), isNot(contains('confirmed')));
+    expect(await proxy('POST', 'api/assistant/operations/plan_unknown'), 403);
+    role = 'admin';
+    liveHub = 'wrong-hub';
+    expect(await proxy('POST', apply), 409);
+    liveHub = 'srv-test';
+    expect(await proxy('POST', apply), 200);
+    // Same staff identity, endpoint and unexpired device session.
+    pinned = false;
+    expect(await proxy('POST', plan), 403);
+    pinned = true;
+    granted = false;
+    expect(await proxy('POST', apply), 403);
+    expect(await proxy('POST', plan), 403);
+    for (final path in [
+      'api/auth/agent-tokens',
+      'api/auth/assistant-clients',
+      'api/assistant/mcp'
+    ]) {
+      expect(await proxy('POST', path), 400);
+    }
+    expect(calls, [
+      '/$contract',
+      '/$plan',
+      '/api/assistant/plans/device-room-move',
+      '/api/assistant/operations/read_hub_status',
+      '/$apply'
+    ]);
+  });
+
   test('device config hashes match the shared numeric contract', () async {
     final fixtures = jsonDecode(
       File('../testdata/light-profile-config-hash-cases.json')
@@ -1298,6 +1447,7 @@ void main() {
 AdminApiServer _testServer({
   required http.Client client,
   String? serviceRoleKey = 'service-role-key',
+  void Function(String)? auditLog,
 }) {
   final config = AdminApiConfig(
     supabaseUrl: Uri.parse('https://supabase.test'),
@@ -1305,6 +1455,7 @@ AdminApiServer _testServer({
     supabaseServiceRoleKey: serviceRoleKey,
     supportAccessEncryptionKey: 'support-key',
     supportAccessKeyId: 'default',
+    remoteAccessDomain: 'relay.test',
     host: '127.0.0.1',
     port: 8787,
     allowedOrigins: {'http://127.0.0.1:5173'},
@@ -1322,6 +1473,7 @@ AdminApiServer _testServer({
     httpClient: client,
   );
   return AdminApiServer(
+    auditLog: auditLog,
     config: config,
     supabase: supabase,
     support: support,

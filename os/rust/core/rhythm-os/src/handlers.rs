@@ -816,6 +816,14 @@ fn perform_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> anyhow::Result<crate::pairing::UnpairingResult> {
+    perform_unpair_device_reviewed(state, request, &|_| Ok(()))
+}
+
+fn perform_unpair_device_reviewed(
+    state: &SharedState,
+    request: &crate::pairing::UnpairingRequest,
+    check: commands::ReviewCheck<'_>,
+) -> anyhow::Result<crate::pairing::UnpairingResult> {
     let archive = request
         .params
         .get("archive")
@@ -847,9 +855,33 @@ fn perform_unpair_device(
     } else if let Some(device_id) = requested_device_id {
         commands::validate_active_device_removal_target(state, device_id, &requested_hub_key)?;
     }
-    let start_unpairing = {
+    let (start_unpairing, expected_endpoint) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.start_unpairing_fn.clone()
+        check(&s)?;
+        let expected_device = requested_device_id.and_then(|id| {
+            s.canonical_registry.get(id).or_else(|| {
+                s.canonical_registry
+                    .find_by_native_id(&requested_hub_key, id)
+            })
+        });
+        let expected_endpoint =
+            if let (Some(requested), Some(device)) = (requested_device_id, expected_device) {
+                let mut matches = device.endpoints.iter().filter(|ep| {
+                    ep.hub_key == requested_hub_key
+                        && (ep.native_id == requested || device.id == requested)
+                });
+                let exact = matches
+                    .next()
+                    .map(|ep| (device.id.clone(), ep.native_id.clone()));
+                anyhow::ensure!(
+                    matches.next().is_none(),
+                    "Choose the exact native endpoint on this integration before removing it"
+                );
+                exact
+            } else {
+                None
+            };
+        (s.start_unpairing_fn.clone(), expected_endpoint)
     };
 
     let Some(start_fn) = start_unpairing else {
@@ -888,6 +920,43 @@ fn perform_unpair_device(
         result.error
     );
     if result.status == crate::pairing::PairingStatus::Complete {
+        let scoped_request =
+            expected_endpoint.is_some() || request.params["hub_address"].is_string();
+        if let Some(requested) = requested_device_id.filter(|_| scoped_request) {
+            let matches_id = result.device_id.as_deref().is_some_and(|reported| {
+                reported == requested
+                    || expected_endpoint
+                        .as_ref()
+                        .is_some_and(|(canonical, native)| {
+                            reported == native || reported == canonical
+                        })
+            });
+            let same_hub = result.hub_type == request.hub_type
+                && !result
+                    .hub_address
+                    .as_deref()
+                    .zip(
+                        request
+                            .params
+                            .get("hub_address")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                    .is_some_and(|(reported, requested)| reported != requested);
+            if !matches_id || !same_hub {
+                let message = "The integration did not confirm the selected device and bridge. Verify removal before retrying.";
+                crate::pairing::record_pairing_history(
+                    state,
+                    crate::pairing::pairing_history_entry_for_unpair(
+                        &request.hub_type,
+                        &request.params,
+                        &crate::pairing::PairingStatus::Failed,
+                        None,
+                        Some(message),
+                    ),
+                );
+                anyhow::bail!(message);
+            }
+        }
         if archive && result.device_id.is_none() {
             let error = anyhow::anyhow!("Completed archive did not identify the removed device");
             crate::pairing::record_pairing_history(
@@ -903,6 +972,10 @@ fn perform_unpair_device(
             return Err(error);
         }
         if let Some(device_id) = &result.device_id {
+            let device_id = expected_endpoint
+                .as_ref()
+                .map(|(_, native)| native)
+                .unwrap_or(device_id);
             let hub_address = result
                 .hub_address
                 .as_deref()
@@ -1186,7 +1259,7 @@ fn parse_expected_profile_overrides_value(
     Ok(Some(overrides))
 }
 
-fn parse_profile_settings_patch(
+pub(crate) fn parse_profile_settings_patch(
     value: Option<&Value>,
     field_name: &str,
 ) -> Result<Option<commands::RoomProfileSettingsPatch>, String> {
@@ -2341,6 +2414,17 @@ pub fn handle_post_home_scene_apply(
     }
 }
 
+fn scene_preview_error(error: anyhow::Error) -> ApiResponse {
+    if let Some(trial) = error.downcast_ref::<commands::TrialOutputError>() {
+        ApiResponse::json_status(
+            503,
+            json!({"error":trial.message, "trial_id":trial.trial_id}).to_string(),
+        )
+    } else {
+        ApiResponse::bad_request(&error.to_string())
+    }
+}
+
 pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
     let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
@@ -2364,7 +2448,7 @@ pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Val
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 
@@ -2397,7 +2481,7 @@ pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> Api
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 
@@ -2443,7 +2527,7 @@ pub fn handle_post_scene_preview_cancel(state: &SharedState, preview_id: &str) -
             }
             ApiResponse::json_ok(json)
         }
-        Err(e) => ApiResponse::bad_request(&e.to_string()),
+        Err(e) => scene_preview_error(e),
     }
 }
 
@@ -4077,6 +4161,15 @@ pub fn handle_pair_device_with_context(
     request: &crate::pairing::PairingRequest,
     request_context: crate::pairing::PairingRequestContext,
 ) -> ApiResponse {
+    handle_pair_device_reviewed(state, request, request_context, &|_| Ok(()))
+}
+
+pub(crate) fn handle_pair_device_reviewed(
+    state: &SharedState,
+    request: &crate::pairing::PairingRequest,
+    request_context: crate::pairing::PairingRequestContext,
+    check: crate::commands::ReviewCheck<'_>,
+) -> ApiResponse {
     if request.hub_type == crate::hub::HubType::LOCAL_BLE && request.session_id.is_none() {
         return ApiResponse::bad_request("Local Bluetooth pairing requires a session ID");
     }
@@ -4128,6 +4221,9 @@ pub fn handle_pair_device_with_context(
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
         };
+        if check(&s).is_err() {
+            return ApiResponse::conflict("Pairing proposal changed. Review this hub again.");
+        }
         s.start_pairing_fn.clone()
     };
 
@@ -4558,15 +4654,26 @@ pub fn handle_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> ApiResponse {
+    handle_unpair_device_reviewed(state, request, &|_| Ok(()))
+}
+
+pub(crate) fn handle_unpair_device_reviewed(
+    state: &SharedState,
+    request: &crate::pairing::UnpairingRequest,
+    check: commands::ReviewCheck<'_>,
+) -> ApiResponse {
     let _adapter_guard = match try_acquire_unpairing_guard(state, &request.hub_type) {
         Ok(guard) => guard,
         Err(response) => return response,
     };
-    match perform_unpair_device(state, request) {
+    match perform_unpair_device_reviewed(state, request, check) {
         Ok(result) => match serde_json::to_string(&result) {
             Ok(json) => ApiResponse::json_ok(json),
             Err(e) => ApiResponse::server_error(e),
         },
+        Err(e) if e.to_string() == "device_plan_changed" => {
+            ApiResponse::conflict("Device plan changed")
+        }
         Err(e) => {
             log::error!(target: "pair", "Unpairing failed: {}", e);
             ApiResponse::server_error(e)
@@ -4791,44 +4898,6 @@ pub fn handle_get_assistant_contract(state: &SharedState) -> ApiResponse {
 pub fn handle_get_assistant_topology(state: &SharedState) -> ApiResponse {
     match crate::assistant::build_light_assistant_topology_snapshot(state) {
         Ok(snapshot) => assistant_json_response(&snapshot),
-        Err(error) => assistant_error_response(error),
-    }
-}
-
-pub fn handle_post_assistant_move_plan(state: &SharedState, body: &Value) -> ApiResponse {
-    let request = match serde_json::from_value(body.clone()) {
-        Ok(request) => request,
-        Err(_) => {
-            return assistant_error_response(crate::assistant::LightAssistantError {
-                status: 400,
-                code: "invalid_request",
-                message: "The move plan request does not match the advertised contract".to_string(),
-                retryable: false,
-                mutation_may_have_applied: false,
-            })
-        }
-    };
-    match crate::assistant::plan_light_assistant_device_room_move(state, request) {
-        Ok(plan) => assistant_json_response(&plan),
-        Err(error) => assistant_error_response(error),
-    }
-}
-
-pub fn handle_post_assistant_move_apply(state: &SharedState, body: &Value) -> ApiResponse {
-    let request = match serde_json::from_value(body.clone()) {
-        Ok(request) => request,
-        Err(_) => {
-            return assistant_error_response(crate::assistant::LightAssistantError {
-                status: 400,
-                code: "invalid_request",
-                message: "The apply request does not match the advertised contract".to_string(),
-                retryable: false,
-                mutation_may_have_applied: false,
-            })
-        }
-    };
-    match crate::assistant::apply_light_assistant_device_room_move(state, request) {
-        Ok(receipt) => assistant_json_response(&receipt),
         Err(error) => assistant_error_response(error),
     }
 }
@@ -10642,6 +10711,51 @@ mod tests {
         let device = state.canonical_registry.get(&canonical_id).unwrap();
         assert!(device.endpoint_for_hub(&hue_key).is_some());
         assert!(device.endpoint_for_hub(&inactive_key).is_some());
+    }
+
+    #[test]
+    fn unpair_rejects_an_acknowledgement_for_a_different_device_or_bridge_before_cleanup() {
+        for (reported_id, address) in [("different", "bridge"), ("selected", "other-bridge")] {
+            let (state, _registry, canonical, _room, key) =
+                handler_state_with_canonical_light_for_hub_at("hue", "bridge", "selected");
+            let other_bridge = HubKey::new(HubType::new("hue"), "other-bridge");
+            {
+                let mut s = state.lock().unwrap();
+                let d = s.canonical_registry.get_mut(&canonical).unwrap();
+                d.upsert_endpoint(key.clone(), "different".into(), 2, None);
+                d.upsert_endpoint(other_bridge, "selected".into(), 2, None);
+                s.start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+                    Ok(UnpairingResult {
+                        hub_type: "hue".into(),
+                        hub_address: Some(address.into()),
+                        status: PairingStatus::Complete,
+                        device_id: Some(reported_id.into()),
+                        error: None,
+                        completion_scope: None,
+                        warning: None,
+                    })
+                }));
+            }
+            let response = handle_unpair_device(
+                &state,
+                &UnpairingRequest {
+                    hub_type: "hue".into(),
+                    params: serde_json::json!({"device_id":"selected","hub_address":"bridge"}),
+                },
+            );
+            assert_eq!(response.status, 500);
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .canonical_registry
+                    .get(&canonical)
+                    .unwrap()
+                    .endpoints
+                    .len(),
+                3
+            );
+        }
     }
 
     #[test]

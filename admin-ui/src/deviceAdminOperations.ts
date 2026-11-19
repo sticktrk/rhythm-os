@@ -737,6 +737,15 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     path: 'api/assistant/contract'
   },
   {
+    id: 'assistant-operation',
+    category: 'Devices & Topology',
+    label: 'Call advertised assistant operation',
+    description: 'Use a tool and arguments from the selected hub’s assistant contract.',
+    method: 'POST',
+    path: 'api/assistant/operations/{operation_id}',
+    danger: true
+  },
+  {
     id: 'assistant-topology-get',
     category: 'Devices & Topology',
     label: 'Read assistant topology',
