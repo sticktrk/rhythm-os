@@ -4,12 +4,13 @@ import 'package:cryptography/cryptography.dart';
 
 /// Canonical resource hash shared by staff and local guarded device writes.
 Future<String> canonicalJsonSha256(Object? value) async {
-  final digest =
-      await Sha256().hash(utf8.encode(jsonEncode(_canonical(value))));
+  final digest = await Sha256().hash(utf8.encode(canonicalJsonString(value)));
   return digest.bytes
       .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
       .join();
 }
+
+String canonicalJsonString(Object? value) => jsonEncode(_canonical(value));
 
 Object? _canonical(Object? value) {
   if (value is Map) {

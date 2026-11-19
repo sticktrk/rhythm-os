@@ -57,3 +57,4 @@ python3 tools/ci/check-commissioning-reuse.py
 python3 tools/ci/check-commissioning-reuse.py --self-test
 
 python3 tools/ci/check-assistant-routes.py
+python3 tools/ci/check-cloud-assistant-coverage.py
