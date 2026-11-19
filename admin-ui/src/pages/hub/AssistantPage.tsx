@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { SectionCard } from '../../components/ui/SectionCard';
 import { asArray, asRecord, asRecordArray, asString } from '../../device/values';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
+import { walkReports } from '../../device/assistantInputs';
+import { isNotImplemented } from '../../device/client';
 import { errorMessage } from '../../lib/format';
 import { useHub } from '../../state/HubContext';
 import { useSnapshot } from '../../state/SnapshotContext';
@@ -22,6 +24,7 @@ export default function AssistantPage() {
   const [room, setRoom] = useState('');
   const [sensor, setSensor] = useState('');
   const [walkId, setWalkId] = useState('');
+  const [reports, setReports] = useState<Record<string, boolean>>({});
   const [review, setReview] = useState<Obj | null>(null);
   const [observations, setObservations] = useState<Obj | null>(null);
   const [message, setMessage] = useState('');
@@ -35,9 +38,13 @@ export default function AssistantPage() {
     setBusy(true);
     setReview(null);
     setWalkId('');
+    setReports({});
     setObservations(null);
     setIdentity('');
     setError('');
+    setMessage('');
+    setOperations([]);
+    setNodes([]);
     (async () => {
       const contract = await client.get<Obj>('api/assistant/contract');
       if (!active) return;
@@ -57,7 +64,12 @@ export default function AssistantPage() {
       setIdentity(instance);
       setNeedsRefresh(false);
       if (ops.some(op => op.id === walk)) setMessage('Select the motion sensor and the room it should control.');
-    })().catch(err => { if (active) setError(errorMessage(err)); })
+    })().catch(err => {
+      if (!active) return;
+      if (isNotImplemented(err) || /returned HTTP 404/.test(errorMessage(err))) {
+        setMessage('This firmware cannot run the assistant diagnostics. Other hub controls are available in the console.');
+      } else setError(errorMessage(err));
+    })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [client, hub.serverInstanceId, refresh]);
@@ -69,6 +81,7 @@ export default function AssistantPage() {
   function change(callback: () => void) {
     setReview(null);
     setWalkId('');
+    setReports({});
     setObservations(null);
     setMessage('');
     callback();
@@ -87,13 +100,14 @@ export default function AssistantPage() {
     return result;
   }
 
-  async function run(id: string, residentLight?: string) {
+  async function run(id: string, observation?: { device_id: string; power_on: boolean }) {
     if (disabled) return;
     setBusy(true); setError('');
     try {
       const target = { sensor_id: sensor, room_id: room };
       if (id === walk) {
         const result = await invoke(walk, target);
+        setReports({});
         setWalkId(asString(result.walk_id) ?? '');
         setReview(null); setObservations(null);
         if (result.status === 'handoff') {
@@ -103,9 +117,10 @@ export default function AssistantPage() {
           setMessage(`Ask the resident to walk past ${name(sensor)} within ${result.window_seconds} seconds, then check the walk.`);
         }
       } else if (id === inspect) {
-        setObservations(await invoke(id, {walk_id: walkId, ...(residentLight ? {
-          resident_observations:[{device_id:residentLight,power_on:true}]
-        } : {})}));
+        const next = walkReports(reports, observation);
+        const result = await invoke(id, {walk_id: walkId, resident_observations: next.observations});
+        setReports(next.reports);
+        setObservations(result);
       } else if (id === preview) {
         const result = await invoke(id, {...target, correlation_id: crypto.randomUUID()});
         if (result.status === 'handoff') {
@@ -171,11 +186,13 @@ export default function AssistantPage() {
           <li key={String(light.device_id)}>{name(light.device_id)} · {String(light.availability)} · {
             light.readback === 'fresh_device_readback' && light.availability === 'available' && typeof light.power_on === 'boolean'
             ? `reported ${light.power_on ? 'on' : 'off'}` : 'no fresh device readback'}
-            {light.resident_power_on === true ? ' · resident saw it turn on' :
-              ['command_attempted','command_acknowledged','command_not_needed','command_uncertain'].includes(String(observations.stage)) &&
-              <button className="consoleButton" disabled={disabled} onClick={() => void run(inspect,String(light.device_id))}>
-                Resident saw this light turn on
-              </button>}</li>)}</ul>
+            {typeof light.resident_power_on === 'boolean' && ` · resident sees ${light.resident_power_on ? 'on' : 'off'}`}
+            {['command_attempted','command_acknowledged','command_not_needed','command_uncertain'].includes(String(observations.stage)) &&
+              [true,false].map(power => <button key={String(power)} className="consoleButton"
+                disabled={disabled || light.resident_power_on === power}
+                onClick={() => void run(inspect,{device_id:String(light.device_id),power_on:power})}>
+                Resident sees {power ? 'on' : 'off'}
+              </button>)}</li>)}</ul>
       </div>}
       {review && <div>
         <h3>Review room link</h3>
@@ -186,7 +203,7 @@ export default function AssistantPage() {
         <button className="consoleButton" disabled={busy} onClick={() => setReview(null)}>Cancel</button>
       </div>}
     </SectionCard>
-    {identity && <AssistantTools key={identity + refresh} operations={operations}
+    {identity && <AssistantTools key={identity + refresh} operations={operations} nodes={nodes}
       identity={identity} canWrite={canWrite} call={invoke}/>}
   </div>;
 }
