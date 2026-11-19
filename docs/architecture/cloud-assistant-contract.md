@@ -7,7 +7,7 @@ reaches a hub through its active support grant.
 | Caller | Entry point | Authority |
 | --- | --- | --- |
 | Resident app or resident MCP client | `POST /functions/v1/customer-assistant` | The signed-in resident's Supabase access token. The service verifies the user and applies current household membership. |
-| Staff console or staff MCP client | `POST /api/assistant/mcp` on the admin API | An enabled staff identity on each request. Hub calls also require the customer's grant and matching live hub identity. Writes require the admin role. |
+| Staff console or staff MCP client | `POST /api/assistant/mcp` on the admin API | An enabled staff identity on each request. Hub calls also require the customer's grant and matching live hub identity. Household observations and writes require the admin role. |
 | Resident app after hub selection | Selected local or authorized remote hub connection | The app's enrolled device credential. The account service never needs this credential. |
 
 MCP clients use Streamable HTTP, list the tools, and read the contract resource
@@ -28,6 +28,18 @@ the resident approves the reviewed scope in the app.
 The app checks the displayed scope and claims the action once. Device operations validate the live hub before dispatch. Text-only reports can be sent while the hub is offline. Cancelling an unclaimed review discards it across the resident’s devices. A repeated confirmation
 retrieves the current state. A lost response or interrupted device action
 requires checking the result before starting another proposal. Remote provisioning rechecks the reviewed resources under the database locks when it consumes the dispatch permission.
+
+A staff MCP client can prepare a change and request console approval. Its
+`staff_apply_plan` call returns `awaiting_console_approval`. The same
+administrator opens the selected hub’s pending plan in the staff console,
+reviews its scope, and approves it. The console approval endpoint requires an
+allowed browser origin and consumes the plan once. The service rechecks the
+hub, its installation identity, and any required customer grant before dispatch.
+
+The trusted hub catalog identifies reads that reveal household observations,
+including motion evidence. Those reads require an enabled administrator and
+the customer’s grant. The staff service filters them from a support operator’s
+catalog and the device proxy enforces the same role check on direct requests.
 
 A support grant authorizes the staff service to obtain a short-lived device
 session. Revocation also disables automatic regrant from other phones. Remote

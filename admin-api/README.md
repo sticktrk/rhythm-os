@@ -172,7 +172,7 @@ appliance.
 
 Connect an MCP Streamable HTTP client to `POST /api/assistant/mcp` with the
 operator's Supabase access token in its bearer authentication header. Browser
-clients must use an origin explicitly listed in `ADMIN_API_ALLOWED_ORIGINS`. The
+clients must use an origin allowed by `ADMIN_API_ALLOWED_ORIGINS`. The
 service checks the enabled staff row on each request. Start with `initialize`
 and `tools/list`. The resource `rhythm://staff/contract` describes each tool's
 location, permission tier, confirmation rule, input schema and verification.
@@ -193,8 +193,12 @@ sensor or light name inside the service and pass the returned reference to the
 hub operation. `staff_call_hub_tool` accepts reads and previews. Support staff
 can see the proposed scope and the next step for an administrator. Admins
 can use `staff_control_hub` for temporary output. A persistent change requires
-the reviewed plan and `confirmed: true` in `staff_apply_plan`. This also covers
-firmware updates, fleet reports and cloud hub deletion. Re-read the state
+approval in the staff console. Calling `staff_apply_plan` returns
+`awaiting_console_approval`. The administrator reviews the pending plan for the
+selected hub and approves it in the console, which submits
+`POST /api/assistant/plans/<planId>/approve` from an allowed origin. Approval
+consumes the plan once and rechecks its target. This also covers firmware
+updates, fleet reports and cloud hub deletion. Re-read the state
 after an uncertain outcome before preparing another proposal. When the full
 review contains private or unsupported details, open **Hub tools** in the
 selected hub’s staff console to preview and confirm it there. This includes
