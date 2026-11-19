@@ -39,6 +39,18 @@ fn installation() -> (TestHarness, String, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuning_preserves_warmth_and_other_rooms_and_requires_a_fresh_review() {
     let (h, kitchen, hall) = installation();
+    let (status, width) = operation(
+        &h,
+        "plan_room_tuning",
+        json!({"room_id":kitchen,"setting":"evening_brightness_width","value":1.9}),
+    )
+    .await;
+    assert_eq!(status, 200, "{width}");
+    assert_eq!(width["detaches_from_profile_curve"], true);
+    assert!(width["curve_notice"]
+        .as_str()
+        .unwrap()
+        .contains("until the override is removed"));
     let before = h.config();
     let (status, plan) = operation(
         &h,
@@ -47,6 +59,7 @@ async fn tuning_preserves_warmth_and_other_rooms_and_requires_a_fresh_review() {
     )
     .await;
     assert_eq!(status, 200, "{plan}");
+    assert!(plan.get("detaches_from_profile_curve").is_none());
     assert_eq!(plan["affected_rooms"].as_array().unwrap().len(), 1);
     for pair in plan["samples"].as_array().unwrap() {
         assert_eq!(pair["before"]["kelvin"], pair["after"]["kelvin"]);

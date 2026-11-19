@@ -272,7 +272,7 @@ pub fn operations() -> Vec<LightAssistantOperationDto> {
     );
     room_op(
         "plan_room_tuning",
-        "Preview a lasting room-only preference and samples at sunset and two hours later. Choose minimum_brightness (1–100 percent) or evening_brightness_width (0.2–2.0, smaller dims later). Both preserve warmth.",
+        "Preview a lasting room-only preference and samples at sunset and two hours later. Choose minimum_brightness (1–100 percent) or evening_brightness_width (0.2–2.0, smaller dims later). Both preserve warmth. Changing evening_brightness_width means this room will keep its own curve until the override is removed.",
         Read,
         vec![("setting",json!({"enum":["minimum_brightness","evening_brightness_width"]})),("value",number_schema(0.2,100.))],
     );
@@ -712,7 +712,12 @@ fn plan(state: &SharedState, room: &NodeStateDto, id: &str, args: &Value) -> Res
     let token = uuid::Uuid::new_v4().to_string();
     let expires = now + PLAN_LIFETIME_MS;
     let contract = super::light_assistant_contract_sha256();
-    let preview = json!({"plan_id":token,"operation":apply_id,"contract_sha256":contract,"server_instance_id":app.server_instance_id,"expires_at_epoch_ms":expires,"requires_confirmation":true,"room_id":room.id,"profile_id":base.id,"trial_id":trial_id,"scope":if id=="plan_absorb_offset"{"shared_profile"}else{"room_profile_override"},"affected_rooms":affected_rooms,"cleared_offsets":offsets,"before_profile":ctx.config,"after_profile":next,"samples":samples});
+    let mut preview = json!({"plan_id":token,"operation":apply_id,"contract_sha256":contract,"server_instance_id":app.server_instance_id,"expires_at_epoch_ms":expires,"requires_confirmation":true,"room_id":room.id,"profile_id":base.id,"trial_id":trial_id,"scope":if id=="plan_absorb_offset"{"shared_profile"}else{"room_profile_override"},"affected_rooms":affected_rooms,"cleared_offsets":offsets,"before_profile":ctx.config,"after_profile":next,"samples":samples});
+    if args["setting"] == "evening_brightness_width" {
+        preview["detaches_from_profile_curve"] = json!(true);
+        preview["curve_notice"] =
+            json!("This room will keep its own curve until the override is removed.");
+    }
     let proposal = LightPlan {
         id: token,
         expires_ms: expires,
