@@ -125,7 +125,7 @@ class DeviceProbeService {
           sawAuthRequired = true;
           continue;
         }
-        final live = await _fetchState(baseUrl, token);
+        final live = await _fetchState(baseUrl, token, followRedirects: false);
         if (live.hello?.serverInstanceId != reviewedServerId ||
             hub.serverInstanceId != reviewedServerId) {
           throw const AdminApiException(
@@ -137,6 +137,7 @@ class DeviceProbeService {
         candidate: candidate,
         authToken: token,
         uploadUrl: uploadUrl,
+        followRedirects: reviewedServerId == null,
       );
       if (result.submission != null) return result.submission!;
       if (result.authRequired) sawAuthRequired = true;
@@ -576,21 +577,23 @@ class DeviceProbeService {
     try {
       String? verifiedServerInstanceId;
       String? preconditionBodySha256;
-      if (request.isMutation || verifyIdentity) {
-        final state = await _fetchState(baseUrl, authToken);
+      final scopedIdentity = request.isAssistant || verifyIdentity;
+      if (request.isMutation || scopedIdentity) {
+        final state = await _fetchState(baseUrl, authToken,
+            followRedirects: !scopedIdentity);
         if (state.authRequired) {
           return const _ProxyJsonEndpointResult.authRequired();
         }
         if (state.error != null) {
           return _ProxyJsonEndpointResult.error(
-            'mutation identity preflight failed: ${state.error}',
+            'device identity preflight failed: ${state.error}',
           );
         }
         verifiedServerInstanceId = cleanString(state.hello?.serverInstanceId);
         if (verifiedServerInstanceId == null ||
-            verifiedServerInstanceId != request.expectedServerInstanceId ||
-            ((request.isAssistant || verifyIdentity) &&
-                hub.serverInstanceId != null &&
+            ((request.isMutation || request.expectedServerInstanceId != null) &&
+                verifiedServerInstanceId != request.expectedServerInstanceId) ||
+            (scopedIdentity &&
                 verifiedServerInstanceId != hub.serverInstanceId)) {
           return _ProxyJsonEndpointResult.preconditionFailed(
             'live server identity did not match expectedServerInstanceId.',
@@ -606,6 +609,7 @@ class DeviceProbeService {
             authToken: authToken,
             operation: 'mutation resource preflight',
             queryParameters: resource.queryParameters,
+            followRedirects: !scopedIdentity,
           );
           if (current.authRequired) {
             return const _ProxyJsonEndpointResult.authRequired();
@@ -784,19 +788,22 @@ class DeviceProbeService {
     required ({String route, HubEndpointDto endpoint}) candidate,
     required String? authToken,
     required String uploadUrl,
+    required bool followRedirects,
   }) async {
     final baseUrl = candidate.endpoint.baseUrl;
     try {
+      final request = http.Request(
+          'POST', _uriWithAppendedPath(baseUrl, 'api/diag/debug-bundle'))
+        ..followRedirects = followRedirects
+        ..headers.addAll({
+          'Accept': 'application/json,application/gzip,*/*',
+          'Content-Type': 'application/json',
+          if (authToken != null) 'Authorization': 'Bearer $authToken',
+        })
+        ..body = jsonEncode({'upload_url': uploadUrl});
       final response = await _http
-          .post(
-            _uriWithAppendedPath(baseUrl, 'api/diag/debug-bundle'),
-            headers: {
-              'Accept': 'application/json,application/gzip,*/*',
-              'Content-Type': 'application/json',
-              if (authToken != null) 'Authorization': 'Bearer $authToken',
-            },
-            body: jsonEncode({'upload_url': uploadUrl}),
-          )
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(const Duration(minutes: 3));
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _DebugBundleSubmissionEndpointResult.authRequired();
@@ -863,19 +870,22 @@ class DeviceProbeService {
     }
   }
 
-  Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
+  Future<_StateFetchResult> _fetchState(String baseUrl, String? token,
+      {bool followRedirects = true}) async {
     try {
-      final response = await _http.get(
-        _uriWithAppendedPath(
-          baseUrl,
-          'api/state',
-          queryParameters: const {'include': 'base'},
-        ),
-        headers: {
+      final request = http.Request(
+          'GET',
+          _uriWithAppendedPath(baseUrl, 'api/state',
+              queryParameters: const {'include': 'base'}))
+        ..followRedirects = followRedirects
+        ..headers.addAll({
           'Accept': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
+        });
+      final response = await _http
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(const Duration(seconds: 5));
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _StateFetchResult.authRequired();
       }
@@ -967,6 +977,7 @@ class DeviceProbeService {
     required String? authToken,
     required String operation,
     String method = 'GET',
+    bool followRedirects = true,
     Duration timeout = const Duration(seconds: 10),
     Map<String, String>? queryParameters,
   }) async {
@@ -981,9 +992,13 @@ class DeviceProbeService {
         'Accept': 'application/json',
         if (authToken != null) 'Authorization': 'Bearer $authToken',
       };
-      final response = method == 'POST'
-          ? await _http.post(uri, headers: headers).timeout(timeout)
-          : await _http.get(uri, headers: headers).timeout(timeout);
+      final request = http.Request(method, uri)
+        ..followRedirects = followRedirects
+        ..headers.addAll(headers);
+      final response = await _http
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(timeout);
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _JsonEndpointResult.authRequired();
       }

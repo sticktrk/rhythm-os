@@ -418,6 +418,8 @@ class _StaffFixture {
     }
     if (request.url.host == 'supabase.test') return _supabaseResponse(request);
     expect(request.url.host, 'hub-1.relay.test');
+    expect(request.followRedirects, isFalse,
+        reason: 'Scoped device call $path');
     if (path == '/api/auth/support-session-token') {
       expect(request.headers['Authorization'], 'Bearer synthetic-support');
       return _jsonResponse({'token': 'synthetic-short-session'});
