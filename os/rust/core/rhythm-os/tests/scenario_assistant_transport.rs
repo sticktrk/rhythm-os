@@ -55,6 +55,31 @@ async fn request(
     )
 }
 #[tokio::test]
+async fn browser_calls_to_rest_require_a_credential_on_an_open_hub() {
+    let (router, owner) = router();
+    for (origin, token, expected) in [
+        (true, None, StatusCode::FORBIDDEN),
+        (false, None, StatusCode::OK),
+        (true, Some(owner.as_str()), StatusCode::OK),
+    ] {
+        let mut req = Request::post("/api/assistant/operations/read_hub_status")
+            .header("content-type", "application/json");
+        if origin {
+            req = req.header("origin", "https://ui.example");
+        }
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let res = router
+            .clone()
+            .oneshot(req.body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), expected);
+    }
+}
+
+#[tokio::test]
 async fn scoped_tools_resources_and_revocation() {
     let (r, owner) = router();
     let issue = "/api/auth/agent-tokens";

@@ -219,8 +219,13 @@ fn legacy(state: &SharedState, id: &str, mut args: Value) -> Result<Value, Light
 pub(crate) async fn rest(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    auth: Option<Extension<ApiAuthRequestInfo>>,
+    headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> Response {
+    if headers.contains_key("origin") && auth.and_then(|Extension(a)| a.role).is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     match execute(state, &id, args).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => (
@@ -241,8 +246,8 @@ pub(crate) async fn mcp(
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
-    // Native clients send no Origin. Browser clients use the authenticated SDK;
-    // rejecting browser origins also protects local installations from rebinding.
+    // MCP accepts native agent clients. Browser SDK requests use REST with
+    // an authenticated role, including on locally open installations.
     if headers.contains_key("origin") {
         return StatusCode::FORBIDDEN.into_response();
     }
