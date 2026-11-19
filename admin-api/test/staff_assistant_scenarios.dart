@@ -223,6 +223,16 @@ void _staffAssistantScenarios() {
       expect(
           receipt['dispatch']['targets'].single['unresolved_node_ids'].single,
           startsWith('ref_'));
+      final limitation = await service.call(
+          'staff_control_hub',
+          {
+            ...selected,
+            'operation_id': 'adjust_room_brightness',
+            'arguments': {'room_id': 'room', 'direction': 'up'}
+          },
+          failure: true);
+      expect(
+          limitation['content'].single['text'], contains('current room state'));
       service.role = 'support';
       final deletePreview =
           await service.call('staff_plan_delete_hub', selected);
@@ -506,6 +516,16 @@ class _StaffFixture {
           }
         ]
       });
+    }
+    if (path.endsWith('/adjust_room_brightness')) {
+      return http.Response(
+          jsonEncode({
+            'error': {
+              'code': 'lighting_unavailable',
+              'message': 'private_canary'
+            }
+          }),
+          400);
     }
     if (path.endsWith('/get_handoff')) {
       return _jsonResponse({

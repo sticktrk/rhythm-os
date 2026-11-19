@@ -356,16 +356,20 @@ class StaffAssistant {
         } on AdminApiException catch (error) {
           // HTTP failures may include base URLs, request bodies and vendor
           // diagnostics. Only bounded descriptions can leave this service.
-          final message = switch (error.statusCode) {
-            401 ||
-            403 =>
-              'Access refused. Verify staff permissions and the current customer support grant.',
-            409 || 428 => _stale.message,
-            400 => _badInput.message,
-            404 => 'The selected resource is unavailable.',
-            429 => 'Too many active selections. Try again after they expire.',
-            _ => 'The operation could not be verified. Reread before retrying.',
-          };
+          final message = error is AssistantDeviceRejection
+              ? error.message
+              : switch (error.statusCode) {
+                  401 ||
+                  403 =>
+                    'Access refused. Verify staff permissions and the current customer support grant.',
+                  409 || 428 => _stale.message,
+                  400 => _badInput.message,
+                  404 => 'The selected resource is unavailable.',
+                  429 =>
+                    'Too many active selections. Try again after they expire.',
+                  _ =>
+                    'The operation could not be verified. Reread before retrying.',
+                };
           result = {
             'isError': true,
             'content': [

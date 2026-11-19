@@ -653,6 +653,15 @@ class DeviceProbeService {
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _ProxyJsonEndpointResult.authRequired();
       }
+      if (verifyIdentity && request.isAssistant && response.statusCode >= 400) {
+        try {
+          final rejection = AssistantDeviceRejection.fromEnvelope(
+              response.statusCode, jsonDecode(response.body));
+          if (rejection != null) throw rejection;
+        } on FormatException {
+          // Ordinary HTTP failures still follow the existing proxy policy.
+        }
+      }
       if ((request.resourcePrecondition != null || request.isAssistant) &&
           response.statusCode == 409) {
         return _ProxyJsonEndpointResult.preconditionFailed(
@@ -702,6 +711,8 @@ class DeviceProbeService {
           preconditionBodySha256: preconditionBodySha256,
         ),
       );
+    } on AssistantDeviceRejection {
+      rethrow;
     } on TimeoutException {
       return _ProxyJsonEndpointResult.error(
         '${request.method} /${request.path} request timed out.',
