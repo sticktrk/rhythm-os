@@ -179,12 +179,19 @@ location, permission tier, confirmation rule, input schema and verification.
 
 Find the home with `staff_find_homes`, or resolve the selected console record
 with `staff_list_fleet`. Pass its `hub_ref` to probe reachability, read status,
-list log sources and inspect recent diagnostic categories. In the console,
+list log sources and inspect recent diagnostic categories. Log sources have a
+bounded family such as Wi-Fi or remote tunnel. For a dated outage, pass
+`since` and `until` with explicit time zones. Results identify the recent tail
+examined and any undated diagnostics. Events outside the available tail need
+further investigation in the authorized Logs view. In the console,
 open the home's **Open assistant** link and choose **Check support access**.
 The existing Logs view shows authorized staff the underlying diagnostic text.
 
 Use `staff_select_hub` to discover the selected appliance's operations in the
-same conversation. `staff_call_hub_tool` accepts its reads and previews. Admins
+same conversation. Use `staff_find_hub_nodes` to match the person's room,
+sensor or light name inside the service and pass the returned reference to the
+hub operation. `staff_call_hub_tool` accepts reads and previews. Support staff
+can see the proposed scope and the next step for an administrator. Admins
 can use `staff_control_hub` for temporary output. A persistent change requires
 the reviewed plan and `confirmed: true` in `staff_apply_plan`. This also covers
 firmware updates, fleet reports and cloud hub deletion. Re-read the state

@@ -7,6 +7,7 @@ import 'package:shelf/shelf.dart';
 import 'assistant_read_operations.dart';
 import 'device_json.dart';
 import 'staff_hub_catalog.dart';
+import 'staff_diagnostics.dart';
 import 'device_probe_service.dart';
 import 'fleet_report_service.dart';
 import 'models.dart';
@@ -113,9 +114,11 @@ const _tools = [
       []),
   _Tool(
       'staff_list_fleet',
-      'List enabled server hubs, optionally resolving the record selected in the console.',
+      'List enabled server hubs. Narrow by a returned home_ref and the hub name provided by the person when multiple hubs match. The console can pass its selected hub_id.',
       {
         'hub_id': _str,
+        'home_ref': _str,
+        'query': _str,
         'offset': {'type': 'integer', 'minimum': 0}
       },
       []),
@@ -136,11 +139,13 @@ const _tools = [
       ['hub_ref']),
   _Tool(
       'staff_read_log',
-      'Read recent diagnostic categories and counts from a selected source. Raw lines stay on the staff service.',
+      'Read recent infrastructure diagnostic categories and UTC timestamps from one log tail. Use since and until (exclusive) with an explicit time zone. An incomplete tail or missing timestamp cannot establish an outage time.',
       {
         ..._hub,
         'source_ref': _str,
-        'lines': {'type': 'integer', 'minimum': 1, 'maximum': 500}
+        'lines': {'type': 'integer', 'minimum': 1, 'maximum': 500},
+        'since': {'type': 'string', 'format': 'date-time'},
+        'until': {'type': 'string', 'format': 'date-time'}
       },
       [
         'hub_ref',
@@ -151,6 +156,29 @@ const _tools = [
       'Discover the tools on this hub under the customer’s current grant. Continue with staff_call_hub_tool in this conversation.',
       _hub,
       ['hub_ref']),
+  _Tool(
+      'staff_find_hub_nodes',
+      'Find a room, sensor or light by the name supplied by the person on the selected hub. Search stays inside the staff service. Use returned IDs in hub tools and ask for clarification when multiple results match.',
+      {
+        ..._hub,
+        'query': _str,
+        'kind': {
+          'type': 'string',
+          'enum': [
+            'room',
+            'motion_sensor',
+            'light_device',
+            'switch_device',
+            'button',
+            'sensor',
+            'other_device'
+          ]
+        }
+      },
+      [
+        'hub_ref',
+        'query'
+      ]),
   _Tool(
       'staff_call_hub_tool',
       'Invoke an advertised read or preview operation, including plan_hub_update. Pass returned references as arguments. Use staff_apply_plan after a reviewed proposal.',
@@ -479,8 +507,15 @@ class StaffAssistant {
     if (id == 'staff_list_fleet') {
       final offset = args['offset'] as int? ?? 0;
       if (offset < 0) throw _badInput;
+      final homeId = args['home_ref'] == null
+          ? null
+          : _resolve(s, '', 'home', args['home_ref']);
+      final needle = (args['query'] as String? ?? '').trim().toLowerCase();
       final matches = (await support.loadFleetHubs(s))
-          .where((h) => args['hub_id'] == null || h.id == args['hub_id'])
+          .where((h) =>
+              (args['hub_id'] == null || h.id == args['hub_id']) &&
+              (homeId == null || h.homeId == homeId) &&
+              h.name.toLowerCase().contains(needle))
           .toList();
       return {
         'hubs': [for (final h in matches.skip(offset).take(100)) _hubRow(s, h)],
@@ -545,14 +580,28 @@ class StaffAssistant {
           'hub_ref': args['hub_ref']
         };
       case 'staff_read_hub_status':
-        final status = await _request(
-            s, h, 'POST', 'api/assistant/operations/read_hub_status',
-            body: {});
-        return {
+        final basic = {
           'online': true,
-          'server_version': _safeVersion(state['version']),
-          'status': _project(s, h.id, status)
+          'server_version': _safeVersion(state['version'])
         };
+        try {
+          final status = await _request(
+              s, h, 'POST', 'api/assistant/operations/read_hub_status',
+              body: {});
+          return {
+            ...basic,
+            'details_available': true,
+            'status': _project(s, h.id, status)
+          };
+        } on AdminApiException catch (error) {
+          if (error.statusCode != 502 && error.statusCode != 404) rethrow;
+          return {
+            ...basic,
+            'details_available': false,
+            'next_check':
+                'This hub answered the identity check. Detailed lighting status could not be read.'
+          };
+        }
       case 'staff_list_logs':
         final data = await _request(s, h, 'GET', 'api/diag/logs');
         return {
@@ -564,6 +613,10 @@ class StaffAssistant {
                   source['id'] != '..')
                 {
                   'source_ref': _reference(s, h.id, 'log', source['id']),
+                  'family': staffLogFamily(source['id'] as String),
+                  if (staffDiagnosticTime(source['modified_at'])
+                      case final modified?)
+                    'modified_at': modified.toIso8601String(),
                   'bytes': source['bytes'] is int ? source['bytes'] : null
                 }
           ]
@@ -572,21 +625,17 @@ class StaffAssistant {
         final source = _resolve(s, h.id, 'log', args['source_ref']) as String;
         final limit = args['lines'] as int? ?? 100;
         if (limit < 1 || limit > 500) throw _badInput;
+        final since = staffDiagnosticTime(args['since']),
+            until = staffDiagnosticTime(args['until']);
+        if ((args.containsKey('since') && since == null) ||
+            (args.containsKey('until') && until == null) ||
+            (since != null && until != null && !since.isBefore(until))) {
+          throw _badInput;
+        }
         final body = await _request(s, h, 'GET', 'api/diag/logs/$source/tail',
             query: {'lines': '$limit'});
-        final lines = (body['tail']?['lines'] as List).whereType<Map>();
-        return {
-          'lines_reviewed': lines.length,
-          'diagnostics': [
-            for (final item in lines)
-              if (_category(item['text']) case final category?)
-                {
-                  'line':
-                      item['line_number'] is int ? item['line_number'] : null,
-                  'category': category
-                }
-          ]
-        };
+        return staffLogDiagnostics(body['tail']['lines'] as List,
+            since: since, until: until);
       case 'staff_plan_fleet_report':
         return _preview(s, h, 'report', {
           'category': args['category'],
@@ -603,6 +652,7 @@ class StaffAssistant {
         return {
           'selected': true,
           'hub_ref': args['hub_ref'],
+          'resolve_room_or_device': 'staff_find_hub_nodes',
           'reads_and_previews': 'staff_call_hub_tool',
           if (s.staff.isAdmin) 'temporary_controls': 'staff_control_hub',
           'tools': [
@@ -614,6 +664,44 @@ class StaffAssistant {
                   'description': op['description'],
                   'input_schema': op['input_schema']
                 }
+          ]
+        };
+      case 'staff_find_hub_nodes':
+        final catalog = await _catalog(s, h);
+        if (catalog['get_topology_snapshot'] == null) {
+          throw const AdminApiException(404, 'Hub topology is unavailable.');
+        }
+        final topology = await _request(
+            s, h, 'POST', 'api/assistant/operations/get_topology_snapshot',
+            body: {});
+        final query = (args['query'] as String).trim().toLowerCase();
+        if (query.isEmpty) throw _badInput;
+        final nodes = (topology['nodes'] as List)
+            .whereType<_Json>()
+            .where((n) =>
+                n['id'] is String &&
+                n['name'] is String &&
+                (args['kind'] == null || n['kind'] == args['kind']))
+            .toList();
+        final exact = nodes
+            .where((n) => (n['name'] as String).toLowerCase() == query)
+            .toList();
+        final matches = exact.isNotEmpty
+            ? exact
+            : nodes
+                .where(
+                    (n) => (n['name'] as String).toLowerCase().contains(query))
+                .toList();
+        return {
+          'total_matches': matches.length,
+          'nodes': [
+            for (final n in matches.take(50))
+              _project(s, h.id, {
+                'id': n['id'],
+                'kind': n['kind'],
+                'parent_id': n['parent_id'],
+                'controls': n['controls']
+              })
           ]
         };
       case 'staff_call_hub_tool':
@@ -635,19 +723,67 @@ class StaffAssistant {
         final result = tool == 'read_lighting_history'
             ? <String, dynamic>{'status': 'available_in_private_hub_console'}
             : _project(s, h.id, body) as _Json;
+        if (body['status'] == 'handoff') {
+          final original = asStringMap(body['handoff']) ?? body;
+          final handoff = _project(s, h.id, original) as _Json;
+          final step = args['operation_id'] == 'get_handoff' ||
+                  args['operation_id'] == 'guide_device_setup'
+              ? arguments['step']
+              : null;
+          final actor = handoff['actor'] ?? 'resident';
+          final surface = handoff['surface'] ??
+              (actor == 'ha_administrator' ? 'home_assistant' : 'rhythm_app');
+          final instructions = _handoffs[step] ??
+              (tool == 'start_motion_walk' || tool == 'plan_motion_target'
+                  ? (arguments['sensor_id'] == ''
+                      ? 'Pair the sensor on this hub, then refresh discovery and start a new walk.'
+                      : 'Check discovery and room automation ownership on the indicated surface, then repeat the walk.')
+                  : 'Open the indicated surface, complete the requested setup step and refresh this hub.');
+          final resume = original['resume_operation'];
+          return {
+            ...result,
+            'status': 'handoff',
+            'handoff': {
+              'actor': actor,
+              'surface': surface,
+              'instruction': instructions,
+              'resume_operation': _trustedHubOperations.containsKey(resume)
+                  ? resume
+                  : 'get_topology_snapshot'
+            }
+          };
+        }
+        if (tool == 'inspect_motion_walk') {
+          result['next_check'] = _walkGuidance[result['stage']] ??
+              'Inspect the selected walk again on the same hub.';
+          if (result['stage'] == 'waiting_for_detection' &&
+              result['status'] == 'walk_finished') {
+            result['next_check'] =
+                'Check sensor discovery, power and integration availability before starting a new walk.';
+          }
+        }
         final apply = body['operation'],
             reviewedArgs = asStringMap(body['apply_arguments']);
         if (reviewedArgs != null &&
             body['server_instance_id'] == h.serverInstanceId &&
-            catalog[apply]?['tier'] == 'persistent_change') {
-          return _preview(s, h, 'hub', {
-            'id': apply,
-            'arguments': reviewedArgs
-          }, {
+            _trustedHubOperations[apply]?['tier'] == 'persistent_change') {
+          final scope = {
             'reviewed_operation': tool,
             'description': op['description'],
-            ...result,
-          });
+            ...result
+          };
+          if (!s.staff.isAdmin || catalog[apply] == null) {
+            return {
+              'status': 'review',
+              'can_apply': false,
+              'reviewed_operation': tool,
+              'scope': scope,
+              'next_check':
+                  'Ask an administrator to run a fresh preview before confirming this change.'
+            };
+          }
+          return _preview(
+              s, h, 'hub', {'id': apply, 'arguments': reviewedArgs}, scope);
         }
         return result;
       default:
@@ -657,17 +793,28 @@ class StaffAssistant {
 
   _Json _preview(
       AdminSession s, SupportHubDto h, String op, _Json args, _Json review) {
-    final plan = _reference(s, '', 'plan', _Proposal(h, op, args));
-    return {
+    final base = {
       'status': 'review',
       'location': 'staff_cloud',
       'hub_ref': _reference(s, '', 'hub', h.id),
       'change': op == 'hub' ? args['id'] : op,
       'scope': review,
       'requires_confirmation': true,
+      'can_apply': s.staff.isAdmin,
+    };
+    if (!s.staff.isAdmin) {
+      return {
+        ...base,
+        'next_check':
+            'Ask an administrator to run a fresh preview before confirming this change.'
+      };
+    }
+    final plan = _reference(s, '', 'plan', _Proposal(h, op, args));
+    return {
+      ...base,
       'operation': 'staff_apply_plan',
       'plan_id': plan,
-      'apply_arguments': {'plan_id': plan},
+      'apply_arguments': {'plan_id': plan}
     };
   }
 
@@ -713,8 +860,16 @@ class StaffAssistant {
         final result = await _request(
             s, h, 'POST', 'api/assistant/operations/$id',
             body: {...p.arguments['arguments'] as _Json, 'confirmed': true});
-        outcome = 'acknowledged';
-        return _project(s, h.id, result) as _Json;
+        final projected = _project(s, h.id, result) as _Json;
+        outcome = switch (projected['status']) {
+          'applied' => 'applied',
+          'partially_applied' => 'partially_applied',
+          'queued' => 'queued',
+          'failed' => 'failed',
+          'uncertain' => 'uncertain',
+          _ => 'acknowledged'
+        };
+        return projected;
       }
       outcome = 'applied';
       return {
@@ -777,9 +932,74 @@ class StaffAssistant {
   }
 }
 
+// Staff-authored guidance is independent of free-form strings on the customer's hub.
+const _walkGuidance = {
+  'waiting_for_detection':
+      'Walk past the selected sensor and check the walk again.',
+  'detected': 'Preview the intended room target with plan_motion_target.',
+  'routed': 'Check the walk again for the automation decision.',
+  'suppressed':
+      'Review motion enablement, the active scene and room automation ownership.',
+  'command_not_needed':
+      'Check each light and ask the resident to confirm its visible state.',
+  'command_queued': 'Check the walk again for dispatch and acknowledgement.',
+  'command_attempted':
+      'Check the walk again for acknowledgement and fresh light readback.',
+  'command_acknowledged':
+      'Check each light. Ask the resident about lights with no fresh readback.',
+  'no_command_issued':
+      'Check whether the intended room has a reachable managed light.',
+  'command_uncertain':
+      'Inspect readback and integration availability before retrying.',
+};
+const _handoffs = {
+  'first_wifi':
+      'Use Add Light Box near the box to provision Wi-Fi over Bluetooth.',
+  'pairing_code':
+      'Scan the device setup code in Add Device in the Rhythm phone app.',
+  'phone_location': 'Review the location permission in the Rhythm phone app.',
+  'apple_health': 'Review Health sync permissions in the iOS app.',
+  'ha_integration':
+      'Open Devices & services in Home Assistant settings to configure the integration.',
+  'ha_area':
+      'Review the device area in Home Assistant, then refresh Rhythm discovery.',
+  'ha_location':
+      'Review the installation location in Home Assistant system settings.',
+  'ha_update': 'Review the Rhythm add-on update in Home Assistant.',
+  'cloud_account': 'Open account and home settings in Rhythm.',
+  'owner_access': 'Open hub settings in Rhythm to review owner access.',
+  'restore': 'Review the destination in Backup & Restore in Rhythm.',
+  'factory_reset':
+      'Review factory reset in the selected hub’s system settings.',
+  'ha_matter':
+      'Review Matter commissioning in the Home Assistant add-on panel.',
+  'pair': 'Use Add Device on the phone to commission the device on this hub.',
+  'mobile_enrollment': 'Enroll the phone on this hub in the Rhythm app.',
+  'bridge_credentials': 'Authorize the bridge in the integration settings.',
+  'archived_device': 'Review archived devices in the device settings.',
+};
+
 const _idFields = {
   'id',
   'target_id',
+  'source_room_id',
+  'target_room_id',
+  'mood_scene_id',
+  'session_id',
+  'affected_node_ids',
+  'unresolved_node_ids',
+  'skipped_node_ids',
+  'preferred_endpoint_id',
+  'source_node_ids',
+  'scene_ids',
+  'profile_ids_to_reset',
+  'suggested_room',
+  'room_key',
+  'integration_room_id',
+  'selected_room_id',
+  'canonical_id',
+  'canonical_device_id',
+  'entity_id',
   'bridge_id',
   'endpoint_id',
   'selected_endpoint_id',
@@ -811,6 +1031,7 @@ const _idFields = {
   'trial_id',
   'parent_id',
   'control_targets',
+  'inherited_targets',
   'before_targets',
   'after_targets',
   'routed_targets',
@@ -839,6 +1060,34 @@ const _publicFields = {
   'nodes',
   'lights',
   'controls',
+  'inherited',
+  'placement',
+  'configured',
+  'supported',
+  'endpoints',
+  'candidates',
+  'candidate_matches',
+  'room_binding',
+  'entries',
+  'integration',
+  'integrations',
+  'onboarding',
+  'supports_removal',
+  'room_automation_owners',
+  'topology_sync_enabled',
+  'owner',
+  'control_scope',
+  'resident_confirmation',
+  'xy',
+  'pending_dispatch',
+  'legacy_schedule',
+  'profile_override',
+  'default_output',
+  'profiles',
+  'active_mode',
+  'schedule_ownership',
+  'room_defaults',
+  'rhythm_enabled',
   'kind',
   'stage',
   'reason',
@@ -862,6 +1111,23 @@ const _publicFields = {
   'brightness_offset',
   'time_offset_minutes',
   'effect',
+  'result',
+  'dispatch',
+  'targets',
+  'applied',
+  'queued',
+  'applied_target_count',
+  'failed_target_count',
+  'skipped_target_count',
+  'current_room_state',
+  'pauses_adaptation',
+  'skipped',
+  'mapping',
+  'affected_profiles',
+  'mapped',
+  'members',
+  'removed',
+  'pairing_status',
   'requested',
   'proposal',
   'source',
@@ -934,6 +1200,15 @@ const _publicFields = {
 };
 const _symbols = {
   'update_accepted',
+  'acknowledged',
+  'partially_applied',
+  'queued',
+  'failed',
+  'complete',
+  'pending',
+  'profile_sample',
+  'reread_resource',
+  'uncertain',
   'restart_accepted',
   'unpair_endpoint',
   'forget_rhythm_record',
@@ -987,6 +1262,32 @@ const _symbols = {
   'command_not_needed',
   'command_queued',
   'command_attempted',
+  'evaluating_policy',
+  'external_room_authority',
+  'light_breaker_disabled',
+  'motion_activation_disabled',
+  'active_scene',
+  'active_countdown',
+  'already_tracking',
+  'awaiting_dispatch',
+  'awaiting_acknowledgement',
+  'check_each_light',
+  'no_dispatch_route',
+  'dispatch_failed_or_partial',
+  'owner',
+  'integration_settings',
+  'ha_selected',
+  'room_member',
+  'outside_ha_selection',
+  'outside_control_scope',
+  'see_per_light_readback',
+  'reported',
+  'not_recorded',
+  'other_device',
+  'hue',
+  'ha',
+  'matter',
+  'rhythm',
   'command_acknowledged',
   'command_uncertain',
   'no_command_issued',
@@ -1017,24 +1318,3 @@ String? _safeVersion(Object? value) => value is String &&
             .hasMatch(value)
     ? value
     : null;
-String? _category(Object? value) {
-  if (value is! String) return null;
-  final line = value.toLowerCase();
-  if (RegExp('disconnect|network unreachable|tunnel.*(closed|down)')
-      .hasMatch(line)) {
-    return 'network_offline';
-  }
-  if (RegExp('reconnect|tunnel.*connected').hasMatch(line)) {
-    return 'network_restored';
-  }
-  if (RegExp('auth.*(fail|denied)|unauthorized|forbidden').hasMatch(line)) {
-    return 'authentication';
-  }
-  if (line.contains('timeout') || line.contains('timed out')) return 'timeout';
-  if (RegExp('reboot|server started|restart').hasMatch(line)) return 'restart';
-  if (RegExp('integration.*(unavailable|offline)').hasMatch(line)) {
-    return 'integration_unavailable';
-  }
-  if (RegExp(r'\berror\b').hasMatch(line)) return 'device_error';
-  return null;
-}

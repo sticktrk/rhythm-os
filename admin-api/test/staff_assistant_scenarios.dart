@@ -54,8 +54,28 @@ void _staffAssistantScenarios() {
       final tail = await service.call('staff_read_log',
           {...selected, 'source_ref': logs['sources'].single['source_ref']});
       expect(tail['diagnostics'], [
-        {'category': 'network_offline', 'line': 10}
+        {
+          'category': 'network_offline',
+          'line': 10,
+          'observed_at': '2026-11-18T06:03:00.000Z'
+        }
       ]);
+      expect(logs['sources'].single['family'], 'remote_tunnel');
+      expect(logs['sources'].single['modified_at'], '2026-11-18T06:04:00.000Z');
+      final excluded = await service.call('staff_read_log', {
+        ...selected,
+        'source_ref': logs['sources'].single['source_ref'],
+        'since': '2026-11-18T06:04:00Z'
+      });
+      expect(excluded['diagnostics'], isEmpty);
+      await service.call(
+          'staff_read_log',
+          {
+            ...selected,
+            'source_ref': logs['sources'].single['source_ref'],
+            'since': '2026-11-18 01:00:00'
+          },
+          failure: true);
       final catalog = await service.call('staff_select_hub', selected);
       expect(catalog['tools'].map((e) => e['id']),
           contains('get_topology_snapshot'));
@@ -68,6 +88,13 @@ void _staffAssistantScenarios() {
       });
       final room = topo['nodes'].first['id'];
       expect(room, startsWith('ref_'));
+      final matched = await service.call('staff_find_hub_nodes',
+          {...selected, 'query': 'Ada Home', 'kind': 'room'});
+      expect(matched['total_matches'], 1);
+      expect(matched['nodes'].single['id'], room);
+      final none = await service.call('staff_find_hub_nodes',
+          {...selected, 'query': 'Ada Home', 'kind': 'motion_sensor'});
+      expect(none['nodes'], isEmpty);
       final preview = await service.call('staff_call_hub_tool', {
         ...selected,
         'operation_id': 'plan_motion_target',
@@ -131,7 +158,7 @@ void _staffAssistantScenarios() {
       await service.call('staff_call_hub_tool',
           {...selected, 'operation_id': 'apply_motion_target', 'arguments': {}},
           failure: true);
-      await service.call('staff_call_hub_tool', {
+      final readOnly = await service.call('staff_call_hub_tool', {
         ...selected,
         'operation_id': 'plan_motion_target',
         'arguments': {
@@ -140,6 +167,11 @@ void _staffAssistantScenarios() {
           'correlation_id': 'safe'
         }
       });
+      expect(readOnly['can_apply'], false);
+      expect(readOnly['scope']['after_targets'], hasLength(1));
+      expect(readOnly.containsKey('plan_id'), false);
+      expect(readOnly.containsKey('apply_arguments'), false);
+      await service.call('staff_find_hub_nodes', {...selected, 'query': 'ada'});
       service.liveHub = 'other-hub';
       await service.call('staff_select_hub', selected, failure: true);
       service.liveHub = 'srv-test';
@@ -160,6 +192,42 @@ void _staffAssistantScenarios() {
       expect(service.legacyRequests, 0);
       expect(service.writes, 0);
       expect(service.deleted, 0);
+    });
+
+    test(
+        'scoped model results retain handoffs, walk evidence, and partial dispatch without exporting labels or household history',
+        () async {
+      final selected = {
+        'hub_ref': (await service
+                .call('staff_list_fleet', {'hub_id': 'hub-1'}))['hubs']
+            .single['hub_ref']
+      };
+      Future<Map<String, dynamic>> invoke(
+              String id, Map<String, dynamic> args) =>
+          service.call('staff_call_hub_tool',
+              {...selected, 'operation_id': id, 'arguments': args});
+      final handoff = await invoke('get_handoff', {'step': 'ha_area'});
+      expect(handoff['handoff']['actor'], 'ha_administrator');
+      expect(handoff['handoff']['instruction'], contains('Home Assistant'));
+      final walk = await invoke('inspect_motion_walk', {'walk_id': 'walk'});
+      expect(walk['reason'], 'external_room_authority');
+      expect(walk['next_check'], contains('ownership'));
+      expect(walk['lights'].single['resident_power_on'], false);
+      expect(walk.containsKey('detected_at_epoch_ms'), false);
+      final preview = await invoke('plan_home_scene_edit',
+          {'scene_id': 'scene', 'target_mode': 'rooms'});
+      final receipt = await service.call('staff_apply_plan',
+          {...preview['apply_arguments'], 'confirmed': true});
+      expect(receipt['status'], 'partially_applied');
+      expect(receipt['dispatch']['failed_target_count'], 1);
+      expect(
+          receipt['dispatch']['targets'].single['unresolved_node_ids'].single,
+          startsWith('ref_'));
+      service.role = 'support';
+      final deletePreview =
+          await service.call('staff_plan_delete_hub', selected);
+      expect(deletePreview['can_apply'], false);
+      expect(deletePreview.containsKey('apply_arguments'), false);
     });
 
     test('submits a reviewed fleet report once with a private bundle transfer',
@@ -366,20 +434,28 @@ class _StaffFixture {
     if (path == '/api/diag/logs') {
       return _jsonResponse({
         'sources': [
-          {'id': 'private_canary', 'bytes': 20}
+          {
+            'id': 'cloudflared.log.private_canary',
+            'bytes': 20,
+            'modified_at': '2026-11-18T01:04:00-05:00'
+          }
         ]
       });
     }
-    if (path == '/api/diag/logs/private_canary/tail') {
+    if (path == '/api/diag/logs/cloudflared.log.private_canary/tail') {
       return _jsonResponse({
         'tail': {
           'lines': [
             {
               'line_number': 10,
               'text':
-                  'network unreachable https://device.test/?signed-upload=private_canary'
+                  '2026-11-18T01:03:00-05:00 network unreachable https://device.test/?signed-upload=private_canary'
             },
-            {'line_number': 11, 'text': 'private_canary motion activity'}
+            {
+              'line_number': 11,
+              'text':
+                  '2026-11-18T06:03:59Z private_canary motion activity error: network unreachable'
+            }
           ]
         }
       });
@@ -393,6 +469,10 @@ class _StaffFixture {
                 'get_topology_snapshot',
                 'plan_motion_target',
                 'apply_motion_target',
+                'get_handoff',
+                'inspect_motion_walk',
+                'plan_home_scene_edit',
+                'apply_home_scene_edit',
                 'adjust_room_brightness',
                 'explain_room_output'
               ].contains(op['id'])))
@@ -425,6 +505,57 @@ class _StaffFixture {
             'private_canary': 'private_canary'
           }
         ]
+      });
+    }
+    if (path.endsWith('/get_handoff')) {
+      return _jsonResponse({
+        'status': 'handoff',
+        'step': 'ha_area',
+        'actor': 'ha_administrator',
+        'instructions': 'private_canary'
+      });
+    }
+    if (path.endsWith('/inspect_motion_walk')) {
+      return _jsonResponse({
+        'status': 'walk_active',
+        'stage': 'suppressed',
+        'reason': 'external_room_authority',
+        'next_check': 'private_canary',
+        'detected_at_epoch_ms': 1234,
+        'lights': [
+          {
+            'device_id': 'private_canary',
+            'availability': 'unavailable',
+            'resident_power_on': false
+          }
+        ]
+      });
+    }
+    if (path.endsWith('/plan_home_scene_edit')) {
+      return _jsonResponse({
+        'server_instance_id': 'srv-test',
+        'operation': 'apply_home_scene_edit',
+        'requires_confirmation': true,
+        'before': {},
+        'affected_rooms': ['private_canary'],
+        'apply_arguments': {'plan_id': 'native-plan'}
+      });
+    }
+    if (path.endsWith('/apply_home_scene_edit')) {
+      return _jsonResponse({
+        'status': 'partially_applied',
+        'physical_verification': 'not_observed',
+        'dispatch': {
+          'failed_target_count': 1,
+          'targets': [
+            {
+              'target_id': 'private_canary',
+              'applied': false,
+              'unresolved_node_ids': ['private_canary']
+            }
+          ]
+        },
+        'vendor': 'private_canary'
       });
     }
     if (path.endsWith('/plan_motion_target')) {
