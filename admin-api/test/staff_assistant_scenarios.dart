@@ -11,10 +11,15 @@ void _staffAssistantScenarios() {
         () async {
       final uri = Uri.parse('http://admin.test/api/assistant/mcp');
       final handler = service.server.handler;
-      final wildcard = _testServer(client: _HandlerClient(service.handle), allowedOrigins: {'*'});
-      expect((await wildcard.handler(Request('GET', uri, headers: {
-        'origin': 'https://console.test', 'authorization': 'Bearer staff-session'
-      }))).statusCode, 405);
+      final wildcard = _testServer(
+          client: _HandlerClient(service.handle), allowedOrigins: {'*'});
+      expect(
+          (await wildcard.handler(Request('GET', uri, headers: {
+            'origin': 'https://console.test',
+            'authorization': 'Bearer staff-session'
+          })))
+              .statusCode,
+          405);
       expect((await handler(Request('GET', uri))).statusCode, 401);
       expect(
           (await handler(Request('GET', uri,
@@ -44,7 +49,13 @@ void _staffAssistantScenarios() {
       expect(init['serverInfo']['name'], 'rhythm-staff');
       final templates = await service.rpc('resources/templates/list', {});
       expect(templates['resourceTemplates'], isEmpty);
-      final found = await service.call('staff_find_homes', {'query': 'Ada'});
+      for (final short in ['', 'ad']) {
+        await service.call('staff_find_homes', {'query': short}, failure: true);
+      }
+      final prefix = await service.call('staff_find_homes', {'query': 'ada@'});
+      expect(prefix['homes'], isEmpty);
+      final found = await service
+          .call('staff_find_homes', {'query': ' ADA@example.com '});
       final hub = found['homes'].single['hubs'].single['hub_ref'];
       final selected = {'hub_ref': hub};
       final listed =

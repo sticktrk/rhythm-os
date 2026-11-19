@@ -110,12 +110,14 @@ class _Tool {
 const _tools = [
   _Tool(
       'staff_find_homes',
-      'Search the support directory for a home, hub or account. Matching happens in the staff service. Return private selection references.',
+      'Find an exact home or hub name, ID or account email in the support directory. Use staff_list_fleet to browse. Return private selection references.',
       {
         'query': _str,
         'offset': {'type': 'integer', 'minimum': 0}
       },
-      []),
+      [
+        'query'
+      ]),
   _Tool(
       'staff_list_fleet',
       'List enabled server hubs. Narrow by a returned home_ref and the hub name provided by the person when multiple hubs match. The console can pass its selected hub_id.',
@@ -527,7 +529,7 @@ class StaffAssistant {
           .where((h) =>
               (args['hub_id'] == null || h.id == args['hub_id']) &&
               (homeId == null || h.homeId == homeId) &&
-              h.name.toLowerCase().contains(needle))
+              (needle.isEmpty || h.name.trim().toLowerCase() == needle))
           .toList();
       return {
         'hubs': [for (final h in matches.skip(offset).take(100)) _hubRow(s, h)],
@@ -536,6 +538,7 @@ class StaffAssistant {
     }
     if (id == 'staff_find_homes') {
       final needle = (args['query'] as String? ?? '').trim().toLowerCase();
+      if (needle.length < 3) throw _badInput;
       final snapshot = await support.loadSnapshot(s);
       final offset = args['offset'] as int? ?? 0;
       if (offset < 0) throw _badInput;
@@ -543,12 +546,11 @@ class StaffAssistant {
         for (final customer in snapshot.customers)
           for (final entry in customer.homes)
             if ([
-              customer.customerName,
               customer.customerEmail,
               entry.home.name,
               entry.home.id,
-              ...entry.hubs.map((h) => h.name)
-            ].whereType<String>().any((v) => v.toLowerCase().contains(needle)))
+              for (final h in entry.hubs) ...[h.name, h.id]
+            ].whereType<String>().any((v) => v.trim().toLowerCase() == needle))
               entry,
       ];
       return {
