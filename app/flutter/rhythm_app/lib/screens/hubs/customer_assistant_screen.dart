@@ -284,6 +284,8 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
         'expires_at'
       ])
         if (review[key] != null) '${key.replaceAll('_', ' ')} · ${review[key]}',
+      if (review['change'] == 'grant_support')
+        'Join this Box’s local network before granting support access.',
       if (review['support_scope'] != null)
         'Support permission · ${review['support_scope']}',
       if (review['previous_grant_active'] is bool)

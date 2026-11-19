@@ -211,6 +211,7 @@ class RemoteAccessService {
     bool requireSupportGrant = false,
     bool autoGrantSupport = true,
     String? expectedServerInstanceId,
+    String? assistantPlanId,
     bool explicitUserEnable = false,
     bool? verifyRemoteRoute,
   }) async {
@@ -222,11 +223,13 @@ class RemoteAccessService {
       await _clearOptOut(serverHub);
     }
 
-    await AccountCloudSyncService.instance.syncHomeAndServerHubs(
-      home: home,
-      hubs: [serverHub],
-      reason: 'remote_access_enable',
-    );
+    if (assistantPlanId == null) {
+      await AccountCloudSyncService.instance.syncHomeAndServerHubs(
+        home: home,
+        hubs: [serverHub],
+        reason: 'remote_access_enable',
+      );
+    }
 
     final serverInstanceId = await _serverInstanceIdFor(serverHub);
     if (expectedServerInstanceId != null && serverInstanceId != expectedServerInstanceId) {
@@ -235,16 +238,20 @@ class RemoteAccessService {
     final client = _supabaseClient();
     final response = await client.functions.invoke(
       _bootstrapFunctionName,
-      body: buildBootstrapBody(
-        serverHub: serverHub,
-        home: home,
-        serverInstanceId: serverInstanceId,
-        explicitUserEnable: explicitUserEnable,
-      ),
+      body: assistantPlanId == null
+          ? buildBootstrapBody(serverHub:serverHub, home:home, serverInstanceId:serverInstanceId,
+              explicitUserEnable:explicitUserEnable)
+          : {'assistant_plan_id': assistantPlanId, 'home_id': serverHub.homeId,
+             'hub_id':serverHub.id, 'server_instance_id':serverInstanceId, 'explicit_enable':true},
     );
     final data = Map<String, dynamic>.from(response.data as Map);
     if (data['status'] == 'disabled_by_user') {
       throw const RemoteAccessOptedOutException();
+    }
+    if (expectedServerInstanceId != null &&
+        (data['hub_id'] != serverHub.id || data['requested_hub_id'] != serverHub.id ||
+         data['server_instance_id'] != expectedServerInstanceId)) {
+      throw StateError('The remote setup receipt identifies a different Box.');
     }
     final remoteEndpoint = HubEndpoint.fromJson(
       Map<String, dynamic>.from(data['remote_endpoint'] as Map),

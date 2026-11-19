@@ -2,8 +2,34 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/support_access_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+class _GrantCheck {
+  final calls = <Map<String, dynamic>>[];
+  _GrantCheck get functions => this;
+  Future<({Map<String, dynamic> data})> invoke(String name,
+      {required Map<String, dynamic> body}) async {
+    calls.add(body);
+    return (data: {'allowed': false});
+  }
+}
+
 void main() {
   group('SupportAccessService', () {
+    test(
+        'suppressed automatic grant checks cloud consent before issuing a local credential',
+        () async {
+      final check = _GrantCheck();
+      var minted = false;
+      final service = SupportAccessService.testing(
+          supabaseClientFactory: () => check,
+          authApiFactory: ({required baseUrl, String? authToken}) {
+            minted = true;
+            throw StateError('Should not issue a credential');
+          });
+      await expectLater(service.grantForHub(_serverHub()), throwsStateError);
+      expect(minted, isFalse);
+      expect(check.calls.single['action'], 'check');
+    });
+
     test('grant body sends beta admin support token metadata', () {
       final body = SupportAccessService.buildGrantBody(
         serverHub: _serverHub(),

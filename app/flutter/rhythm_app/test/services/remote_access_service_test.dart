@@ -175,6 +175,9 @@ void main() {
       final calls = <_FakeRemoteAccessApi>[];
       var grants = 0;
       final supabase = _FakeSupabaseClient(responseData: {
+        'hub_id': 'hub-1',
+        'requested_hub_id': 'hub-1',
+        'server_instance_id': 'srv-physical',
         'remote_endpoint': {
           'host': 'example.test',
           'port': 443,
@@ -206,11 +209,28 @@ void main() {
       expect(supabase.functions.invocations, isEmpty);
       final result = await service.enableForHub(_serverHub(),
           expectedServerInstanceId: 'srv-physical',
+          assistantPlanId: 'plan',
           autoGrantSupport: false,
           verifyRemoteRoute: true);
       expect(result.routeVerified, isTrue);
+      expect(supabase.functions.invocations.single.body, {
+        'assistant_plan_id': 'plan',
+        'home_id': 'home-1',
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-physical',
+        'explicit_enable': true
+      });
       expect(calls.where((api) => api.putConfigCalls > 0), hasLength(1));
       expect(grants, 0);
+      (supabase.functions.responseData as Map<String, dynamic>)['hub_id'] =
+          'different';
+      await expectLater(
+          service.enableForHub(_serverHub(),
+              expectedServerInstanceId: 'srv-physical',
+              assistantPlanId: 'second',
+              autoGrantSupport: false),
+          throwsStateError);
+      expect(calls.where((api) => api.putConfigCalls > 0), hasLength(1));
     });
 
     test('enable falls back to the saved tunnel when LAN is unreachable',

@@ -41,12 +41,24 @@ class SupportAccessService {
     String? assistantPlanId,
   }) async {
     _ensureServerHubWithOwnerToken(serverHub);
+    final client = _supabaseClient();
+    if (assistantPlanId == null) {
+      final response = await client.functions.invoke(_grantFunctionName, body: {
+        'action': 'check',
+        'hub_id': serverHub.id,
+        'home_id': serverHub.homeId,
+        'scope': _defaultScope,
+      });
+      if (response.data is! Map || response.data['allowed'] != true) {
+        throw StateError(
+            'This Box requires a resident-reviewed support grant.');
+      }
+    }
     final supportToken = await _authApiFactory(
       baseUrl: serverHub.endpoint.baseUrl,
       authToken: serverHub.token,
     ).issueSupportToken(label: label);
 
-    final client = _supabaseClient();
     await client.functions.invoke(
       _grantFunctionName,
       body: buildGrantBody(

@@ -38,7 +38,7 @@ void main() {
         token: 'owner');
     final device = ResidentAssistantDevice(_Homes(hub), _Sync(hub), () => true);
     const intended = {
-      'change': 'grant_support',
+      'change': 'submit_report',
       'home_id': 'house',
       'hub_id': 'device',
       'server_instance_id': 'box'

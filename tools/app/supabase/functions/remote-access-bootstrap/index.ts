@@ -96,13 +96,13 @@ Deno.serve((req) =>
 
     const requestedServerInstanceId = readServerInstanceId(body)
     const serverEndpoint = readServerEndpoint(body)
-    const ensured = await ensureServerHubRows(
-      adminClient,
-      userId,
-      hubId,
-      body,
-      requestedServerInstanceId,
-    )
+    const reviewed = Object.hasOwn(body, 'assistant_plan_id')
+    if (reviewed && (action !== 'enable' || body.explicit_enable !== true)) {
+      return jsonResponse({ error: 'Invalid reviewed remote setup' }, 400)
+    }
+    const ensured = reviewed
+      ? await claimReviewedBootstrap(adminClient, userId, hubId, body, requestedServerInstanceId)
+      : await ensureServerHubRows(adminClient, userId, hubId, body, requestedServerInstanceId)
     if (ensured instanceof Response) return ensured
     const { hub, serverInstanceId } = ensured
     const explicitEnable = body['explicit_enable'] === true
@@ -137,13 +137,19 @@ Deno.serve((req) =>
       const originService =
         readEnv('RHYTHM_REMOTE_ACCESS_ORIGIN', DEFAULT_ORIGIN_SERVICE)
 
-      const existing = await readExistingMapping(adminClient, {
+      const existing = reviewed
+        ? await readExistingMappingByHubId(adminClient, hub.id)
+        : await readExistingMapping(adminClient, {
         userId,
         hubId: hub.id,
         homeId: hub.home_id,
         serverInstanceId,
         serverEndpoint,
       })
+      if (reviewed && existing && (existing.home_id !== hub.home_id ||
+          existing.server_instance_id !== serverInstanceId)) {
+        return jsonResponse({ error: 'Remote mapping changed. Review setup again.' }, 409)
+      }
       const tunnelName = existing?.tunnel_name ?? `rhythm-${hub.id}`
       const desiredHostname = `${hub.id}.${domain}`.toLowerCase()
       const hostname = hostnameForDomain(
@@ -180,12 +186,15 @@ Deno.serve((req) =>
         tunnelName: tunnel.name,
         serverInstanceId,
       })
-      const { data: endpointHub, error: endpointUpdateError } = await adminClient
+      let endpointUpdate = adminClient
         .from('hubs')
         .update({ remote_endpoint: remoteEndpoint })
         .eq('id', hub.id)
         .is('remote_access_disabled_at', null)
-        .select('id')
+      if (reviewed) {
+        endpointUpdate = endpointUpdate.eq('home_id', hub.home_id).eq('server_instance_id', serverInstanceId)
+      }
+      const { data: endpointHub, error: endpointUpdateError } = await endpointUpdate.select('id')
         .maybeSingle()
       if (endpointUpdateError) throw new Error(endpointUpdateError.message)
       if (!endpointHub) {
@@ -222,6 +231,42 @@ Deno.serve((req) =>
     }
   })
 )
+
+// Unlike pairing, a reviewed setup already identifies a persisted Home and
+// Box. Reconciliation is allowed to repair aliases; this action cannot move
+// mappings between them. Consume the device dispatch before any vendor write.
+async function claimReviewedBootstrap(
+  adminClient: any, actor: string, hubId: string, body: JsonObject, instance: string | null,
+): Promise<EnsuredHubRows | Response> {
+  const homeId = readString(body, 'home_id')
+  const planId = readString(body, 'assistant_plan_id')
+  if (!homeId || !planId || !instance || body.home || body.server_hub) {
+    return jsonResponse({ error: 'Missing reviewed target' }, 400)
+  }
+  const hub = await fetchHub(adminClient, hubId)
+  if (hub?.home_id !== homeId || hub.type !== 'server' || hub.server_instance_id !== instance) {
+    return jsonResponse({ error: 'Reviewed Box is no longer available' }, 409)
+  }
+  const home = await fetchHome(adminClient, homeId)
+  if (!home || !isHomeMember(home, actor)) {
+    return jsonResponse({ error: 'Home access required' }, 403)
+  }
+  const existing = await readExistingMapping(adminClient, {
+    userId: actor, hubId, homeId, serverInstanceId: instance, serverEndpoint: null,
+  })
+  if (existing && (existing.hub_id !== hubId || existing.home_id !== homeId ||
+      existing.server_instance_id !== instance)) {
+    return jsonResponse({ error: 'Review the current remote mapping before setup' }, 409)
+  }
+  const { data, error } = await adminClient.from('customer_assistant_reviews')
+    .update({ remote_dispatched: true })
+    .eq('id', planId).eq('actor_id', actor).eq('change', 'enable_remote')
+    .eq('state', 'claimed').eq('remote_dispatched', false)
+    .contains('arguments', {home_id: homeId, hub_id: hubId, server_instance_id: instance})
+    .gt('expires_at', new Date().toISOString()).select('id').maybeSingle()
+  if (error || !data) return jsonResponse({ error: 'Review remote setup again' }, 409)
+  return {hub, home, serverInstanceId: instance}
+}
 
 function readRemoteAccessAction(body: JsonObject): RemoteAccessAction | Response {
   const action = readString(body, 'action')

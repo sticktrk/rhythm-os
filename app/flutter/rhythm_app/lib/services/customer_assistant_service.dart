@@ -239,6 +239,24 @@ class ResidentAssistantDevice {
     };
   }
 
+  Future<ResolvedServerEndpoint> _grantEndpoint(
+      Hub hub, CustomerAction review) async {
+    final endpoint =
+        await ServerEndpointResolver.resolve(hub, syncProvider: sync);
+    if (endpoint.isRemote || endpoint.endpoint == hub.remoteEndpoint) {
+      throw StateError(
+          'Join the reviewed Box’s local network to grant support access.');
+    }
+    final hello =
+        await RhythmConfigApi(baseUrl: endpoint.baseUrl, authToken: hub.token)
+            .getState();
+    _matched(review);
+    if (hello.serverInstanceId != review['server_instance_id']) {
+      throw StateError('The LAN endpoint identifies a different Box.');
+    }
+    return endpoint;
+  }
+
   Future<void> check(CustomerAction review) async {
     final hub = _matched(review);
     if (review['change'] == 'join_home') {
@@ -249,6 +267,8 @@ class ResidentAssistantDevice {
       }
     } else if (hub.token?.isNotEmpty != true) {
       throw StateError('Pair this app with the reviewed Box');
+    } else if (review['change'] == 'grant_support') {
+      await _grantEndpoint(hub, review);
     }
   }
 
@@ -276,8 +296,9 @@ class ResidentAssistantDevice {
       }
       return await homes.enterHome(joined.home!) != null;
     }
-    final endpoint =
-        await ServerEndpointResolver.resolve(hub, syncProvider: sync);
+    final endpoint = change == 'grant_support'
+        ? await _grantEndpoint(hub, claim)
+        : await ServerEndpointResolver.resolve(hub, syncProvider: sync);
     final hello =
         await RhythmConfigApi(baseUrl: endpoint.baseUrl, authToken: hub.token)
             .getState();
@@ -297,6 +318,7 @@ class ResidentAssistantDevice {
             explicitUserEnable: true,
             autoGrantSupport: false,
             expectedServerInstanceId: instance,
+            assistantPlanId: claim['plan_id'] as String,
             verifyRemoteRoute: true);
         _matched(claim);
         return await homes.updateHub(result.updatedHub.copyWith(id: hub.id)) &&
