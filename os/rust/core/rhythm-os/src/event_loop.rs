@@ -8552,6 +8552,87 @@ mod tests {
         );
     }
 
+    struct MotionWalkClients {
+        router: axum::Router,
+        resident: String,
+        staff: String,
+        agent: String,
+    }
+
+    impl MotionWalkClients {
+        async fn new(state: &SharedState) -> Self {
+            let resident = crate::auth::issue_local_owner_token(state, None)
+                .unwrap()
+                .token;
+            let staff = crate::auth::issue_support_session_token(state, None, None)
+                .unwrap()
+                .0
+                .token;
+            let router = crate::axum_router::api_routes()
+                .with_state(state.clone())
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth::require_api_auth_middleware,
+                ));
+            let issued = Self::post(
+                &router,
+                "/api/auth/agent-tokens",
+                &resident,
+                serde_json::json!({}),
+            )
+            .await;
+            Self {
+                router,
+                resident,
+                staff,
+                agent: issued["token"].as_str().unwrap().into(),
+            }
+        }
+
+        async fn post(
+            router: &axum::Router,
+            path: &str,
+            token: &str,
+            body: serde_json::Value,
+        ) -> serde_json::Value {
+            use axum::{
+                body::{to_bytes, Body},
+                http::{Request, StatusCode},
+            };
+            use tower::ServiceExt;
+            let request = Request::post(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap()
+        }
+
+        async fn verify(&self, expected: &serde_json::Value) {
+            let args = serde_json::json!({"walk_id":expected["walk_id"]});
+            for token in [&self.resident, &self.staff] {
+                let rest = Self::post(
+                    &self.router,
+                    "/api/assistant/operations/inspect_motion_walk",
+                    token,
+                    args.clone(),
+                )
+                .await;
+                assert_eq!(&rest, expected);
+            }
+            let rpc = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_motion_walk","arguments":args}});
+            let response =
+                Self::post(&self.router, crate::assistant::MCP_PATH, &self.agent, rpc).await;
+            assert_eq!(response["result"]["isError"], false);
+            let evidence: serde_json::Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(&evidence, expected);
+        }
+    }
+
     #[tokio::test]
     async fn assistant_motion_walk_repair_and_retest_observes_actual_routing_and_individual_reports(
     ) {
@@ -8562,6 +8643,7 @@ mod tests {
             room_snapshot_with_flags("hall", false, false),
         ]));
         let state = make_state_with_runtime(runtime);
+        let clients = MotionWalkClients::new(&state).await;
         let hub = only_hub_key(&state);
         let sensor =
             add_canonical_control_source(&state, &hub, "sensor", "kitchen", DeviceType::Motion);
@@ -8587,10 +8669,9 @@ mod tests {
                 json!({"walk_id":walk["walk_id"]}),
             )
         };
-        assert_eq!(
-            inspect(&walk).await.unwrap()["reason"],
-            "no_fresh_detection"
-        );
+        let waiting = inspect(&walk).await.unwrap();
+        assert_eq!(waiting["reason"], "no_fresh_detection");
+        clients.verify(&waiting).await;
         let mut timers = MotionTimerState::new();
         let event = |detected| HubEvent::Motion {
             hub_key: Some(hub.clone()),
@@ -8604,7 +8685,9 @@ mod tests {
             "no_fresh_detection"
         );
         handle_hub_event(&state, event(true), &mut timers);
-        assert_eq!(inspect(&walk).await.unwrap()["reason"], "missing_target");
+        let missing = inspect(&walk).await.unwrap();
+        assert_eq!(missing["reason"], "missing_target");
+        clients.verify(&missing).await;
         let plan_args = json!({"sensor_id":sensor,"room_id":"hall","correlation_id":"walk-link"});
         let plan = call(&state, "plan_motion_target", plan_args.clone())
             .await
@@ -8649,10 +8732,9 @@ mod tests {
             .unwrap();
         state.lock().unwrap().light_breaker_enabled = false;
         handle_hub_event(&state, event(true), &mut timers);
-        assert_eq!(
-            inspect(&blocked_walk).await.unwrap()["reason"],
-            "light_breaker_disabled"
-        );
+        let suppressed = inspect(&blocked_walk).await.unwrap();
+        assert_eq!(suppressed["reason"], "light_breaker_disabled");
+        clients.verify(&suppressed).await;
         state.lock().unwrap().light_breaker_enabled = true;
         let retest = call(&state, "start_motion_walk", target).await.unwrap();
         assert_eq!(
@@ -8714,6 +8796,7 @@ mod tests {
         assert_eq!(off["availability"], "unavailable");
         assert!(off["power_on"].is_null());
         assert_eq!(off["readback"], "no_fresh_readback");
+        clients.verify(&result).await;
         let visual = call(&state, "inspect_motion_walk", json!({
             "walk_id":retest["walk_id"],"resident_observations":[{"device_id":second,"power_on":false}]
         })).await.unwrap();
