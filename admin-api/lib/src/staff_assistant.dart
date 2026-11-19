@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:shelf/shelf.dart';
 
 import 'assistant_read_operations.dart';
+import 'assistant_audit.dart';
 import 'device_json.dart';
 import 'staff_hub_catalog.dart';
 import 'staff_diagnostics.dart';
@@ -257,7 +258,8 @@ final _trustedHubOperations = {
 
 class StaffAssistant {
   static const supportedVersions = [_version, '2025-03-26', '2025-11-25'];
-  StaffAssistant(this.support, this.probes, this.reports);
+  StaffAssistant(this.support, this.probes, this.reports, this._auditKey);
+  final String? _auditKey;
   final SupportService support;
   final DeviceProbeService probes;
   final FleetReportService reports;
@@ -445,27 +447,30 @@ class StaffAssistant {
 
   Future<_Json> _request(
       AdminSession s, SupportHubDto h, String method, String path,
-      {_Json? body, Map<String, String>? query}) async {
+      {_Json? body, Map<String, String>? query, String? requestId}) async {
     final req = DeviceAdminProxyRequestDto.fromJson({
       'method': method,
       'path': path,
       'body': body,
       if (query != null) 'query': query,
       'expectedServerInstanceId': h.serverInstanceId,
-      'requestId':
+      'requestId': requestId ??
           'agent-${base64UrlEncode(List.generate(18, (_) => _rng.nextInt(256)))}'
     });
     var outcome = 'unverified';
+    _Json? receipt;
     try {
       final result = await probes.proxyJson(
           session: s, hubId: h.id, request: req, requireAssistantGrant: true);
-      final receipt = asStringMap(result.body) ??
+      receipt = asStringMap(result.body) ??
           (throw const AdminApiException(502, 'Invalid hub receipt.'));
       outcome = 'acknowledged';
       return receipt;
     } finally {
       if (req.isMutation) {
-        _audit(s, h, path.split('/').last, outcome, req.requestId);
+        final details = await assistantAuditReceipt(
+            hubId: h.id, secret: _auditKey, arguments: body, receipt: receipt);
+        _audit(s, h, path.split('/').last, outcome, req.requestId, details);
       }
     }
   }
@@ -866,6 +871,7 @@ class StaffAssistant {
         if (catalog[id]?['tier'] != 'persistent_change') throw _denied;
         final result = await _request(
             s, h, 'POST', 'api/assistant/operations/$id',
+            requestId: args['plan_id'] as String,
             body: {...p.arguments['arguments'] as _Json, 'confirmed': true});
         final projected = _project(s, h.id, result) as _Json;
         outcome = switch (projected['status']) {
@@ -890,14 +896,16 @@ class StaffAssistant {
   }
 
   void _audit(AdminSession s, SupportHubDto h, String op, String outcome,
-          String? requestId) =>
+          String? requestId,
+          [Map<String, dynamic> details = const {}]) =>
       stdout.writeln(jsonEncode({
         'event': 'staff_assistant_operation',
         'request_id': requestId,
         'actor': s.user.id,
         'hub_id': h.id,
         'operation': op,
-        'outcome': outcome
+        'outcome': outcome,
+        ...details,
       }));
 
   Object? _restore(AdminSession s, String hub, Object? value) {

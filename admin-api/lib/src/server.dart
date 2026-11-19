@@ -25,7 +25,8 @@ class AdminApiServer {
         _support = support,
         _probes = probes,
         _fleetReports = fleetReports,
-        _assistant = StaffAssistant(support, probes, fleetReports);
+        _assistant = StaffAssistant(
+            support, probes, fleetReports, config.supportAccessEncryptionKey);
 
   final AdminApiConfig _config;
   final SupabaseRestClient _supabase;
