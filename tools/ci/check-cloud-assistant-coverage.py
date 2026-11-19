@@ -141,7 +141,7 @@ def inventory(root):
         if path.is_dir() and not path.name.startswith(("_", "."))
     )
     actual.update(("edge", "INVOKE", name) for name in functions)
-    roots = (root / "app/flutter/rhythm_app/lib", root / "sdk/lib")
+    roots = (*sorted((root / "app/flutter").glob("*/lib")), root / "sdk/lib")
     for path in roots:
         for file in path.rglob("*.dart"):
             try:
@@ -211,6 +211,9 @@ def verify_new_surfaces_fail():
         (app / "database.dart").write_text(
             "await client.rpc<List<Map<String,dynamic>>>('new_rpc');"
         )
+        core = root / "app/flutter/rhythm_core/lib"
+        core.mkdir(parents=True)
+        (core / "account.dart").write_text("await client.rpc('shared_account_rpc');")
         actual = inventory(root)
         wanted = {
             ("staff", "GET", "/new"),
@@ -218,6 +221,7 @@ def verify_new_surfaces_fail():
             ("edge", "INVOKE", "new-edge"),
             ("edge", "INVOKE", "custom_entry"),
             ("app_rpc", "CALL", "new_rpc"),
+            ("app_rpc", "CALL", "shared_account_rpc"),
         }
         if actual != wanted:
             raise ValueError(f"Scanner missed fixture surfaces: {wanted - actual}")
