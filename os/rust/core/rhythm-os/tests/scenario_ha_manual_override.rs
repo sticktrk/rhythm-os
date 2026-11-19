@@ -346,7 +346,10 @@ fn no_output_actions_preserve_observed_power_and_send_no_device_command() {
                     );
                 }
                 assert_eq!(
-                    f.runtime.engine_node_snapshot(target).unwrap().rhythm_enabled,
+                    f.runtime
+                        .engine_node_snapshot(target)
+                        .unwrap()
+                        .rhythm_enabled,
                     action == "rhythm_on"
                 );
                 let state = f.state.lock().unwrap();
@@ -472,7 +475,11 @@ fn manual_observation_after_settings_transfer_preserves_preferences_and_live_sta
         &rhythm_os::commands::build_lighting_settings_bundle(&f.state).unwrap(),
     )
     .unwrap();
-    let source = settings.nodes.iter_mut().find(|node| &node.id == node_id).unwrap();
+    let source = settings
+        .nodes
+        .iter_mut()
+        .find(|node| &node.id == node_id)
+        .unwrap();
     source.rhythm_enabled = true;
     source.room_profile.motion_activation_enabled = Some(false);
     source.room_profile.profile_overrides.insert(
@@ -493,7 +500,10 @@ fn manual_observation_after_settings_transfer_preserves_preferences_and_live_sta
     .unwrap();
     let imported = f.runtime.engine_node_snapshot(node_id).unwrap();
     assert!(imported.rhythm_enabled);
-    assert_eq!(imported.profile_settings.profile_overrides["rhythm"].min_brightness, Some(31));
+    assert_eq!(
+        imported.profile_settings.profile_overrides["rhythm"].min_brightness,
+        Some(31)
+    );
     assert_eq!(imported.time_offset_minutes, 37.0);
     assert_eq!(imported.brightness_offset, 12.0);
     assert!(imported.hard_off);
@@ -506,12 +516,31 @@ fn manual_observation_after_settings_transfer_preserves_preferences_and_live_sta
         assert_eq!(paused.time_offset_minutes, imported.time_offset_minutes);
         assert_eq!(paused.brightness_offset, imported.brightness_offset);
         assert_eq!(
-            (paused.soft_off, paused.mood_active, paused.hard_off, paused.standby_enabled),
-            (imported.soft_off, imported.mood_active, imported.hard_off, imported.standby_enabled)
+            (
+                paused.soft_off,
+                paused.mood_active,
+                paused.hard_off,
+                paused.standby_enabled
+            ),
+            (
+                imported.soft_off,
+                imported.mood_active,
+                imported.hard_off,
+                imported.standby_enabled
+            )
         );
-        assert!(f.runtime.engine_node_snapshot(&f.nodes[1]).unwrap().rhythm_enabled);
+        assert!(
+            f.runtime
+                .engine_node_snapshot(&f.nodes[1])
+                .unwrap()
+                .rhythm_enabled
+        );
     }
-    assert_eq!(f.spy.call_count(), 0, "transfer and manual observations emit no light commands");
+    assert_eq!(
+        f.spy.call_count(),
+        0,
+        "transfer and manual observations emit no light commands"
+    );
     assert!(!f.state.lock().unwrap().light_breaker_enabled);
 }
 
