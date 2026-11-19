@@ -53,6 +53,21 @@ function fixture() {
         }, { status: 400 });
       }
       equal(bearer, "Bearer fixture-resident");
+      if (path === "/rest/v1/rpc/customer_assistant_home_members") {
+        const args = await req.json();
+        return Response.json(
+          args.p_home_id === homeId
+            ? [
+              {
+                member_id: actor,
+                role: "owner",
+                display_name: "Housemate name",
+                is_self: true,
+              },
+            ]
+            : [],
+        );
+      }
       if (path === "/rest/v1/homes") {
         equal(url.searchParams.get("member_ids"), `cs.{${actor}}`);
         if (url.searchParams.has("id")) {
@@ -117,6 +132,21 @@ Deno.test("resident HTTP scopes reads to membership and preserves the device han
   });
   const projected = JSON.parse((await mcp.json()).result.content[0].text);
   equal(projected.homes, [{ home_id: homeId, role: "owner" }]);
+  const members = await invoke({
+    operation: "list_home_members",
+    arguments: { home_id: homeId },
+  });
+  equal((await members.json()).members[0].display_name, "Housemate name");
+  const modelMembers = await invoke({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "list_home_members", arguments: { home_id: homeId } },
+  });
+  equal(
+    JSON.parse((await modelMembers.json()).result.content[0].text).members,
+    [{ member_id: actor, role: "owner", is_self: true }],
+  );
   const selected = await invoke({
     operation: "select_hub",
     arguments: { home_id: homeId, hub_id: hubId },

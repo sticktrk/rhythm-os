@@ -110,13 +110,20 @@ void main() {
       if (body['contract'] == true) {
         return {
           'operations': [
-            {'id': 'list_pending_actions', 'tier': 'read'}
+            {'id': 'list_pending_actions', 'tier': 'read'},
+            {'id': 'cancel_customer_plan', 'tier': 'read'}
           ]
         };
       }
+      if (body['operation'] == 'cancel_customer_plan') {
+        return {'plan_id': body['arguments']['plan_id'], 'status': 'cancelled'};
+      }
       if (body['operation'] == 'list_pending_actions') {
         return {
-          'actions': [review]
+          'actions': [
+            if (!calls.any((c) => c['operation'] == 'cancel_customer_plan'))
+              review
+          ]
         };
       }
       if (body['device_claim'] == 'p') return {...review, 'status': 'claimed'};
@@ -141,12 +148,16 @@ void main() {
     expect(find.textContaining('motion stopped at five'), findsOneWidget);
     expect(find.textContaining('without log attachments'), findsOneWidget);
     expect(phone.dispatches, 0);
+    expect(
+        find.widgetWithText(ActionChip, 'Connect reviewed Box'), findsNothing);
     await tap('Cancel');
-    expect(calls.any((c) => c.containsKey('device_claim')), isFalse);
+    expect(calls.last, {
+      'operation': 'cancel_customer_plan',
+      'arguments': {'plan_id': 'p'}
+    });
+    expect(phone.dispatches, 0);
     await tap('Pending actions');
-    await tap('submit report · awaiting_device');
-    await tap('Confirm reviewed change');
-    expect(phone.dispatches, 1);
-    expect(calls.last, {'device_complete': 'p', 'outcome': 'acknowledged'});
+    expect(find.widgetWithText(ActionChip, 'submit report · awaiting_device'),
+        findsNothing);
   });
 }

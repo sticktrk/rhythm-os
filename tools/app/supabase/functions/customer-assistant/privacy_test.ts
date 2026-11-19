@@ -120,6 +120,10 @@ Deno.test("every customer MCP tool emits exactly its approved provider fields", 
     list_pending_actions: [{ actions: [action] }, { actions: [publicAction] }],
     plan_customer_change: [action, publicAction],
     apply_customer_plan: [action, publicAction],
+    cancel_customer_plan: [{ ...action, status: "cancelled" }, {
+      status: "cancelled",
+      plan_id: plan,
+    }],
   };
   assertSame(Object.keys(rows).sort(), operations.map((op) => op.id).sort());
   for (const [name, [raw, allowed]] of Object.entries(rows)) {

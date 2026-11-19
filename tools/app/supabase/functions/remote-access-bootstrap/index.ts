@@ -126,7 +126,7 @@ Deno.serve((req) =>
           requested_hub_id: hubId,
         })
       }
-      if (explicitEnable && hub.remote_access_disabled_at) {
+      if (!reviewed && explicitEnable && hub.remote_access_disabled_at) {
         await setRemoteAccessDisabled(adminClient, hub.id, false)
       }
 
@@ -258,13 +258,13 @@ async function claimReviewedBootstrap(
       existing.server_instance_id !== instance)) {
     return jsonResponse({ error: 'Review the current remote mapping before setup' }, 409)
   }
-  const { data, error } = await adminClient.from('customer_assistant_reviews')
-    .update({ remote_dispatched: true })
-    .eq('id', planId).eq('actor_id', actor).eq('change', 'enable_remote')
-    .eq('state', 'claimed').eq('remote_dispatched', false)
-    .contains('arguments', {home_id: homeId, hub_id: hubId, server_instance_id: instance})
-    .gt('expires_at', new Date().toISOString()).select('id').maybeSingle()
-  if (error || !data) return jsonResponse({ error: 'Review remote setup again' }, 409)
+  const { data, error } = await adminClient.rpc('customer_assistant_review', {
+    p_actor: actor, p_step: 'dispatch_remote', p_id: planId,
+    p_args: {home_id: homeId, hub_id: hubId, server_instance_id: instance},
+  })
+  if (error || data?.status !== 'dispatched' || data.plan_id !== planId) {
+    return jsonResponse({ error: 'Review remote setup again' }, 409)
+  }
   return {hub, home, serverInstanceId: instance}
 }
 

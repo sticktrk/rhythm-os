@@ -42,7 +42,11 @@ function descriptor(
     tier,
     method: "POST",
     path: "customer-assistant",
-    effect: tier === "read" ? "read_only" : "persistent_change",
+    effect: name === "cancel_customer_plan"
+      ? "discard_review"
+      : tier === "read"
+      ? "read_only"
+      : "persistent_change",
     confirmation: tier === "read" ? "none" : "explicit_user_confirmation",
     freshness_precondition: tier === "read"
       ? "live_account"
@@ -104,6 +108,11 @@ export const operations = [
       include_bundle: { type: "boolean" },
     },
     ["change"],
+  ),
+  descriptor(
+    "cancel_customer_plan",
+    "Discard your pending review on all devices before execution. This changes only the proposal.",
+    { plan_id: id },
   ),
   descriptor(
     "apply_customer_plan",

@@ -23,10 +23,9 @@ Resident previews are bound to a signed-in user, target, installation identity
 and resource revision. Reviews expire after ten minutes. Membership removal and
 support revocation run in a locked database transaction. Confirming a join,
 support grant, report or remote setup returns an awaiting-device receipt.
-The app checks the displayed scope, claims the action once, validates the live
-hub, performs the device work and returns its outcome. A repeated confirmation
+The app checks the displayed scope and claims the action once. Device operations validate the live hub before dispatch. Text-only reports can be sent while the hub is offline. Cancelling an unclaimed review discards it across the resident’s devices. A repeated confirmation
 retrieves the current state. A lost response or interrupted device action
-requires checking the result before starting another proposal.
+requires checking the result before starting another proposal. Remote provisioning rechecks the reviewed resources under the database locks when it consumes the dispatch permission.
 
 A support grant authorizes the staff service to obtain a short-lived device
 session. Revocation also disables automatic regrant from other phones. Remote

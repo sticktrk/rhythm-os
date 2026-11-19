@@ -26,6 +26,7 @@ function projected(action: Fields): Fields {
       "applied",
       "acknowledged",
       "uncertain",
+      "cancelled",
     ]),
     change,
     home_id: pickId(action.home_id),
@@ -94,6 +95,11 @@ export function modelResult(operation: string, raw: Fields): Fields {
       };
     case "list_pending_actions":
       return { actions: rows(raw.actions).map(projected) };
+    case "cancel_customer_plan":
+      return {
+        status: oneOf(raw.status, ["cancelled"]),
+        plan_id: pickId(raw.plan_id),
+      };
     case "plan_customer_change":
     case "apply_customer_plan":
       return projected(raw);

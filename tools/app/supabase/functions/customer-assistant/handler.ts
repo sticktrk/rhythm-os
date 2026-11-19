@@ -95,7 +95,9 @@ async function transition(
     }),
   );
   if (!object(result)) throw new Rejection(503, "invalid_receipt");
-  return reviewCopy(result);
+  return step === "cancel"
+    ? { status: result.status, plan_id: result.plan_id }
+    : reviewCopy(result);
 }
 async function home(s: Session, id: string) {
   const value = data(
@@ -164,15 +166,21 @@ async function execute(
       };
     }
     case "list_home_members": {
-      const h = await home(s, args.home_id as string);
+      const members = data(
+        await s.client.rpc("customer_assistant_home_members", {
+          p_home_id: args.home_id,
+        }),
+      );
+      if (!Array.isArray(members) || !members.length) {
+        throw new Rejection(403, "home_access_required");
+      }
       return {
-        members: [...new Set<string>([h.owner_id, ...h.member_ids])].map(
-          (id) => ({
-            member_id: id,
-            role: id === h.owner_id ? "owner" : "member",
-            is_self: id === s.userId,
-          }),
-        ),
+        members: members.map(({ member_id, display_name, role, is_self }) => ({
+          member_id,
+          display_name,
+          role,
+          is_self,
+        })),
       };
     }
     case "read_account_status": {
@@ -228,6 +236,8 @@ async function execute(
     }
     case "plan_customer_change":
       return transition(s, "plan", args);
+    case "cancel_customer_plan":
+      return transition(s, "cancel", {}, args.plan_id as string);
     case "apply_customer_plan":
       return transition(
         s,

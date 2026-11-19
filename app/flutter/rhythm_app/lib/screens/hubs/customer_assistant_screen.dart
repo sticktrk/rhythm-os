@@ -165,7 +165,8 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
     return switch (_choice) {
       _Choice.homes => (row['display_name'] ?? row['home_id']).toString(),
       _Choice.hubs => (row['display_name'] ?? row['hub_id']).toString(),
-      _Choice.members => '${row['member_id']} · ${row['role']}',
+      _Choice.members =>
+        "${row['is_self'] == true ? 'You' : row['display_name'] ?? row['member_id']} · ${row['role']}",
       _Choice.pending =>
         '${row['change'].toString().replaceAll('_', ' ')} · ${row['status']}',
       _ => '',
@@ -340,8 +341,13 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
         } else if (input == 'Confirm reviewed change') {
           await _confirm();
         } else if (lower == 'cancel') {
+          final id = _review!['plan_id'];
+          final receipt = await _call('cancel_customer_plan', {'plan_id': id});
+          if (receipt['status'] != 'cancelled' || receipt['plan_id'] != id) {
+            throw StateError('Cancellation could not be verified');
+          }
           _review = null;
-          _say('Cancelled.');
+          _say('Cancelled on all devices.');
         } else {
           _say('Use Confirm reviewed change or Cancel.');
         }
@@ -455,8 +461,10 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
     final actions = _review != null
         ? [
             'Confirm reviewed change',
-            if ({'grant_support', 'enable_remote', 'submit_report'}
-                .contains(_review?['change']))
+            if ({'grant_support', 'enable_remote'}
+                    .contains(_review?['change']) ||
+                (_review?['change'] == 'submit_report' &&
+                    _review?['include_bundle'] == true))
               'Connect reviewed Box',
             'Cancel'
           ]

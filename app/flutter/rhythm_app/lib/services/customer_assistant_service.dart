@@ -99,18 +99,19 @@ class CustomerAssistantService {
       }
     } catch (_) {
       acknowledged = false;
-    } finally {
-      // This only records an observation; losing this receipt must never
-      // cause the device operation to be retried.
-      if (isCurrentAccount()) {
-        final receipt = await _request({
-          'device_complete': id,
-          'outcome': acknowledged ? 'acknowledged' : 'uncertain'
-        });
-        acknowledged = acknowledged &&
-            receipt['plan_id'] == id &&
-            receipt['status'] == 'acknowledged';
-      }
+    }
+    // A lost completion receipt is ambiguous even when the device succeeded.
+    // Do not send it from a new account or repeat the claimed action.
+    try {
+      final receipt = await _request({
+        'device_complete': id,
+        'outcome': acknowledged ? 'acknowledged' : 'uncertain'
+      });
+      acknowledged = acknowledged &&
+          receipt['plan_id'] == id &&
+          receipt['status'] == 'acknowledged';
+    } catch (_) {
+      acknowledged = false;
     }
     return {
       'status': acknowledged ? 'acknowledged' : 'uncertain',
@@ -258,6 +259,8 @@ class ResidentAssistantDevice {
   }
 
   Future<void> check(CustomerAction review) async {
+    if (!isCurrentAccount()) throw StateError('Account changed');
+    if (_textOnlyReport(review)) return;
     final hub = _matched(review);
     if (review['change'] == 'join_home') {
       final target = await joinTarget();
@@ -272,7 +275,19 @@ class ResidentAssistantDevice {
     }
   }
 
+  bool _textOnlyReport(CustomerAction action) =>
+      action['change'] == 'submit_report' && action['include_bundle'] == false;
+
   Future<bool> execute(CustomerAction claim) async {
+    if (!isCurrentAccount()) throw StateError('Account changed');
+    if (_textOnlyReport(claim)) {
+      await DebugBundleSubmissionService.instance.submitTextOnly(
+          submissionId: claim['plan_id'] as String,
+          reportKind: SupportReportKind.bug,
+          summary: claim['report_summary'] as String,
+          attachAppLogs: false);
+      return true;
+    }
     final hub = _matched(claim);
     final instance = claim['server_instance_id'] as String;
     final change = claim['change'];
@@ -327,14 +342,8 @@ class ResidentAssistantDevice {
         final reports = DebugBundleSubmissionService.instance;
         final id = claim['plan_id'] as String;
         final summary = claim['report_summary'] as String;
-        final bundle = claim['include_bundle'] as bool;
-        if (!bundle) {
-          await reports.submitTextOnly(
-              submissionId: id,
-              reportKind: SupportReportKind.bug,
-              summary: summary,
-              attachAppLogs: false);
-        } else if (sync.serverCapabilities
+        if (claim['include_bundle'] != true) return false;
+        if (sync.serverCapabilities
                 ?.supportsFeature(RhythmFeature.asyncDebugBundleUpload) ==
             true) {
           await reports.submitViaServerQueue(

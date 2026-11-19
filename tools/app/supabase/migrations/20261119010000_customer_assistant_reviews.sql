@@ -9,7 +9,7 @@ CREATE TABLE public.customer_assistant_reviews (
   support_grant_id uuid,
   remote_dispatched boolean NOT NULL DEFAULT false,
   revision jsonb NOT NULL,
-  state text NOT NULL DEFAULT 'review' CHECK (state IN ('review','awaiting_device','claimed','applied','acknowledged','uncertain')),
+  state text NOT NULL DEFAULT 'review' CHECK (state IN ('review','awaiting_device','claimed','applied','acknowledged','uncertain','cancelled')),
   expires_at timestamptz NOT NULL DEFAULT (now() + interval '10 minutes')
 );
 ALTER TABLE public.customer_assistant_reviews ENABLE ROW LEVEL SECURITY;
@@ -17,6 +17,23 @@ REVOKE ALL ON public.customer_assistant_reviews FROM PUBLIC, anon, authenticated
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.customer_assistant_reviews TO service_role;
 CREATE INDEX customer_assistant_actor_idx ON public.customer_assistant_reviews(actor_id, expires_at);
 CREATE INDEX customer_assistant_expiry_idx ON public.customer_assistant_reviews(expires_at);
+
+-- A household member may see the display name a fellow member chose.
+-- The caller cannot look up arbitrary Auth users or retrieve email addresses.
+CREATE FUNCTION public.customer_assistant_home_members(p_home_id uuid)
+RETURNS TABLE(member_id uuid, display_name text, role text, is_self boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
+  SELECT m.id, left(nullif(btrim(u.raw_user_meta_data->>'display_name'),''),120),
+         CASE WHEN m.id=h.owner_id THEN 'owner' ELSE 'member' END,
+         m.id=auth.uid()
+  FROM public.homes h
+  CROSS JOIN LATERAL (SELECT DISTINCT unnest(h.member_ids || h.owner_id) AS id) m
+  LEFT JOIN auth.users u ON u.id=m.id
+  WHERE h.id=p_home_id AND auth.uid()=ANY(h.member_ids)
+  ORDER BY (m.id=h.owner_id) DESC,m.id
+$$;
+REVOKE ALL ON FUNCTION public.customer_assistant_home_members(uuid) FROM PUBLIC,anon;
+GRANT EXECUTE ON FUNCTION public.customer_assistant_home_members(uuid) TO authenticated;
 
 -- Once a resident has explicitly limited support access, background sync on
 -- any of their devices must respect that choice, including older app builds.
@@ -43,7 +60,7 @@ DECLARE
   current_args jsonb;
   answer jsonb;
 BEGIN
-  IF p_actor IS NULL OR p_step NOT IN ('plan','confirm','claim','complete') THEN
+  IF p_actor IS NULL OR p_step NOT IN ('plan','confirm','claim','complete','cancel','dispatch_remote') THEN
     RAISE EXCEPTION 'invalid_request' USING ERRCODE = '22023';
   END IF;
   IF p_step = 'plan' THEN
@@ -59,7 +76,18 @@ BEGIN
   ELSE
     SELECT * INTO r FROM public.customer_assistant_reviews WHERE id=p_id AND actor_id=p_actor FOR UPDATE;
     IF NOT FOUND OR r.expires_at <= now() THEN RAISE EXCEPTION 'review_expired' USING ERRCODE='P0001'; END IF;
-    IF (p_step='confirm' AND p_args->'confirmed' IS DISTINCT FROM 'true'::jsonb)
+    IF p_step='cancel' THEN
+      IF r.state NOT IN ('review','awaiting_device','cancelled') THEN
+        RAISE EXCEPTION 'action_already_dispatched' USING ERRCODE='P0001';
+      END IF;
+      UPDATE public.customer_assistant_reviews SET state='cancelled',arguments=arguments-'report_summary' WHERE id=r.id;
+      RETURN jsonb_build_object('status','cancelled','plan_id',r.id);
+    END IF;
+    IF r.state='cancelled' OR (p_step='dispatch_remote' AND
+          (r.change<>'enable_remote' OR r.state<>'claimed' OR r.remote_dispatched OR
+           p_args IS DISTINCT FROM jsonb_build_object('home_id',r.arguments->'home_id','hub_id',r.arguments->'hub_id',
+             'server_instance_id',r.arguments->'server_instance_id')))
+       OR (p_step='confirm' AND p_args->'confirmed' IS DISTINCT FROM 'true'::jsonb)
        OR (p_step='claim' AND r.state <> 'awaiting_device')
        OR (p_step='complete' AND r.state <> 'claimed') THEN
       RAISE EXCEPTION 'review_state_changed' USING ERRCODE='P0001';
@@ -100,7 +128,9 @@ BEGIN
           'policy',(SELECT revision FROM public.hub_support_review_policy WHERE hub_id=hub.id));
       END IF;
       IF change_type='enable_remote' THEN
-        rev := rev || jsonb_build_object('disabled_at',hub.remote_access_disabled_at,'endpoint',hub.remote_endpoint);
+        rev := rev || jsonb_build_object('disabled_at',hub.remote_access_disabled_at,'endpoint',hub.remote_endpoint,
+          'mapping',(SELECT jsonb_build_array(m.home_id,m.server_instance_id,m.tunnel_id,m.hostname)
+                     FROM public.hub_remote_access m WHERE m.hub_id=hub.id));
       END IF;
     END IF;
   END IF;
@@ -140,9 +170,16 @@ BEGIN
     IF (p_step='claim' AND change_type='enable_remote') OR (p_step='confirm' AND change_type='revoke_support') THEN
       INSERT INTO public.hub_support_review_policy (hub_id) VALUES (hub.id)
         ON CONFLICT (hub_id) DO UPDATE SET revision=gen_random_uuid();
+      rev := jsonb_set(rev,'{policy}',to_jsonb((SELECT revision FROM public.hub_support_review_policy WHERE hub_id=hub.id)));
     END IF;
-    IF p_step='claim' THEN
-      UPDATE public.customer_assistant_reviews SET state='claimed' WHERE id=r.id RETURNING * INTO r;
+    IF p_step='dispatch_remote' THEN
+      -- Consume the lease and enable the route under the same locks as the
+      -- freshness check. A later disable must win during vendor provisioning.
+      UPDATE public.hubs SET remote_access_disabled_at=NULL WHERE id=hub.id;
+      UPDATE public.customer_assistant_reviews SET remote_dispatched=true WHERE id=r.id;
+      RETURN jsonb_build_object('status','dispatched','plan_id',r.id);
+    ELSIF p_step='claim' THEN
+      UPDATE public.customer_assistant_reviews SET state='claimed',revision=rev WHERE id=r.id RETURNING * INTO r;
     ELSIF change_type='remove_member' THEN
       UPDATE public.homes SET member_ids=array_remove(member_ids, member) WHERE id=home.id;
       UPDATE public.customer_assistant_reviews SET state='applied' WHERE id=r.id RETURNING * INTO r;

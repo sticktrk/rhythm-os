@@ -3,11 +3,19 @@ BEGIN;
 DO $test$
 DECLARE
   actor uuid:=gen_random_uuid(); member uuid:=gen_random_uuid(); other_user uuid:=gen_random_uuid();
-  home uuid:=gen_random_uuid(); hub uuid:=gen_random_uuid(); plan jsonb; receipt jsonb; arguments jsonb;
+  home uuid:=gen_random_uuid(); hub uuid:=gen_random_uuid(); plan jsonb; receipt jsonb; arguments jsonb; grant_plan jsonb;
 BEGIN
   INSERT INTO auth.users(id) VALUES (actor),(member),(other_user);
   INSERT INTO public.homes(id,name,owner_id,member_ids) VALUES(home,'Fixture home',actor,ARRAY[actor,member]);
   INSERT INTO public.hubs(id,home_id,type,name,endpoint,server_instance_id) VALUES(hub,home,'server','Fixture hub','{}','fixture-instance');
+  UPDATE auth.users SET raw_user_meta_data='{"display_name":"Housemate","email":"private@example.invalid"}' WHERE id=member;
+  PERFORM set_config('request.jwt.claim.sub',actor::text,true);
+  SET LOCAL ROLE authenticated;
+  ASSERT (SELECT display_name='Housemate' AND role='member' AND NOT is_self FROM public.customer_assistant_home_members(home) m WHERE m.member_id=member);
+  ASSERT (SELECT count(*)=2 FROM public.customer_assistant_home_members(home));
+  PERFORM set_config('request.jwt.claim.sub',other_user::text,true);
+  ASSERT NOT EXISTS (SELECT 1 FROM public.customer_assistant_home_members(home));
+  RESET ROLE;
   SET LOCAL ROLE service_role;
   ASSERT NOT has_table_privilege('authenticated','public.hub_remote_access','update');
   ASSERT NOT has_function_privilege('authenticated','public.customer_assistant_review(uuid,text,jsonb,uuid)','execute');
@@ -54,6 +62,31 @@ BEGIN
     PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
     RAISE EXCEPTION 'device action dispatched twice' USING ERRCODE='XX000';
   EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  grant_plan:=plan;
+  -- Dispatch is bound to the reviewed revision, even after the phone claims it.
+  arguments:=jsonb_build_object('change','enable_remote','home_id',home,'hub_id',hub);
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+  UPDATE public.hubs SET remote_access_disabled_at=clock_timestamp() WHERE id=hub;
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
+      'home_id',home,'hub_id',hub,'server_instance_id',plan->>'server_instance_id'),(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'changed remote policy still enabled tunnel' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  ASSERT (SELECT remote_access_disabled_at IS NOT NULL FROM public.hubs WHERE id=hub);
+  receipt:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(receipt->>'plan_id')::uuid);
+  PERFORM public.customer_assistant_review(actor,'claim','{}',(receipt->>'plan_id')::uuid);
+  ASSERT public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
+    'home_id',home,'hub_id',hub,'server_instance_id',receipt->>'server_instance_id'),(receipt->>'plan_id')::uuid)->>'status'='dispatched';
+  ASSERT (SELECT remote_access_disabled_at IS NULL FROM public.hubs WHERE id=hub);
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'dispatch_remote',jsonb_build_object(
+      'home_id',home,'hub_id',hub,'server_instance_id',receipt->>'server_instance_id'),(receipt->>'plan_id')::uuid);
+    RAISE EXCEPTION 'remote dispatched twice' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  plan:=grant_plan;
   -- A background sync from another phone cannot undo a reviewed revocation.
   arguments:=jsonb_build_object('change','revoke_support','home_id',home,'hub_id',hub);
   receipt:=public.customer_assistant_review(actor,'plan',arguments);
@@ -80,6 +113,18 @@ BEGIN
   receipt:=public.customer_assistant_review(actor,'complete','{"outcome":"acknowledged"}',(plan->>'plan_id')::uuid);
   ASSERT receipt->>'status'='uncertain';
   arguments:=jsonb_build_object('change','submit_report','home_id',home,'hub_id',hub,'report_summary','fixture','include_bundle',false);
+  plan:=public.customer_assistant_review(actor,'plan',arguments);
+  PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
+  BEGIN
+    PERFORM public.customer_assistant_review(other_user,'cancel','{}',(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'another actor cancelled the plan' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
+  ASSERT public.customer_assistant_review(actor,'cancel','{}',(plan->>'plan_id')::uuid)->>'status'='cancelled';
+  ASSERT NOT (SELECT r.arguments ? 'report_summary' FROM public.customer_assistant_reviews r WHERE r.id=(plan->>'plan_id')::uuid);
+  BEGIN
+    PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);
+    RAISE EXCEPTION 'another phone claimed a discarded report' USING ERRCODE='XX000';
+  EXCEPTION WHEN SQLSTATE 'P0001' THEN NULL; END;
   plan:=public.customer_assistant_review(actor,'plan',arguments);
   PERFORM public.customer_assistant_review(actor,'confirm','{"confirmed":true}',(plan->>'plan_id')::uuid);
   PERFORM public.customer_assistant_review(actor,'claim','{}',(plan->>'plan_id')::uuid);

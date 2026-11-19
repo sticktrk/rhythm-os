@@ -60,6 +60,44 @@ void main() {
     'report_summary': 'lights stayed dark',
     'include_bundle': false,
   };
+  for (final lostAccount in [false, true]) {
+    test(
+        'lost completion or account change leaves the claim uncertain (account change $lostAccount)',
+        () async {
+      var sameAccount = true;
+      var executions = 0;
+      final service = CustomerAssistantService((body) async {
+        if (body.containsKey('device_claim'))
+          return {...review, 'status': 'claimed'};
+        throw StateError('Completion receipt lost');
+      }, () => sameAccount);
+      final result = await service.confirm(
+          {...review, 'status': 'awaiting_device'}, checkDevice: (_) async {},
+          executeDevice: (_) async {
+        executions++;
+        sameAccount = !lostAccount;
+        return true;
+      });
+      expect(result['status'], 'uncertain');
+      expect(executions, 1);
+    });
+  }
+
+  test(
+      'text-only review can proceed offline while bundled reports require the reviewed hub',
+      () async {
+    final other = Hub.server(
+        id: 'other', name: 'Other', homeId: 'other-home', host: 'example.test');
+    var sameAccount = true;
+    final device =
+        ResidentAssistantDevice(_Homes(other), _Sync(other), () => sameAccount);
+    await device.check(review);
+    await expectLater(
+        device.check({...review, 'include_bundle': true}), throwsStateError);
+    sameAccount = false;
+    await expectLater(device.check(review), throwsStateError);
+  });
+
   for (final mismatch in [
     null,
     'home_id',

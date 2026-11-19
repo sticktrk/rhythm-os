@@ -80,7 +80,7 @@ export async function mcp(
           name: op.id,
           description: op.description,
           inputSchema: op.input_schema,
-          annotations: { readOnlyHint: op.tier === "read" },
+          annotations: { readOnlyHint: op.effect === "read_only" },
         })),
       };
       break;
