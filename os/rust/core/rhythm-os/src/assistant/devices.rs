@@ -766,6 +766,9 @@ fn review(s: &AppState, change: &Change) -> Result<Value> {
             decision,
             target,
         } => {
+            if s.platform_context == "ha_addon" && decision == "select_removal" {
+                return Ok(ha_area(s));
+            }
             if matches!(
                 decision.as_str(),
                 "snooze" | "still_installed" | "select_removal"
@@ -1332,6 +1335,23 @@ mod tests {
 
     fn confirm(plan: &Value) -> Value {
         json!({"confirmed":true,"plan_id":plan["plan_id"],"server_instance_id":plan["server_instance_id"]})
+    }
+
+    #[tokio::test]
+    async fn removal_attention_on_addon_hands_off_without_creating_a_review() {
+        let state: SharedState = std::sync::Arc::new(std::sync::Mutex::new(AppState {
+            platform_context: "ha_addon",
+            ..Default::default()
+        }));
+        let result = call(
+            &state,
+            "plan_device_review",
+            json!({"entry_id":"attention","decision":"select_removal"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "handoff");
+        assert!(state.lock().unwrap().assistant_devices.plans.is_empty());
     }
 
     #[tokio::test]
