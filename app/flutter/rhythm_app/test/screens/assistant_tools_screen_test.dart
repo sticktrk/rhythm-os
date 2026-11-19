@@ -7,6 +7,8 @@ void main() {
   testWidgets(
       'a newly advertised plan must be reviewed on the same hub before apply',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(850, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     final contract = RhythmAssistantContract.fromJson({
       'operations': [
         {
@@ -15,7 +17,16 @@ void main() {
           'input_schema': {
             'type': 'object',
             'properties': {
-              'label': {'type': 'string'}
+              'label': {'type': 'string'},
+              'draft': {
+                'anyOf': [
+                  {'type': 'object'},
+                  {'type': 'null'}
+                ]
+              },
+              'count': {
+                'enum': [1, 2]
+              }
             },
             'required': ['label']
           }
@@ -53,15 +64,25 @@ void main() {
     expect(find.text('apply test'), findsNothing);
     await tester.tap(find.text('preview test').last);
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), 'new');
+    await tester.enterText(
+        find.byKey(const ValueKey('preview_test/label')), 'new');
+    await tester.enterText(
+        find.byKey(const ValueKey('preview_test/draft')), '{"brightness":45}');
+    await tester.enterText(
+        find.byKey(const ValueKey('preview_test/count')), '2');
     Future<void> tap(String label) async {
+      await tester.ensureVisible(find.text(label));
       await tester.tap(find.text(label));
       await tester.pumpAndSettle();
     }
 
     await tap('Inspect or preview');
     expect(find.textContaining('Selected room'), findsOneWidget);
-    expect(calls, hasLength(1));
+    expect(calls.single.$2, {
+      'label': 'new',
+      'draft': {'brightness': 45},
+      'count': 2
+    });
     await tap('Cancel');
     expect(calls, hasLength(1));
     await tap('Inspect or preview');

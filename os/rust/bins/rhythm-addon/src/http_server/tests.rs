@@ -1845,6 +1845,21 @@ async fn exercise_ha_administration_waits() {
 #[tokio::test]
 async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
     let f = Fixture::new();
+    // HA starts RFC 8414 discovery from the full configured MCP URL.
+    let (status, metadata) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/.well-known/oauth-authorization-server/api/assistant/mcp",
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        metadata["authorization_endpoint"],
+        "/api/assistant/oauth/authorize"
+    );
+    assert_eq!(metadata["token_endpoint"], "/api/assistant/oauth/token");
     let (status, issued) = json_request(
         f.admin(),
         Method::POST,

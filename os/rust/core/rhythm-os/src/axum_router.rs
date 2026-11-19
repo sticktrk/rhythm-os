@@ -68,6 +68,10 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
         .route(
+            "/.well-known/oauth-authorization-server/api/assistant/mcp",
+            get(crate::auth::assistant_oauth::metadata),
+        )
+        .route(
             "/.well-known/oauth-authorization-server",
             get(crate::auth::assistant_oauth::metadata),
         )
