@@ -156,7 +156,17 @@ contract in the same change:
 7. Add tests for serialization, auth/route registration, rejection, stale
    state, authoritative readback, mixed versions, and prohibited analytics
    values.
-8. Run the assistant-contract parity check.
+8. Run the add-on route tests and the client parity check. CI starts a fresh
+   standalone server and shares its live contract with the Dart SDK, Flutter
+   tool picker, staff proxy and admin console tests. To reproduce with the
+   package dependencies installed, run the following from the repository root.
+
+   ```sh
+   cargo build --locked -p rhythm-server
+   python3 tools/ci/smoke-server.py --assistant-contract /tmp/hub-contract.json
+   tools/ci/check-assistant-clients.sh /tmp/hub-contract.json
+   cargo test --locked -p rhythm-addon mcp_on_mobile_listener
+   ```
 
 Do not expose a generic topology-write or arbitrary light-command tool. Each
 assistant operation must be narrow enough for deterministic validation and an

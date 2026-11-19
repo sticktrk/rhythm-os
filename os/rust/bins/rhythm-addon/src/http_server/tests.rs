@@ -1871,6 +1871,18 @@ async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
             .iter()
             .any(|tool| tool["name"] == op.id));
     }
+    let mobile = f.mobile();
+    for op in rhythm_os::assistant::operation_registry() {
+        // A malformed input reaches a known handler without invoking native
+        // I/O. An unregistered or policy-denied mobile route fails this check.
+        let (status, error) = json_request(mobile.clone(), Method::POST,
+            &op.invocation_path, token, json!({"unknown_parity_argument": true})).await;
+        if op.tier == rhythm_os::assistant::OperationTier::OwnerOnly {
+            assert_eq!(status,StatusCode::FORBIDDEN, "{}", op.id);
+        } else {
+            assert_eq!(status,StatusCode::BAD_REQUEST, "{}: {error}", op.id);
+        }
+    }
     let (_,result)=json_request(f.mobile(),Method::POST,rhythm_os::assistant::MCP_PATH,token,req("tools/call",json!({
         "name":"plan_move_device_room","arguments":{"device_id":"lamp","to_room_id":"office","correlation_id":"test"}}))).await;
     let handoff: Value =

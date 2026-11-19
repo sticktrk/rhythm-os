@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/debug/rhythm-server'))
     parser.add_argument('--timeout', type=float, default=30)
+    parser.add_argument('--assistant-contract', type=Path, help='Save the contract served by this fresh hub for client parity tests.')
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     with socket.socket() as reservation:
@@ -39,6 +40,13 @@ def main():
                                 raise RuntimeError('Server did not return a state object or node list.')
                             if not (root / 'state').is_dir():
                                 raise RuntimeError('Server did not initialize its data directory.')
+                            if args.assistant_contract:
+                                uri = f'http://127.0.0.1:{port}/api/assistant/contract'
+                                with urllib.request.urlopen(uri, timeout=3) as api:
+                                    contract = json.load(api)
+                                if not contract.get('operations') or not contract.get('contract_sha256'):
+                                    raise RuntimeError('Fresh hub did not advertise its operation registry.')
+                                args.assistant_contract.write_text(json.dumps(contract), encoding='utf-8')
                             print('PASS: fresh server starts and serves node state without cloud credentials or hardware.')
                             return
                     except (urllib.error.URLError, TimeoutError):

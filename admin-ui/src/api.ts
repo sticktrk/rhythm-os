@@ -14,7 +14,7 @@ import type {
   SupportSnapshot
 } from './types';
 
-const configuredBaseUrl = import.meta.env.VITE_ADMIN_API_URL?.trim();
+const configuredBaseUrl = import.meta.env?.VITE_ADMIN_API_URL?.trim();
 const apiBaseUrl =
   configuredBaseUrl && configuredBaseUrl.length > 0
     ? configuredBaseUrl.replace(/\/+$/, '')
