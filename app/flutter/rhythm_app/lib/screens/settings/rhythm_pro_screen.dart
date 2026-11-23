@@ -13,7 +13,7 @@ import '../../services/remote_access_service.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/remote_tunnel_tile.dart';
 import '../hubs/assistant_access_screen.dart';
-import '../hubs/customer_assistant_screen.dart';
+import '../hubs/lighting_chat_screen.dart';
 import 'dialogs/sign_in_modal.dart';
 import 'sections/rhythm_server_section.dart';
 
@@ -59,9 +59,9 @@ class RhythmProScreen extends StatelessWidget {
                 leading: const Icon(Icons.chat_bubble_outline),
                 title: const Text('Lighting assistant'),
                 subtitle:
-                    const Text('Ask about your lights and manage your home.'),
+                    const Text('Chat about a room, try a color, or adjust its brightness and warmth.'),
                 onTap: signedIn || FeatureFlags.auxSignIn
-                    ? () => CustomerAssistantScreen.show(context)
+                    ? () => LightingChatScreen.show(context)
                     : null),
             const Divider(),
             ListTile(

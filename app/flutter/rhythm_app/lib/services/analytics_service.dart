@@ -4,6 +4,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../backend/backend.dart';
 import '../config/app_orientation_policy.dart';
 
+enum LightingChatOutcome { reply, proposal, hubUnavailable, modelUnavailable }
+
 /// Singleton service for analytics tracking.
 ///
 /// Provides typed methods for all analytics events to ensure consistency
@@ -90,6 +92,9 @@ class AnalyticsService {
       debugPrint('Analytics error: $e');
     }
   }
+
+  Future<void> logLightingChatTurn(LightingChatOutcome outcome) =>
+      logEvent('lighting_chat_turn', {'outcome': outcome.name});
 
   /// Set a user property for segmentation.
   Future<void> setUserProperty(String name, String? value) async {

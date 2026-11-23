@@ -55,10 +55,32 @@ deletion are handoffs to the resident.
 
 ## Model and telemetry boundary
 
-The built-in resident and staff conversations run on their respective clients
-using guided steps and live operation descriptors. Neither calls a hosted model
-provider. The resident's trusted view can show household labels and their
-reviewed report. The staff console can open authorized diagnostics separately.
+Guided tools in the resident app and staff console run locally. Rhythm Pro also
+offers a hosted lighting chat. A signed-in resident pairs their phone once on
+the local network using the hub owner's authorization. The phone stores its
+revocable agent credential in device secure storage scoped to the account and
+installation. Away from home the hub also requires an enabled tunnel and Remote
+MCP. Guided tools remain available for older hubs and account or motion tasks.
+
+The phone discovers rooms and tools over the hub's MCP endpoint. It reads the
+selected room before each turn. The authenticated customer assistant function
+sends up to eight recent conversation messages, selected numerical or
+enumerated lighting readings and supported adjustment types to OpenAI with
+response storage disabled. Hub and account credentials, topology, device
+names and raw readbacks stay on the phone. Room names typed by the resident
+are part of their message. Changing rooms starts a new conversation.
+
+A model can propose brightness, warmth, power, color or a curve preview. The
+phone validates the arguments, shows the exact target and calls the selected
+hub only after a tap. Its receipt distinguishes the hub's target from lamp
+readback. The app can undo a preview using the hub-issued trial ID.
+
+The Edge Function uses the server secret `OPENAI_API_KEY` and defaults to
+`gpt-4.1-mini`. `RHYTHM_CHAT_MODEL` can select a Responses API model that
+supports strict function calling. Apply the lighting chat usage migration
+before deployment. The free preview allows 60 model requests per resident per
+UTC day. The database keeps one counter per account and deletes it with the
+account. Closing chat discards its transcript.
 
 An external MCP client chooses and operates its own model. The account MCP
 response projection exposes opaque IDs, enumerated roles and outcomes, boolean

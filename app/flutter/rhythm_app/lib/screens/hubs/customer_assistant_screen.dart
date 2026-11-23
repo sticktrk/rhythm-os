@@ -28,7 +28,8 @@ class CustomerAssistantScreen extends StatefulWidget {
 
   static Future<void> show(BuildContext context,
       {List<AssistantMessage>? history,
-      CustomerAssistantService? account}) async {
+      CustomerAssistantService? account,
+      Future<void> Function(BuildContext)? openHubChat}) async {
     final service = account ?? CustomerAssistantService.signedIn();
     if (service == null) {
       SignInModal.show(context);
@@ -44,10 +45,10 @@ class CustomerAssistantScreen extends StatefulWidget {
                   service: service,
                   device: device,
                   history: history,
-                  continueOnHub: (context, history) => AssistantChatScreen.show(
-                      context,
-                      history: history,
-                      account: service),
+                  continueOnHub: (context, history) => openHubChat != null
+                      ? openHubChat(context)
+                      : AssistantChatScreen.show(context,
+                          history: history, account: service),
                 )));
   }
 
