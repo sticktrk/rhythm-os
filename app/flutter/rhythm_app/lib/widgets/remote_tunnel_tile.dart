@@ -6,9 +6,34 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/remote_access_service.dart';
+import 'settings_row.dart';
 
+/// What the hub and this phone currently know about the tunnel.
+class RemoteTunnelState {
+  const RemoteTunnelState({
+    required this.enabled,
+    required this.busy,
+    required this.notice,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+
+  /// A change is being written to the hub.
+  final bool busy;
+
+  /// Set while the tunnel is doing anything other than resting on or off.
+  final String? notice;
+
+  /// Null while the switch cannot be used.
+  final ValueChanged<bool>? onChanged;
+}
+
+/// The remote access switch. It renders as a settings row unless [builder]
+/// supplies the host screen's own row.
 class RemoteTunnelTile extends StatefulWidget {
-  const RemoteTunnelTile({super.key});
+  const RemoteTunnelTile({super.key, this.builder});
+  final Widget Function(BuildContext context, RemoteTunnelState state)? builder;
   @override
   State<RemoteTunnelTile> createState() => _RemoteTunnelTileState();
 }
@@ -58,7 +83,9 @@ class _RemoteTunnelTileState extends State<RemoteTunnelTile> {
           final reading = snapshot.connectionState == ConnectionState.waiting;
           final status = snapshot.data;
           final savedRoute = hub?.remoteEndpoint != null;
-          final description = switch ((status, savedRoute)) {
+          final notice = switch ((status, savedRoute)) {
+            _ when _isTogglingRemoteAccess => 'Updating…',
+            _ when reading => 'Reading tunnel status…',
             (final s?, _) when !s.enabled && s.configured =>
               'Paused on the hub.',
             (final s?, _) when s.enabled && !s.connectorHealthy =>
@@ -68,21 +95,30 @@ class _RemoteTunnelTileState extends State<RemoteTunnelTile> {
             (null, false) when snapshot.hasError =>
               'Could not read tunnel status from the hub.',
             _ => available
-                ? 'Use the Rhythm app away from home.'
+                ? null
                 : 'Sign in to your Rhythm account to set up remote access.',
           };
-          return SwitchListTile(
-            secondary: const Icon(Icons.public),
-            title: const Text('Remote access tunnel'),
-            subtitle: Text(_isTogglingRemoteAccess
-                ? 'Updating…'
-                : reading
-                    ? 'Reading tunnel status…'
-                    : description),
-            value: status?.enabled ?? savedRoute,
+          final state = RemoteTunnelState(
+            enabled: status?.enabled ?? savedRoute,
+            busy: _isTogglingRemoteAccess,
+            notice: notice,
             onChanged: available && !_isTogglingRemoteAccess && !reading
                 ? _setRemoteAccessEnabled
                 : null,
+          );
+          final builder = widget.builder;
+          if (builder != null) return builder(context, state);
+          return SettingsRow(
+            icon: Icons.public,
+            iconColor: const Color(0xFF26A69A),
+            label: 'Remote access tunnel',
+            subtitle: state.notice ?? 'Use the Rhythm app away from home.',
+            showChevron: false,
+            trailing: SettingsSwitch(
+                value: state.enabled, onChanged: state.onChanged),
+            onTap: state.onChanged == null
+                ? null
+                : () => state.onChanged!(!state.enabled),
           );
         });
   }

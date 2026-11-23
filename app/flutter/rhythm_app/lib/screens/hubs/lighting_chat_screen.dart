@@ -16,11 +16,9 @@ import '../../services/customer_assistant_service.dart';
 import '../../services/lighting_chat_service.dart';
 import '../../services/home_agent_client.dart';
 import 'home_agent_chat.dart';
-import '../../utils/app_color_temperature.dart';
 import '../settings/dialogs/sign_in_modal.dart';
 import '../../widgets/assistant_chat_widgets.dart';
 import '../../widgets/connect_hub_screen.dart';
-import '../../widgets/solar_orbit.dart' show CelestialColors;
 import 'assistant_chat_screen.dart';
 
 class LightingChatScreen extends StatefulWidget {
@@ -507,31 +505,6 @@ class _LightingChatState extends State<LightingChatScreen> {
           guided: widget.guided);
     }
     final enabled = _active && !_busy;
-    final suggestions = <(IconData, String, String)>[
-      (
-        Icons.lightbulb_outline,
-        'Check the lights',
-        'What are my lights doing right now?'
-      ),
-      if (hub?.tools.contains('adjust_room_brightness') == true)
-        (
-          Icons.brightness_6_outlined,
-          'A little brighter',
-          'Make the lights a little brighter.'
-        ),
-      if (hub?.tools.contains('adjust_room_warmth') == true)
-        (
-          Icons.wb_twilight,
-          'Warm it up',
-          'Make the light a little warmer and keep the brightness.'
-        ),
-      if (hub?.tools.contains('set_room_color') == true)
-        (
-          Icons.palette_outlined,
-          'Try a color',
-          'Suggest a one-minute amber color preview.'
-        ),
-    ];
     return RhythmAssistantPage(
       title: 'Lighting assistant',
       actions: [
@@ -560,33 +533,12 @@ class _LightingChatState extends State<LightingChatScreen> {
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                     children: [
                       if (hub == null && !_busy) _connectionHelp(),
-                      if (hub != null && _messages.isEmpty) ...[
-                        SizedBox(
-                            height: (MediaQuery.sizeOf(context).height * 0.12 -
-                                    MediaQuery.viewInsetsOf(context).bottom)
-                                .clamp(0.0, 96.0)),
-                        const Text('How should the light feel?',
-                            style: TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.w600,
-                                height: 1.2,
-                                color: CelestialColors.textPrimary)),
-                        const SizedBox(height: 14),
-                        Wrap(spacing: 8, runSpacing: 4, children: [
-                          for (final s in suggestions)
-                            ActionChip(
-                                avatar: Icon(s.$1),
-                                label: Text(s.$2),
-                                onPressed: enabled ? () => _send(s.$3) : null),
-                        ]),
-                        const SizedBox(height: 14),
-                        const Text(
-                            'Chat shares your messages and room readings with OpenAI. You review each lighting change.',
-                            style: TextStyle(
-                                color: CelestialColors.textSecondary,
-                                fontSize: 13,
-                                height: 1.45)),
-                      ],
+                      if (hub != null && _messages.isEmpty)
+                        LightingChatWelcome(
+                            tools: hub.tools,
+                            onPrompt: enabled ? _send : null,
+                            disclosure:
+                                'Chat shares your messages and room readings with OpenAI. You review each lighting change.'),
                       for (final m in _messages)
                         AssistantMessageBubble(
                             resident: m.resident, text: m.text),
@@ -600,18 +552,10 @@ class _LightingChatState extends State<LightingChatScreen> {
                                     : null),
                         ]),
                       if (_busy)
-                        Row(children: [
-                          const SizedBox.square(
-                              dimension: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2)),
-                          const SizedBox(width: 10),
-                          Expanded(
-                              child: Semantics(
-                                  liveRegion: true,
-                                  child: Text(hub == null
-                                      ? 'Connecting to your hub…'
-                                      : 'Working…'))),
-                        ]),
+                        AssistantWorking(
+                            label: hub == null
+                                ? 'Connecting to your hub…'
+                                : 'Working…'),
                       if (proposal != null)
                         _LightingReview(
                             proposal: proposal,
@@ -661,13 +605,7 @@ class _LightingReview extends StatelessWidget {
   final VoidCallback? apply, skip;
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context), args = proposal.arguments;
-    final swatch = switch (proposal.operation) {
-      'set_room_color' =>
-        Color.fromRGBO(args['red'], args['green'], args['blue'], 1),
-      'adjust_room_warmth' => AppColorTemperature.toColor(args['kelvin']),
-      _ => null
-    };
+    final theme = Theme.of(context);
     final brightness = reading['canonical_brightness'],
         kelvin = reading['canonical_kelvin'];
     final before = switch (proposal.operation) {
@@ -677,47 +615,20 @@ class _LightingReview extends StatelessWidget {
         'Current target ${brightness.round()}%',
       _ => null
     };
-    return Card(
-        color: CelestialColors.backgroundCard,
-        margin: EdgeInsets.zero,
-        elevation: 0,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: CelestialColors.orbitRing)),
-        child: Padding(
-            padding: const EdgeInsets.all(16),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                CircleAvatar(
-                    backgroundColor: swatch ??
-                        CelestialColors.sunWarm.withValues(alpha: 0.18),
-                    child: swatch == null
-                        ? Icon(
-                            color: CelestialColors.sunWarm,
-                            proposal.operation == 'try_room_offset'
-                                ? Icons.schedule
-                                : Icons.lightbulb_outline)
-                        : null),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                      Text(roomName, style: theme.textTheme.labelLarge),
-                      Text(proposal.label, style: theme.textTheme.titleLarge),
-                    ])),
-              ]),
-              const SizedBox(height: 12),
-              if (before != null)
-                Text(before, style: theme.textTheme.labelMedium),
-              Text(proposal.detail),
-              const SizedBox(height: 12),
-              Wrap(spacing: 8, children: [
-                FilledButton(
-                    onPressed: apply, child: const Text('Apply to room')),
-                TextButton(onPressed: skip, child: const Text('Skip')),
-              ]),
-            ])));
+    return AssistantReviewCard(children: [
+      AssistantReviewHeader(
+          target: roomName,
+          title: proposal.label,
+          operation: proposal.operation,
+          arguments: proposal.arguments),
+      const SizedBox(height: 12),
+      if (before != null) Text(before, style: theme.textTheme.labelMedium),
+      Text(proposal.detail),
+      const SizedBox(height: 12),
+      Wrap(spacing: 8, children: [
+        FilledButton(onPressed: apply, child: const Text('Apply to room')),
+        TextButton(onPressed: skip, child: const Text('Skip')),
+      ]),
+    ]);
   }
 }

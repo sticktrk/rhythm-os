@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../utils/app_color_temperature.dart';
 import 'solar_orbit.dart' show CelestialColors;
 
 /// The shared navigation and surfaces for Pro and its conversations.
@@ -46,6 +47,8 @@ class RhythmAssistantPage extends StatelessWidget {
             ?.copyWith(color: CelestialColors.textPrimary),
         iconTheme:
             const IconThemeData(color: CelestialColors.sunWarm, size: 18),
+        selectedColor: CelestialColors.accentBlue.withValues(alpha: 0.22),
+        checkmarkColor: CelestialColors.accentBlue,
       ),
     );
     return Theme(
@@ -61,7 +64,7 @@ class RhythmAssistantPage extends StatelessWidget {
               tooltip: MaterialLocalizations.of(context).backButtonTooltip,
               onPressed: () => Navigator.maybePop(context),
               style: IconButton.styleFrom(
-                backgroundColor: colors.primary.withValues(alpha: 0.15),
+                backgroundColor: colors.primary.withValues(alpha: 0.2),
                 foregroundColor: colors.primary,
               ),
               icon: const Icon(Icons.chevron_left_rounded),
@@ -181,5 +184,169 @@ class AssistantComposer extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// The opening of a lighting conversation: one question, a few prompts to
+/// start from, and what leaves the phone.
+class LightingChatWelcome extends StatelessWidget {
+  const LightingChatWelcome({
+    super.key,
+    required this.tools,
+    required this.onPrompt,
+    required this.disclosure,
+  });
+
+  /// Hub operations this conversation may propose. Prompts follow them.
+  final Set<String> tools;
+  final ValueChanged<String>? onPrompt;
+  final String disclosure;
+
+  @override
+  Widget build(BuildContext context) {
+    final prompts = <(IconData, String, String)>[
+      (
+        Icons.lightbulb_outline,
+        'Check the lights',
+        'What are my lights doing right now?'
+      ),
+      if (tools.contains('adjust_room_brightness'))
+        (
+          Icons.brightness_6_outlined,
+          'A little brighter',
+          'Make the lights a little brighter.'
+        ),
+      if (tools.contains('adjust_room_warmth'))
+        (
+          Icons.wb_twilight,
+          'Warm it up',
+          'Make the light a little warmer and keep the brightness.'
+        ),
+      if (tools.contains('set_room_color'))
+        (
+          Icons.palette_outlined,
+          'Try a color',
+          'Suggest a one-minute amber color preview.'
+        ),
+    ];
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SizedBox(
+          height: (MediaQuery.sizeOf(context).height * 0.12 -
+                  MediaQuery.viewInsetsOf(context).bottom)
+              .clamp(0.0, 96.0)),
+      const Text('How should the light feel?',
+          style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w600,
+              height: 1.2,
+              color: CelestialColors.textPrimary)),
+      const SizedBox(height: 14),
+      Wrap(spacing: 8, runSpacing: 4, children: [
+        for (final p in prompts)
+          ActionChip(
+              avatar: Icon(p.$1),
+              label: Text(p.$2),
+              onPressed: onPrompt == null ? null : () => onPrompt!(p.$3)),
+      ]),
+      const SizedBox(height: 14),
+      AssistantNote(disclosure),
+    ]);
+  }
+}
+
+/// Quiet supporting copy inside a conversation.
+class AssistantNote extends StatelessWidget {
+  const AssistantNote(this.text, {super.key});
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Text(text,
+      style: const TextStyle(
+          color: CelestialColors.textSecondary, fontSize: 13, height: 1.45));
+}
+
+/// The in-conversation progress line.
+class AssistantWorking extends StatelessWidget {
+  const AssistantWorking({super.key, this.label = 'Working…'});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(children: [
+        const SizedBox.square(
+            dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+        const SizedBox(width: 10),
+        Expanded(child: Semantics(liveRegion: true, child: Text(label))),
+      ]);
+}
+
+/// The bordered surface for anything the resident reviews or follows up on.
+class AssistantReviewCard extends StatelessWidget {
+  const AssistantReviewCard({super.key, required this.children});
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Card(
+      color: CelestialColors.backgroundCard,
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: CelestialColors.orbitRing)),
+      child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children)));
+}
+
+/// What a reviewed change touches and what it does, led by a swatch of the
+/// proposed light when the change has one.
+class AssistantReviewHeader extends StatelessWidget {
+  const AssistantReviewHeader({
+    super.key,
+    required this.target,
+    required this.title,
+    required this.operation,
+    this.arguments = const {},
+  });
+  final String target, title, operation;
+  final Map<String, dynamic> arguments;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final red = arguments['red'],
+        green = arguments['green'],
+        blue = arguments['blue'],
+        kelvin = arguments['kelvin'];
+    final swatch = switch (operation) {
+      'set_room_color' when red is int && green is int && blue is int =>
+        Color.fromRGBO(red, green, blue, 1),
+      'adjust_room_warmth' when kelvin is int =>
+        AppColorTemperature.toColor(kelvin),
+      _ => null
+    };
+    final icon = operation.contains('motion')
+        ? Icons.sensors
+        : operation.contains('schedule') || operation == 'try_room_offset'
+            ? Icons.schedule
+            : operation.contains('scene')
+                ? Icons.palette_outlined
+                : Icons.lightbulb_outline;
+    return Row(children: [
+      CircleAvatar(
+          backgroundColor:
+              swatch ?? CelestialColors.sunWarm.withValues(alpha: 0.18),
+          child: swatch == null
+              ? Icon(icon, color: CelestialColors.sunWarm)
+              : null),
+      const SizedBox(width: 12),
+      Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(target, style: theme.textTheme.labelLarge),
+        Text(title, style: theme.textTheme.titleLarge),
+      ])),
+    ]);
   }
 }

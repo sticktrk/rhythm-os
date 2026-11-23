@@ -512,15 +512,23 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                                   .connectedServerHub
                                   ?.id ==
                               widget.hub.id) ...[
-                        ListTile(
-                          leading: const Icon(Icons.chat_bubble_outline),
-                          title: const Text('Guided lighting tools'),
-                          onTap: () => AssistantChatScreen.show(context),
+                        _buildSection(
+                          title: 'ASSISTANT',
+                          children: [
+                            _buildNavigationCard(
+                              icon: Icons.chat_bubble_outline,
+                              label: 'Guided lighting tools',
+                              onTap: () => AssistantChatScreen.show(context),
+                            ),
+                            const SizedBox(height: 10),
+                            _buildNavigationCard(
+                              icon: Icons.key_outlined,
+                              label: 'Assistant access',
+                              onTap: _openAssistantAccess,
+                            ),
+                          ],
                         ),
-                        ListTile(
-                            leading: const Icon(Icons.key_outlined),
-                            title: const Text('Assistant access'),
-                            onTap: _openAssistantAccess),
+                        const SizedBox(height: 16),
                       ],
                       if (widget.homeManaged) _buildSettingsNavigationSection(),
                       if (_supportsWifiChange) ...[
@@ -818,70 +826,83 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     return _buildSection(
       title: 'SETTINGS',
       children: [
-        GestureDetector(
+        _buildNavigationCard(
+          icon: Icons.settings_outlined,
+          label: 'Settings',
+          subtitle: 'Security and server controls',
           onTap: _showServerSettings,
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            decoration: BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              child: Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _teal.withValues(alpha: 0.16),
-                    ),
-                    child: const Icon(
-                      Icons.settings_outlined,
-                      color: _teal,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Settings',
-                          style: TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        SizedBox(height: 4),
-                        Text(
-                          'Security and server controls',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Icon(
-                    Icons.chevron_right,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                    size: 22,
-                  ),
-                ],
-              ),
-            ),
-          ),
         ),
       ],
+    );
+  }
+
+  /// A bordered card that opens another screen from this page.
+  Widget _buildNavigationCard({
+    required IconData icon,
+    required String label,
+    String? subtitle,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundCard,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _teal.withValues(alpha: 0.16),
+                ),
+                child: Icon(icon, color: _teal, size: 20),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: CelestialColors.textSecondary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Icon(
+                Icons.chevron_right,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                size: 22,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -2569,7 +2590,28 @@ class _RhythmServerAdvancedSettingsScreenState
               : null,
         ),
         const SizedBox(height: 10),
-        const RemoteTunnelTile(),
+        RemoteTunnelTile(builder: (context, tunnel) {
+          final color = tunnel.busy
+              ? Colors.amber
+              : tunnel.onChanged == null
+                  ? CelestialColors.textSecondary.withValues(alpha: 0.6)
+                  : tunnel.enabled
+                      ? _enabledGreen
+                      : _disabledRed;
+          return _buildSwitchRow(
+            icon: Icons.public_rounded,
+            iconColor: color,
+            label: 'Remote access tunnel',
+            tooltip:
+                'Turn off to remove the current tunnel. Turn on again to provision a fresh tunnel.',
+            statusText: tunnel.notice ?? (tunnel.enabled ? 'On' : 'Off'),
+            statusColor: color,
+            value: tunnel.enabled,
+            activeTrackColor: _enabledGreen,
+            busy: tunnel.busy,
+            onChanged: tunnel.onChanged,
+          );
+        }),
       ],
     );
   }

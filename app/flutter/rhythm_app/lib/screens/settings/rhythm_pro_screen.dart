@@ -20,6 +20,11 @@ import '../hubs/lighting_chat_screen.dart';
 import 'dialogs/sign_in_modal.dart';
 import 'sections/rhythm_server_section.dart';
 
+const _hubTeal = Color(0xFF00BCD4);
+const _tunnelGreen = Color(0xFF26A69A);
+const _profileAmber = Color(0xFFFFC857);
+const _agentSlate = Color(0xFF607D8B);
+
 class RhythmProScreen extends StatelessWidget {
   const RhythmProScreen({super.key});
 
@@ -54,36 +59,39 @@ class RhythmProScreen extends StatelessWidget {
                         ? () => LightingChatScreen.show(context)
                         : null,
                   ),
-                  ListTile(
-                      leading: const Icon(Icons.account_circle_outlined),
-                      title: Text(signedIn
+                  SettingsRow(
+                      icon: Icons.account_circle_outlined,
+                      iconColor: CelestialColors.accentBlue,
+                      label: signedIn
                           ? 'Rhythm account'
-                          : 'Connect your Rhythm account'),
-                      subtitle: Text(signedIn
+                          : 'Connect your Rhythm account',
+                      subtitle: signedIn
                           ? user.email ?? 'Signed in'
-                          : 'Sign in to use lighting chat and remote access.'),
+                          : 'Sign in to use lighting chat and remote access.',
+                      showChevron: !signedIn && FeatureFlags.auxSignIn,
                       onTap: !signedIn && FeatureFlags.auxSignIn
                           ? () => SignInModal.show(context)
                           : null),
                 ]),
                 const SizedBox(height: 20),
                 SettingsGroup(children: [
-                  ListTile(
-                      leading: const Icon(Icons.home_outlined),
-                      title: Text(hub?.name ?? 'Connect a hub'),
-                      subtitle: Text(hub == null
+                  SettingsRow(
+                      icon: Icons.developer_board,
+                      iconColor: _hubTeal,
+                      label: hub?.name ?? 'Connect a hub',
+                      subtitle: hub == null
                           ? 'Pair your LightBox or Home Assistant add-on.'
-                          : home?.name ?? 'Selected hub'),
-                      trailing: const Icon(Icons.chevron_right),
+                          : home?.name ?? 'Selected hub',
                       onTap: () => RhythmServerDetailScreen.show(context)),
                   if (hub != null)
                     const RemoteTunnelTile()
                   else
-                    const ListTile(
-                        leading: Icon(Icons.public),
-                        title: Text('Remote access tunnel'),
-                        subtitle: Text(
-                            'Pair a hub to set up access away from home.')),
+                    const SettingsRow(
+                        icon: Icons.public,
+                        iconColor: _tunnelGreen,
+                        label: 'Remote access tunnel',
+                        subtitle: 'Pair a hub to set up access away from home.',
+                        showChevron: false),
                   if (hub != null && connected)
                     RhythmProHubControls(
                       key: ValueKey((
@@ -96,16 +104,20 @@ class RhythmProScreen extends StatelessWidget {
                       isLocal: sync.activeConnectionEndpoint == hub.endpoint,
                     )
                   else ...[
-                    const ListTile(
-                        leading: Icon(Icons.cloud_download_outlined),
-                        title: Text('Bulb profile updates'),
-                        subtitle: Text(
-                            'Connect locally to manage color-matching updates.')),
-                    const ListTile(
-                        leading: Icon(Icons.link),
-                        title: Text('Remote MCP'),
-                        subtitle: Text(
-                            'Connect locally to manage external agent access.')),
+                    const SettingsRow(
+                        icon: Icons.cloud_download_outlined,
+                        iconColor: _profileAmber,
+                        label: 'Bulb profile updates',
+                        subtitle:
+                            'Connect locally to manage color-matching updates.',
+                        showChevron: false),
+                    const SettingsRow(
+                        icon: Icons.link,
+                        iconColor: _agentSlate,
+                        label: 'Remote MCP',
+                        subtitle:
+                            'Connect locally to manage external agent access.',
+                        showChevron: false),
                   ],
                 ]),
               ]);
@@ -255,9 +267,12 @@ class _RhythmProHubControlsState extends State<RhythmProHubControls> {
   Widget build(BuildContext context) {
     final settings = _settings;
     if (settings == null) {
-      return ListTile(
-          title: const Text('Remote MCP and bulb profile updates'),
-          subtitle: Text(_error ?? 'Reading hub settings…'),
+      return SettingsRow(
+          icon: Icons.tune_rounded,
+          iconColor: _agentSlate,
+          label: 'Remote MCP and bulb profile updates',
+          subtitle: _error ?? 'Reading hub settings…',
+          showChevron: false,
           trailing: _ownerRequired && !_busy && widget.isLocal
               ? TextButton(
                   onPressed: _connectOwner,
@@ -265,32 +280,49 @@ class _RhythmProHubControlsState extends State<RhythmProHubControls> {
               : !_busy && widget.isLocal
                   ? IconButton(
                       icon: const Icon(Icons.refresh),
+                      color: CelestialColors.textSecondary,
                       tooltip: 'Refresh hub settings',
                       onPressed: () => _load())
                   : null);
     }
-    return Column(children: [
-      SwitchListTile(
-          secondary: const Icon(Icons.cloud_download_outlined),
-          title: const Text('Bulb profile updates'),
-          subtitle: const Text(
-              'Download color-matching updates. Saved profiles work offline.'),
-          value: settings.bulbProfileUpdates,
-          onChanged: _busy ? null : (v) => _load(updates: v)),
-      SwitchListTile(
-          secondary: const Icon(Icons.link),
-          title: const Text('Remote MCP'),
-          subtitle: Text(widget.hub.remoteEndpoint == null
+    void Function(bool)? when(void Function(bool) change) =>
+        _busy ? null : change;
+    final updates = when((v) => _load(updates: v));
+    final remoteMcp = when((v) => _load(remoteMcp: v));
+    // These rows sit inside the screen's group alongside its other rows, so
+    // they carry the group's dividers themselves.
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SettingsRow(
+          icon: Icons.cloud_download_outlined,
+          iconColor: _profileAmber,
+          label: 'Bulb profile updates',
+          subtitle:
+              'Download color-matching updates. Saved profiles work offline.',
+          showChevron: false,
+          trailing: SettingsSwitch(
+              value: settings.bulbProfileUpdates, onChanged: updates),
+          onTap:
+              updates == null ? null : () => updates(!settings.bulbProfileUpdates)),
+      const SettingsDivider(),
+      SettingsRow(
+          icon: Icons.link,
+          iconColor: _agentSlate,
+          label: 'Remote MCP',
+          subtitle: widget.hub.remoteEndpoint == null
               ? 'External agents need an active tunnel and an agent credential.'
-              : 'Let authorized agents connect through the tunnel.'),
-          value: settings.remoteMcp,
-          onChanged: _busy ? null : (v) => _load(remoteMcp: v)),
-      if (settings.remoteMcp)
-        ListTile(
-            title: const Text('Manage agent credentials'),
-            leading: const Icon(Icons.key),
-            trailing: const Icon(Icons.chevron_right),
+              : 'Let authorized agents connect through the tunnel.',
+          showChevron: false,
+          trailing:
+              SettingsSwitch(value: settings.remoteMcp, onChanged: remoteMcp),
+          onTap: remoteMcp == null ? null : () => remoteMcp(!settings.remoteMcp)),
+      if (settings.remoteMcp) ...[
+        const SettingsDivider(),
+        SettingsRow(
+            icon: Icons.key,
+            iconColor: CelestialColors.accentBlue,
+            label: 'Manage agent credentials',
             onTap: _credentials),
+      ],
     ]);
   }
 }

@@ -13,10 +13,18 @@ class AgentTarget {
 
 class AgentReview {
   AgentReview(this.target, this.operation, this.arguments, this.description,
-      this.proof, this.digest);
+      this.proof, this.digest,
+      {this.title, String? detail})
+      : detail = detail ?? description;
   final AgentTarget target;
   final String operation, description, digest;
   final CustomerAction arguments, proof;
+
+  /// The proposed light value, for changes that have one to show.
+  final String? title;
+
+  /// What the change does, without repeating the target or [title].
+  final String detail;
 }
 
 class HomeAgentCatalog {
@@ -175,6 +183,7 @@ class HomeAgentCatalog {
     CustomerAction proof = {};
     late CustomerAction dispatch;
     late String description, operation;
+    String? title, detail;
     if (LightingProposal.supported.contains(op)) {
       final p = LightingProposal.parse(
           {'operation': op, 'arguments': args}, target.tools);
@@ -190,6 +199,8 @@ class HomeAgentCatalog {
       operation = op;
       dispatch = {'room_id': target.id, ...p.arguments};
       description = '${target.name} · ${p.label}. ${p.detail}';
+      title = p.label;
+      detail = p.detail;
       proof = {
         'targets': [
           for (final light in lights)
@@ -276,7 +287,8 @@ class HomeAgentCatalog {
         .convert(
             utf8.encode(jsonEncode([instance, target.ref, op, args, proof])))
         .toString();
-    return AgentReview(target, operation, dispatch, description, proof, digest);
+    return AgentReview(target, operation, dispatch, description, proof, digest,
+        title: title, detail: detail);
   }
 }
 

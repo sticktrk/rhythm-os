@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../widgets/assistant_chat_widgets.dart';
+
 /// Render discovered tools and keep the arguments for a reviewed apply tied
 /// to the hub and plan that returned them. No user-entered paths are followed.
 class AssistantToolsScreen extends StatefulWidget {
@@ -155,10 +157,11 @@ class _AssistantToolsState extends State<AssistantToolsScreen> {
         final op = _selected;
         final enabled = widget.isCurrentTarget() && !_busy;
         final props = op?.inputSchema['properties'] as Map? ?? {};
-        return Scaffold(
-            appBar: AppBar(title: const Text('Hub tools')),
-            body: SafeArea(
-                child: ListView(padding: const EdgeInsets.all(16), children: [
+        return RhythmAssistantPage(
+            title: 'Hub tools',
+            body: ListView(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                children: [
               DropdownButtonFormField<RhythmAssistantOperation>(
                   isExpanded: true,
                   decoration: const InputDecoration(labelText: 'Choose a tool'),
@@ -197,7 +200,7 @@ class _AssistantToolsState extends State<AssistantToolsScreen> {
                         ? 'Inspect or preview'
                         : 'Run on this hub')),
               ],
-              if (_busy) const LinearProgressIndicator(),
+              if (_busy) const AssistantWorking(),
               if (_error != null) Text(_error!),
               if (!widget.isCurrentTarget())
                 const Text('Reconnect to the same hub to continue.'),
@@ -218,6 +221,6 @@ class _AssistantToolsState extends State<AssistantToolsScreen> {
                       child: const Text('Cancel')),
                 ],
               ],
-            ])));
+            ]));
       });
 }
