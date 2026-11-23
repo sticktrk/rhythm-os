@@ -171,6 +171,8 @@ pub fn capabilities(attrs: &Value) -> LightCapabilities {
 
 #[derive(Clone, Debug)]
 pub struct HaLightCatalogEntry {
+    /// Manufacturer and model from HA's device registry on the Matter integration.
+    pub matter_model: Option<(String, String)>,
     pub identity: Option<HaLightIdentity>,
     pub name: String,
     pub area_id: Option<String>,

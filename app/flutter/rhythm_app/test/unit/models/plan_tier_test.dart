@@ -7,7 +7,6 @@ void main() {
       expect(PlanTier.basic.grants(Entitlement.cloudBackupRestore), isTrue);
       expect(PlanTier.basic.grants(Entitlement.multiDeviceSync), isTrue);
       expect(PlanTier.basic.grants(Entitlement.multiUserAccess), isTrue);
-      expect(PlanTier.basic.grants(Entitlement.remoteAccess), isTrue);
 
       expect(PlanTier.basic.grants(Entitlement.standby), isFalse);
       expect(PlanTier.basic.grants(Entitlement.advancedDayControls), isFalse);
@@ -75,11 +74,18 @@ void main() {
           Entitlement.multiUserAccess.labelFor(PlanTier.basic), 'Coming soon');
     });
 
-    test('enables remote access for testing', () {
-      expect(Entitlement.remoteAccess.minimumTier, PlanTier.basic);
-      expect(Entitlement.remoteAccess.isComingSoon, isFalse);
-      expect(Entitlement.remoteAccess.labelFor(PlanTier.basic), 'Included');
-      expect(Entitlement.remoteAccess.labelFor(PlanTier.pro), 'Included');
+    test('assigns all four preview capabilities to Rhythm Pro', () {
+      for (final feature in [
+        Entitlement.remoteAccess,
+        Entitlement.remoteMcp,
+        Entitlement.bulbProfileUpdates,
+        Entitlement.lightingAssistant
+      ]) {
+        expect(feature.minimumTier, PlanTier.pro);
+        expect(feature.isComingSoon, isFalse);
+        expect(PlanTier.basic.grants(feature), isFalse);
+        expect(PlanTier.pro.grants(feature), isTrue);
+      }
     });
   });
 

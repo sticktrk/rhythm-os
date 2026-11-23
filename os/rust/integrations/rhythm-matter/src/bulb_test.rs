@@ -918,7 +918,7 @@ fn curated_device_quirks(
         .cloud_profiles
         .lock()
         .map_err(|_| anyhow::anyhow!("Matter cloud profile lock"))?;
-    cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
+    cloud_profiles.apply_to_device((&device).into(), &mut caps, &mut quirks);
     Ok(quirks)
 }
 

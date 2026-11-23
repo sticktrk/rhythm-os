@@ -129,6 +129,10 @@ fn shared_routes() -> Router<SharedState> {
             post(post_assistant_move_apply),
         )
         .route(
+            "/api/pro/settings",
+            get(crate::pro_settings::get).put(crate::pro_settings::put),
+        )
+        .route(
             "/api/remote-access/status",
             get(crate::remote_access::get_status),
         )

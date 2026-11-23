@@ -161,6 +161,7 @@ impl Fixture {
                     cache.reviewed.insert(id.into(), proof(id));
                 }
                 cache.lights.insert(id.into(), HaLightCatalogEntry {
+                    matter_model: None,
                     identify: None,
                     identity: Some(proof(id)), name: id.into(), area_id: Some("area".into()),
                     capabilities: rhythm_ha::light::capabilities(&json!({"supported_color_modes":["color_temp"]})),

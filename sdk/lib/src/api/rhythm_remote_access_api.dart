@@ -131,6 +131,7 @@ class RhythmRemoteAccessApi {
     required String hostname,
     required String connectorToken,
     bool enabled = true,
+    bool resumePaused = false,
     String? tunnelId,
     String? tunnelName,
   }) async {
@@ -141,6 +142,7 @@ class RhythmRemoteAccessApi {
           'enabled': enabled,
           'hostname': hostname,
           'connector_token': connectorToken,
+          if (resumePaused) 'resume_paused': true,
           if (tunnelId != null) 'tunnel_id': tunnelId,
           if (tunnelName != null) 'tunnel_name': tunnelName,
         },

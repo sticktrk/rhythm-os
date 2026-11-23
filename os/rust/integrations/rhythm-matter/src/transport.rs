@@ -779,6 +779,16 @@ pub struct CommissionedDevice {
     pub max_kelvin: Option<u16>,
 }
 
+impl<'a> From<&'a CommissionedDevice> for rhythm_os::cloud_profiles::BulbModel<'a> {
+    fn from(device: &'a CommissionedDevice) -> Self {
+        Self {
+            manufacturer: &device.vendor_name,
+            model: &device.product_name,
+            matter_ids: Some((device.vendor_id, device.product_id)),
+        }
+    }
+}
+
 /// Matter color modes (from the Color Control cluster).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

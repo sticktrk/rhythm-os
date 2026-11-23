@@ -38,8 +38,10 @@ enum Entitlement {
   /// curve at any hour.
   timeSimulator,
 
-  /// Remote access. Product surface is coming soon.
   remoteAccess,
+  remoteMcp,
+  bulbProfileUpdates,
+  lightingAssistant,
 }
 
 const Map<PlanTier, Set<Entitlement>> _grants = {
@@ -47,7 +49,6 @@ const Map<PlanTier, Set<Entitlement>> _grants = {
     Entitlement.cloudBackupRestore,
     Entitlement.multiDeviceSync,
     Entitlement.multiUserAccess,
-    Entitlement.remoteAccess,
   },
   PlanTier.pro: {
     Entitlement.cloudBackupRestore,
@@ -59,6 +60,9 @@ const Map<PlanTier, Set<Entitlement>> _grants = {
     Entitlement.transitionButton,
     Entitlement.timeSimulator,
     Entitlement.remoteAccess,
+    Entitlement.remoteMcp,
+    Entitlement.bulbProfileUpdates,
+    Entitlement.lightingAssistant,
   },
 };
 
@@ -99,7 +103,10 @@ extension EntitlementX on Entitlement {
         Entitlement.sleepPrimarySettings => 'Sleep Primary Settings',
         Entitlement.transitionButton => 'Button Trigger',
         Entitlement.timeSimulator => 'Time Simulator',
-        Entitlement.remoteAccess => 'Remote Access',
+        Entitlement.remoteAccess => 'Remote access tunnel',
+        Entitlement.remoteMcp => 'Remote MCP',
+        Entitlement.bulbProfileUpdates => 'Bulb profile updates',
+        Entitlement.lightingAssistant => 'Lighting assistant',
       };
 
   String get shortDescription => switch (this) {
@@ -116,6 +123,12 @@ extension EntitlementX on Entitlement {
         Entitlement.timeSimulator =>
           'Drag to preview light at any hour of the day',
         Entitlement.remoteAccess => 'Control Rhythm away from home',
+        Entitlement.remoteMcp =>
+          'Connect an authorized agent through your tunnel',
+        Entitlement.bulbProfileUpdates =>
+          'Download approved bulb color profiles',
+        Entitlement.lightingAssistant =>
+          'Use the lighting assistant in the app',
       };
 
   PlanTier get minimumTier => switch (this) {
@@ -127,7 +140,11 @@ extension EntitlementX on Entitlement {
         Entitlement.sleepPrimarySettings => PlanTier.pro,
         Entitlement.transitionButton => PlanTier.pro,
         Entitlement.timeSimulator => PlanTier.pro,
-        Entitlement.remoteAccess => PlanTier.basic,
+        Entitlement.remoteAccess ||
+        Entitlement.remoteMcp ||
+        Entitlement.bulbProfileUpdates ||
+        Entitlement.lightingAssistant =>
+          PlanTier.pro,
       };
 
   bool get isComingSoon => switch (this) {

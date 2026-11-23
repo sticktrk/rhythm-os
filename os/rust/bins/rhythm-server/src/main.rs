@@ -303,6 +303,11 @@ async fn run_server(
 ) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
     rhythm_server::support_bundle_jobs::resume_pending(state.clone());
+    tokio::spawn(rhythm_os::cloud_profiles::maintain_catalog(
+        state.clone(),
+        false,
+        rhythm_matter::desktop_lifecycle::refresh_cloud_profiles,
+    ));
 
     // Start HTTP server
     let addr = format!("0.0.0.0:{}", port);

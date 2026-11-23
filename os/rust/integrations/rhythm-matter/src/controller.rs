@@ -17,14 +17,19 @@ use rhythm_core::room::Room;
 #[cfg(test)]
 use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 #[cfg(test)]
+use rhythm_devices::ColorPreference;
+#[cfg(test)]
 use rhythm_devices::LightType;
-use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities};
+use rhythm_devices::{DeviceQuirk, LightCapabilities};
+#[cfg(test)]
+use rhythm_os::control_profile::calibrated_hs_white;
 use rhythm_os::hub::DeviceReachabilityFailureClass;
 
 use crate::clusters;
+#[cfg(test)]
+use crate::control_profile::MatterColorRoute;
 use crate::control_profile::{
-    MatterColorRoute, MatterControlProfile, MatterLevelCommand, MatterProfileSource,
-    MatterTurnOnStrategy,
+    MatterControlProfile, MatterLevelCommand, MatterProfileSource, MatterTurnOnStrategy,
 };
 use crate::hub_state::MatterHubData;
 use crate::transport::{MatterCommandStep, MatterEndpointCommandPlan, MatterTransport};
@@ -255,41 +260,8 @@ impl MatterLightController {
             };
             let (mut caps, _quirks, resolved_profile) = self.device_metadata(device_id, node_id);
             let profile = audition_profile.unwrap_or(&resolved_profile);
-            // A Color Temperature physical range does not constrain whites
-            // rendered through RGB emitters. Once Audition has supplied an HS
-            // curve, preserve the requested Kelvin for curve interpolation.
-            if let Some((min_kelvin, max_kelvin)) = profile.kelvin_range.filter(|_| {
-                profile.color_route != MatterColorRoute::HueSaturation
-                    || profile.hs_white_curve.is_empty()
-            }) {
-                caps.min_kelvin = Some(min_kelvin);
-                caps.max_kelvin = Some(max_kelvin);
-            } else if profile.color_route == MatterColorRoute::HueSaturation
-                && !profile.hs_white_curve.is_empty()
-            {
-                caps.min_kelvin = None;
-                caps.max_kelvin = None;
-            }
-            if profile.source.min_brightness != MatterProfileSource::SafeDefault {
-                if let Some(min_brightness) = profile.min_brightness {
-                    caps.min_brightness = Some(min_brightness);
-                }
-            }
-            if profile.source.supports_transition != MatterProfileSource::SafeDefault {
-                caps.supports_transition = profile.supports_transition;
-            }
-            let mut adapted = rhythm_os::controller_helpers::adapt_lighting_command(
-                &caps,
-                command,
-                Self::profile_color_preference(&profile),
-            );
-            if !command.is_direct_color && adapted.hue_saturation.is_some() {
-                if let Some(calibrated) =
-                    calibrated_hs_white(&profile.hs_white_curve, command.kelvin)
-                {
-                    adapted.hue_saturation = Some(calibrated);
-                }
-            }
+            let adapted =
+                rhythm_os::controller_helpers::adapt_profiled_command(&mut caps, command, profile);
             let turn_on = if !profile.execute_if_off_honoured
                 && profile.turn_on == MatterTurnOnStrategy::StageColorThenLevelWithOnOff
             {
@@ -740,14 +712,6 @@ impl MatterLightController {
         if let Ok(mut fallback_caps) = self.hub_data.fallback_caps.lock() {
             fallback_caps.remove(requested_id);
             fallback_caps.remove(probed_id);
-        }
-    }
-
-    fn profile_color_preference(profile: &MatterControlProfile) -> ColorPreference {
-        match profile.color_route {
-            MatterColorRoute::HueSaturation => ColorPreference::PreferHueSaturation,
-            MatterColorRoute::Xy => ColorPreference::PreferXy,
-            MatterColorRoute::ColorTemperature => ColorPreference::PreferColorTemperature,
         }
     }
 
@@ -1460,44 +1424,6 @@ fn reported_bool(reported: &serde_json::Value, field: &str) -> Option<bool> {
 
 fn reported_u64(reported: &serde_json::Value, field: &str) -> Option<u64> {
     reported.get(field)?.get("value")?.as_u64()
-}
-
-fn calibrated_hs_white(
-    curve: &[crate::control_profile::MatterHsWhitePoint],
-    kelvin: u16,
-) -> Option<(u8, u8)> {
-    let first = curve.first()?;
-    if kelvin <= first.kelvin {
-        return Some((first.hue, first.saturation));
-    }
-    for points in curve.windows(2) {
-        let low = &points[0];
-        let high = &points[1];
-        if kelvin <= high.kelvin {
-            let span = u32::from(high.kelvin.saturating_sub(low.kelvin)).max(1);
-            let offset = u32::from(kelvin.saturating_sub(low.kelvin));
-            let interpolate = |low: u8, high: u8| -> u8 {
-                let low = i64::from(low);
-                let delta = i64::from(high) - low;
-                (low + delta * i64::from(offset) / i64::from(span)).clamp(0, 254) as u8
-            };
-            let interpolate_hue = |low: u8, high: u8| -> u8 {
-                let low = i64::from(low);
-                let mut delta = i64::from(high) - low;
-                if delta > 127 {
-                    delta -= 255;
-                } else if delta < -127 {
-                    delta += 255;
-                }
-                (low + delta * i64::from(offset) / i64::from(span)).rem_euclid(255) as u8
-            };
-            return Some((
-                interpolate_hue(low.hue, high.hue),
-                interpolate(low.saturation, high.saturation),
-            ));
-        }
-    }
-    curve.last().map(|point| (point.hue, point.saturation))
 }
 
 #[cfg(test)]

@@ -369,11 +369,66 @@ impl<H: HaTransport> HaLightController<H> {
         )
     }
 
+    fn profiled_matter_command(
+        &self,
+        id: &str,
+        command: &LightingCommand,
+    ) -> Option<rhythm_devices::AdaptedCommand> {
+        let state = self.capability_state.as_ref()?.lock().ok()?;
+        let catalog = state.bulb_catalog.clone();
+        let cache = state
+            .hubs
+            .get(self.capability_hub_key.as_ref()?)?
+            .data::<crate::hub_state::HaHubData>()?
+            .event_routing_cache
+            .clone();
+        drop(state);
+        let cache = cache.lock().ok()?;
+        let entry = cache.lights.get(id)?;
+        let (manufacturer, model) = entry.matter_model.as_ref()?;
+        // HA can translate hs_color for color-capable entities. Keep white-only
+        // entities on their advertised route.
+        if !entry.capabilities.supports_xy_color() {
+            return None;
+        }
+        let mut caps = entry.capabilities.clone();
+        let builtin = rhythm_devices::builtin_db().lookup(manufacturer, model);
+        let matter = builtin.and_then(|b| b.matter.as_ref());
+        let identity = rhythm_os::cloud_profiles::BulbModel {
+            manufacturer,
+            model,
+            matter_ids: matter.and_then(|m| m.vendor_id.zip(m.product_id)),
+        };
+        let cloud = catalog.control_profile_for_device(identity);
+        if cloud.is_none() && matter.is_none() {
+            return None;
+        }
+        let quirks = matter.map_or(&[][..], |m| m.quirks.as_slice());
+        let profile = rhythm_os::control_profile::resolve_control_profile(
+            &caps,
+            quirks,
+            cloud.as_ref(),
+            None,
+        );
+        if profile.color_route == rhythm_os::control_profile::MatterColorRoute::HueSaturation {
+            caps.color_modes
+                .push(rhythm_devices::ColorMode::HueSaturation);
+        }
+        Some(rhythm_os::controller_helpers::adapt_profiled_command(
+            &mut caps, command, &profile,
+        ))
+    }
+
     fn adapt_device_command(
         &self,
         native_ids: &[String],
         command: &LightingCommand,
     ) -> rhythm_devices::AdaptedCommand {
+        if let [id] = native_ids {
+            if let Some(adapted) = self.profiled_matter_command(id, command) {
+                return adapted;
+            }
+        }
         rhythm_os::controller_helpers::adapt_lighting_command(
             &self.device_capabilities(native_ids),
             command,
@@ -514,7 +569,10 @@ impl<H: HaTransport> HaLightController<H> {
             data["brightness_pct"] = serde_json::json!(brightness);
         }
 
-        if let Some((x, y)) = adapted.xy {
+        if let Some((h, s)) = adapted.hue_saturation {
+            data["hs_color"] =
+                serde_json::json!([f64::from(h) * 360.0 / 254.0, f64::from(s) * 100.0 / 254.0]);
+        } else if let Some((x, y)) = adapted.xy {
             data["xy_color"] = serde_json::json!([x, y]);
         } else if let Some(kelvin) = adapted.kelvin {
             data["color_temp_kelvin"] = serde_json::json!(kelvin);
@@ -1026,6 +1084,7 @@ mod tests {
             cache.lights.insert(
                 "light.selected".into(),
                 crate::light::HaLightCatalogEntry {
+                    matter_model: None,
                     identify: None,
                     identity: Some(identity),
                     name: "selected".into(),

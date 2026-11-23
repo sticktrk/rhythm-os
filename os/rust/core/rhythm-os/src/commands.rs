@@ -9128,6 +9128,10 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.last_check_instant = None;
     s.last_check_utc_offset_hours = None;
     s.api_auth = crate::auth::StoredApiAuth::default();
+    s.pro_settings = crate::pro_settings::ProSettings::for_platform(s.platform_context);
+    s.bulb_catalog_generation += 1;
+    s.bulb_catalog_wake.notify_one();
+    s.bulb_catalog = Default::default();
     if s.platform_context == "ha_addon" {
         s.managed_ha_lights = Some(std::collections::BTreeSet::new());
         s.require_api_auth = true;

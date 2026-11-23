@@ -89,6 +89,8 @@ pub struct RemoteAccessConfigStatus {
 
 #[derive(Debug, Deserialize)]
 pub struct PutRemoteAccessConfig {
+    #[serde(default)]
+    resume_paused: bool,
     #[serde(default = "default_enabled")]
     enabled: bool,
     hostname: Option<String>,
@@ -271,34 +273,78 @@ pub async fn put_config(
     };
 
     run_remote_access_blocking(move || {
-        if let Err(e) = save_config(&state, &config) {
-            return ApiResponse::server_error(e);
+        if config.enabled
+            && !body.resume_paused
+            && state.lock().is_ok_and(|s| s.platform_context == "ha_addon")
+        {
+            match load_config(&state) {
+                Ok(Some(existing)) if !existing.enabled => {
+                    return ApiResponse::conflict(
+                        "The tunnel is paused. Enable it explicitly in Rhythm Pro.",
+                    )
+                }
+                Err(error) => return ApiResponse::server_error(error),
+                _ => {}
+            }
         }
-        if let Err(e) = sync_runtime_files(&state, Some(&config)) {
-            return ApiResponse::server_error(e);
-        }
-
-        let service_result = if config.enabled {
-            controller_for_state(&state)
-                .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
-                .and_then(|controller| controller.start(&runtime_dir(&state)?, &config))
-        } else {
-            controller_for_state(&state)
-                .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
-                .and_then(|controller| controller.stop(&runtime_dir(&state)?))
-        };
-
-        let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
-            Some(config.redacted_status()),
-            runtime_status(&state),
-        ))
-        .unwrap_or_else(|_| json!({"status": "ok"}));
-        if let Err(e) = service_result {
-            value["service_error"] = json!(e.to_string());
-        }
-        ApiResponse::json_ok(value.to_string())
+        apply_config(&state, &config)
     })
     .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkedTunnelSwitch {
+    enabled: bool,
+}
+
+/// Installed exclusively on the add-on's serialized local administrator router.
+pub async fn set_linked_tunnel(
+    State(state): State<SharedState>,
+    Json(body): Json<LinkedTunnelSwitch>,
+) -> ApiResponse {
+    run_remote_access_blocking(move || {
+        let mut config = match load_config(&state) {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                return ApiResponse::conflict("Set up the tunnel in the Rhythm mobile app first.")
+            }
+            Err(error) => return ApiResponse::server_error(error),
+        };
+        config.enabled = body.enabled;
+        config.updated_at_epoch_ms = current_epoch_ms();
+        apply_config(&state, &config)
+    })
+    .await
+}
+
+fn apply_config(state: &SharedState, config: &StoredRemoteAccessConfig) -> ApiResponse {
+    if let Err(e) = save_config(state, config) {
+        return ApiResponse::server_error(e);
+    }
+    if let Err(e) = sync_runtime_files(state, Some(config)) {
+        return ApiResponse::server_error(e);
+    }
+
+    let service_result = if config.enabled {
+        controller_for_state(state)
+            .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
+            .and_then(|controller| controller.start(&runtime_dir(state)?, config))
+    } else {
+        controller_for_state(state)
+            .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
+            .and_then(|controller| controller.stop(&runtime_dir(state)?))
+    };
+
+    let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
+        Some(config.redacted_status()),
+        runtime_status(state),
+    ))
+    .unwrap_or_else(|_| json!({"status": "ok"}));
+    if let Err(e) = service_result {
+        value["service_error"] = json!(e.to_string());
+    }
+    ApiResponse::json_ok(value.to_string())
 }
 
 pub async fn delete_config(State(state): State<SharedState>) -> ApiResponse {
@@ -1958,6 +2004,7 @@ Content-Type: application/json\r\n\r\n\
         let response = put_config(
             State(state.clone()),
             Json(PutRemoteAccessConfig {
+                resume_paused: false,
                 enabled: true,
                 hostname: Some("https://Hub.devices.rhythm.lighting".into()),
                 remote_url: None,
@@ -2385,6 +2432,7 @@ while [ ! -f "$dir/release" ]; do sleep 0.05; done
         let missing_host = put_config(
             State(state.clone()),
             Json(PutRemoteAccessConfig {
+                resume_paused: false,
                 enabled: true,
                 hostname: None,
                 remote_url: None,
@@ -2400,6 +2448,7 @@ while [ ! -f "$dir/release" ]; do sleep 0.05; done
         let missing_token = put_config(
             State(state),
             Json(PutRemoteAccessConfig {
+                resume_paused: false,
                 enabled: true,
                 hostname: Some("box.devices.rhythm.lighting".into()),
                 remote_url: None,
@@ -2432,6 +2481,7 @@ while [ ! -f "$dir/release" ]; do sleep 0.05; done
         let response = put_config(
             State(state),
             Json(PutRemoteAccessConfig {
+                resume_paused: false,
                 enabled: false,
                 hostname: None,
                 remote_url: Some("https://BOX.devices.rhythm.lighting/path".into()),

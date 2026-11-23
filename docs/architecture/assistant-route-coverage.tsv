@@ -15,6 +15,7 @@ rhythm-addon	POST	/api/addon/matter/share/:id	handoff	Owner reviews the private 
 rhythm-addon	GET	/api/addon/mobile-tokens	handoff	Owner manages credentials and enrollment on their device.
 rhythm-addon	DELETE	/api/addon/mobile-tokens/:id	handoff	Owner manages credentials and enrollment on their device.
 rhythm-addon	GET	/api/addon/status	operation	read_hub_status
+rhythm-addon	PUT	/api/addon/tunnel	handoff	Administrator controls the linked tunnel in Home Assistant.
 rhythm-linux-appliance	DELETE	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
 rhythm-linux-appliance	GET	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
 rhythm-linux-appliance	PUT	/api/wifi	handoff	Owner provisions or changes networks using the phone and local hub.
@@ -150,6 +151,8 @@ shared	GET	/api/pairing/wifi-credentials	handoff	Owner provisions or changes net
 shared	GET	/api/pairing/wifi-profiles	handoff	Owner provisions or changes networks using the phone and local hub.
 shared	PUT	/api/pairing/wifi-profiles	handoff	Owner provisions or changes networks using the phone and local hub.
 shared	GET	/api/pairing/wifi-profiles/:id/credentials	handoff	Owner provisions or changes networks using the phone and local hub.
+shared	GET	/api/pro/settings	handoff	Owner manages optional cloud features in Rhythm Pro.
+shared	PUT	/api/pro/settings	handoff	Owner manages optional cloud features in Rhythm Pro.
 shared	GET	/api/profile-bundle	operation	export_lighting_settings
 shared	PUT	/api/profile-bundle	operation	plan_lighting_transfer
 shared	GET	/api/profile-bundle/factory-default	operation	read_factory_profiles

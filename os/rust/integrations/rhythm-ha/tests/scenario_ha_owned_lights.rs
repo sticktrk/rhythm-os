@@ -39,6 +39,7 @@ fn proof(id: &str) -> HaLightIdentity {
 }
 fn entry(id: &str) -> HaLightCatalogEntry {
     HaLightCatalogEntry {
+        matter_model: None,
         identify: None,
         identity: Some(proof(id)),
         name: id.into(),
@@ -701,4 +702,64 @@ fn invalidated_catalog_cannot_attribute_user_changes_until_fresh_inventory() {
             .unwrap()
             .rhythm_enabled
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_matching_ha_matter_model_uses_the_published_white_curve() {
+    use rhythm_core::{
+        controller::{HubDispatchTarget, HubLightController},
+        lighting::LightingCommand,
+    };
+    use rhythm_os::control_profile::{MatterColorRoute, MatterControlProfile, MatterHsWhitePoint};
+    let f = Fixture::new();
+    let profile = MatterControlProfile {
+        color_route: MatterColorRoute::HueSaturation,
+        hs_white_curve: vec![
+            MatterHsWhitePoint {
+                kelvin: 2700,
+                hue: 127,
+                saturation: 127,
+            },
+            MatterHsWhitePoint {
+                kelvin: 4000,
+                hue: 127,
+                saturation: 0,
+            },
+        ],
+        ..Default::default()
+    };
+    f.state.lock().unwrap().bulb_catalog = Arc::new(serde_json::from_value(json!({"profiles":[{
+       "profile_key":"fixture", "match":{"manufacturer":"Fixture","model":"A"}, "recommended_control_strategy":profile
+    }]})).unwrap());
+    let controller = HaLightController::new(f.spy.clone(), f.registry.clone())
+        .with_capability_source(f.state.clone(), f.key.clone());
+    let target = HubDispatchTarget::Devices {
+        native_ids: vec!["light.reviewed".into()],
+    };
+    for (model, kelvin, saturation) in [
+        ("A", 2700, Some(50.0)),
+        ("A", 4000, Some(0.0)),
+        ("B", 2700, None),
+    ] {
+        {
+            let mut cache = f.cache.lock().unwrap();
+            let light = cache.lights.get_mut("light.reviewed").unwrap();
+            light.capabilities = rhythm_ha::light::capabilities(
+                &json!({"supported_color_modes":["hs","color_temp"]}),
+            );
+            light.matter_model = Some(("Fixture".into(), model.into()));
+        }
+        controller
+            .turn_on_target(&target, LightingCommand::new(50, kelvin))
+            .await
+            .unwrap();
+        let data = f.spy.calls().last().unwrap().data.clone();
+        if let Some(sat) = saturation {
+            assert_eq!(data["hs_color"], json!([180.0, sat]));
+            assert!(data.get("color_temp_kelvin").is_none());
+        } else {
+            assert_eq!(data["color_temp_kelvin"], kelvin);
+            assert!(data.get("hs_color").is_none());
+        }
+    }
 }

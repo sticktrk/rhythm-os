@@ -332,6 +332,11 @@ async fn run_server(
     let admin = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, ADMIN_PORT)).await?;
     info!(target: "sys", "Mobile API listening on port {}; internal admin on loopback port {}", MOBILE_PORT, ADMIN_PORT);
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
+    tokio::spawn(rhythm_os::cloud_profiles::maintain_catalog(
+        state.clone(),
+        true,
+        rhythm_os::cloud_profiles::refresh_addon_catalog,
+    ));
     let remote_state = state.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&remote_state)

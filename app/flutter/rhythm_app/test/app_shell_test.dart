@@ -512,6 +512,28 @@ void main() {
     expect(find.text('Do you have\na LightBox?'), findsOneWidget);
   });
 
+  testWidgets('opens the free Rhythm Pro preview from mobile Settings', (tester) async {
+    final rooms = RoomProvider();
+    final homes = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(initialState: RhythmConnectionState.connected);
+    final sync = ServerSyncProvider(connection: connection, roomProvider: rooms, homeProvider: homes);
+    addTearDown(rooms.dispose);
+    addTearDown(sync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await _pumpAppShell(tester, roomProvider: rooms, homeProvider: homes, serverSync: sync);
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectNavigationFanItem(tester, 'Settings');
+    await tester.tap(find.text('Rhythm Pro'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Free during preview'), findsOneWidget);
+    expect(find.text('Connect your Rhythm account'), findsOneWidget);
+    expect(find.text('Lighting assistant'), findsOneWidget);
+    expect(find.text('Remote access tunnel'), findsOneWidget);
+  });
+
   testWidgets('startup curve load does not issue a config-state request',
       (tester) async {
     final roomProvider = RoomProvider();
