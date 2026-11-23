@@ -195,7 +195,14 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     );
     assert.equal((await post("clear")).status, 200);
     assert.equal((await post("status")).status, 410);
-    session = ((await (await post("open")).json()) as any).session;
+    await mf.dispose();
+    mf = create();
+    assert.equal((await post("status")).status, 410);
+    const reopened = (await (await post("open")).json()) as any;
+    assert.notEqual(reopened.session, originalSession);
+    assert.equal(reopened.plan, null);
+    assert.deepEqual(reopened.history, []);
+    session = reopened.session;
     assert.equal((await post("forget")).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal((await post("status")).status, 410);

@@ -75,7 +75,7 @@ export class LightingConversation extends Agent<Env, Snapshot | null> {
   }
   async open(): Promise<Result> {
     if (!this.state || this.state.touched + week <= Date.now()) {
-      await this.schedule(week / 1000, "expire");
+      await this.schedule(week / 1000, "expire", undefined, { idempotent: true });
       if (!this.state || this.state.touched + week <= Date.now())
         this.setState({
           session: crypto.randomUUID(),
@@ -87,6 +87,11 @@ export class LightingConversation extends Agent<Env, Snapshot | null> {
         });
     }
     return result(200, this.snapshot(this.state!));
+  }
+  erase() {
+    // Inline destruction can abort the RPC before its acknowledgement reaches the Worker.
+    // Erase the snapshot now. The existing expiry alarm reclaims the empty object.
+    this.setState(null);
   }
   async expire() {
     const remaining = (this.state?.touched ?? 0) + week - Date.now();
@@ -109,7 +114,7 @@ export class LightingConversation extends Agent<Env, Snapshot | null> {
     const s = structuredClone(current);
     if (action === "status") return result(200, this.snapshot(s));
     if (action === "clear") {
-      await this.destroy();
+      this.erase();
       return result(200, { cleared: true });
     }
     if (action === "begin") {
@@ -283,7 +288,7 @@ export class ConversationIndex extends DurableObject<Env> {
     for (const { name } of db
       .exec<{ name: string }>("SELECT name FROM threads")
       .toArray()) {
-      await this.env.CONVERSATIONS.getByName(name).destroy();
+      await this.env.CONVERSATIONS.getByName(name).erase();
       db.exec("DELETE FROM threads WHERE name=?", name);
     }
     // Keep the account closed while deletion and any in-flight requests settle.
