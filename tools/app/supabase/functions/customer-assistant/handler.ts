@@ -7,6 +7,7 @@ import {
   uuid,
   validated,
 } from "./contract.ts";
+import { lightingChat } from "./lighting_chat.ts";
 import { contract, mcp, response, versions } from "./mcp.ts";
 
 const handoffs: Record<string, string> = {
@@ -44,6 +45,7 @@ interface Backend {
   publicKey: string;
   serviceKey: string;
   fetch?: typeof fetch;
+  chatModel?: { key?: string; model: string; request: typeof fetch };
 }
 
 function configuredBackend(): Backend {
@@ -301,6 +303,23 @@ export async function handleRequest(req: Request, backend?: Backend) {
         throw new Rejection(400, "unsupported_protocol");
       }
       return await mcp(b, (name, args) => execute(s, name, args));
+    }
+    if ("lighting_chat" in b) {
+      const config = backend?.chatModel ?? {
+        key: Deno.env.get("OPENAI_API_KEY"),
+        model: Deno.env.get("RHYTHM_CHAT_MODEL") || "gpt-4.1-mini",
+        request: fetch,
+      };
+      const reserve = async () =>
+        data(
+          await s.service.rpc(
+            "reserve_lighting_chat_turn",
+            { p_actor: s.userId },
+          ),
+        ) === true;
+      return response(
+        await lightingChat(b.lighting_chat, reserve, config, config.request),
+      );
     }
     if (b.contract === true) return response(await contract());
     if (uuid(b.device_claim)) {
