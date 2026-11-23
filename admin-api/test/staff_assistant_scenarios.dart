@@ -438,6 +438,11 @@ void _staffAssistantScenarios() {
             'overrides': {'name': 'private_canary'}
           },
           failure: true);
+      service.extraReview = {'new_effect': 'private_canary'};
+      final handoff = await service.call('staff_plan_profile_tuning', input);
+      expect(handoff['status'], 'handoff');
+      expect(handoff.containsKey('plan_id'), false);
+      service.extraReview = {};
       service.rowChanged = true;
       await service.call('staff_plan_profile_tuning', input, failure: true);
       expect(service.writes, 1);
@@ -770,6 +775,7 @@ class _StaffFixture {
       return _jsonResponse({
         'server_instance_id': liveHub,
         'plan_id': 'native-plan',
+        ...extraReview,
         'operation': 'apply_profile_edit',
         'potentially_affected_rooms': [
           {'name': 'private_canary'}

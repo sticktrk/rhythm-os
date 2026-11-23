@@ -1035,6 +1035,27 @@ class StaffAssistant {
     }
     final rooms = native['potentially_affected_rooms'];
     if (rooms is! List) throw _stale;
+    const scopeFields = {
+      'review',
+      'potentially_affected_rooms',
+      'pauses_adaptation'
+    };
+    if (native.keys.any((k) =>
+            !_reviewEnvelope.contains(k) &&
+            !_reviewMetadata.contains(k) &&
+            !scopeFields.contains(k)) ||
+        reviewed.keys.any((k) => k != 'before' && k != 'after') ||
+        native['pauses_adaptation'] == true ||
+        rooms.any(
+            (r) => r is! Map || r.keys.any((k) => k != 'id' && k != 'name'))) {
+      return {
+        'status': 'handoff',
+        'actor': 'staff',
+        'surface': 'staff_hub_console',
+        'instructions':
+            'Open Hub tools and review the full profile change on the selected hub.'
+      };
+    }
     return _preview(s, h, 'hub', {
       'id': 'apply_profile_edit',
       'arguments': apply
