@@ -25,6 +25,7 @@ String staffLogFamily(String id) {
 // or make a local wall-clock time look like a UTC instant.
 final _iso = RegExp(
     r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})$');
+final _ansi = RegExp(r'\x1b\[[0-9;]*m');
 final _atStart = RegExp(
     r'^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))(?=\s|\]|$)');
 DateTime? staffDiagnosticTime(Object? value) {
@@ -54,6 +55,13 @@ DateTime? staffDiagnosticTime(Object? value) {
 
 final _householdEvent = RegExp(
     r'\b(?:motion|occupancy|presence)\b|motion_(?:sensor|node|detected)|light_command');
+final _timing = RegExp(
+    r'\bselected_state nodes_scope=(controls|all|none) duration_us=(\d{1,10})\b');
+final _critical = RegExp(
+    r'\b(panic(?:ked)?|fatal|segmentation fault|assertion failed|stack overflow)\b');
+final _error = RegExp(r'\berror\b');
+final _warning = RegExp(r'\bwarn(?:ing)?\b');
+
 String? _category(String line) {
   if (_householdEvent.hasMatch(line)) return null;
   if (line.contains('wifi: no wireless interface appeared')) {
@@ -92,19 +100,22 @@ String? _category(String line) {
   if (RegExp('integration.*(unavailable|offline)').hasMatch(line)) {
     return 'integration_unavailable';
   }
-  if (RegExp(r'\berror\b').hasMatch(line)) return 'device_error';
+  if (_critical.hasMatch(line) || _error.hasMatch(line)) return 'device_error';
   return null;
 }
 
 Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
-    {DateTime? since, DateTime? until}) {
+    {DateTime? since, DateTime? until, bool includeTimings = false}) {
   final diagnostics = <Map<String, dynamic>>[];
+  final timings = <Map<String, dynamic>>[];
+  var tailReachesSince = false;
   var undated = 0;
   for (final line in lines.whereType<Map>()) {
     final text = line['text'];
     if (text is! String) continue;
-    var message = text.trimLeft();
+    var message = text.replaceAll(_ansi, '').trimLeft();
     var time = staffDiagnosticTime(_atStart.firstMatch(message)?.group(1));
+    String? level;
     if (message.startsWith('{')) {
       try {
         final event = jsonDecode(message);
@@ -123,6 +134,9 @@ Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
             event['msg'] ??
             (fields is Map ? fields['message'] : null);
         if (msg is! String) continue;
+        if (event['level'] is String) {
+          level = (event['level'] as String).toLowerCase();
+        }
         message = msg;
         time = staffDiagnosticTime(
             event['timestamp'] ?? event['time'] ?? event['ts']);
@@ -130,7 +144,38 @@ Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
         continue;
       }
     }
-    final category = _category(message.toLowerCase());
+    final lower = message.toLowerCase();
+    if (_householdEvent.hasMatch(lower)) continue;
+    if (time != null && since != null && !time.isAfter(since)) {
+      tailReachesSince = true;
+    }
+    if (includeTimings &&
+        time != null &&
+        since != null &&
+        until != null &&
+        !time.isBefore(since) &&
+        time.isBefore(until)) {
+      final sample = _timing.firstMatch(lower);
+      if (sample != null) {
+        final micros = int.parse(sample[2]!);
+        if (micros <= 3600000000) {
+          timings.add({
+            'observed_at': time.toIso8601String(),
+            'scope': sample[1],
+            'duration_us': micros
+          });
+        }
+      }
+    }
+    final severity = _critical.hasMatch(lower)
+        ? 'critical'
+        : level == 'error' || _error.hasMatch(lower)
+            ? 'error'
+            : level == 'warn' || _warning.hasMatch(lower)
+                ? 'warning'
+                : null;
+    final category =
+        _category(lower) ?? (severity == null ? null : 'device_error');
     if (category == null) continue;
     if (time == null) {
       undated++;
@@ -142,6 +187,7 @@ Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
     diagnostics.add({
       'line': line['line_number'] is int ? line['line_number'] : null,
       'category': category,
+      if (severity != null) 'severity': severity,
       if (time != null) 'observed_at': time.toIso8601String()
     });
   }
@@ -149,6 +195,8 @@ Map<String, dynamic> staffLogDiagnostics(List<dynamic> lines,
     'lines_reviewed': lines.length,
     'undated_diagnostics': undated,
     'coverage': 'recent_log_tail',
+    if (since != null) 'tail_reaches_since': tailReachesSince,
+    if (includeTimings) 'selected_state_timings': timings,
     'diagnostics': diagnostics
   };
 }

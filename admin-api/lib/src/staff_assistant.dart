@@ -107,12 +107,27 @@ class _Tool {
   }
 }
 
+const _brightness = {'type': 'integer', 'minimum': 1, 'maximum': 100};
+const _kelvin = {'type': 'integer', 'minimum': 500, 'maximum': 25000};
+const _width = {'type': 'number', 'minimum': 0.2, 'maximum': 2.0};
+const _profileSettings = {
+  'min_brightness': _brightness,
+  'max_brightness': _brightness,
+  'min_color_temp': _kelvin,
+  'max_color_temp': _kelvin,
+  'curve.width_left_bri': _width,
+  'curve.width_right_bri': _width,
+  'curve.width_left_cct': _width,
+  'curve.width_right_cct': _width,
+};
+
 const _tools = [
   _Tool(
       'staff_find_homes',
       'Find an exact home or hub name, ID or account email in the support directory. Use staff_list_fleet to browse. Return private selection references.',
       {
         'query': _str,
+        'account_email_only': {'type': 'boolean'},
         'offset': {'type': 'integer', 'minimum': 0}
       },
       [
@@ -149,6 +164,7 @@ const _tools = [
       {
         ..._hub,
         'source_ref': _str,
+        'include_timings': {'type': 'boolean'},
         'lines': {'type': 'integer', 'minimum': 1, 'maximum': 500},
         'since': {'type': 'string', 'format': 'date-time'},
         'until': {'type': 'string', 'format': 'date-time'}
@@ -168,6 +184,7 @@ const _tools = [
       {
         ..._hub,
         'query': _str,
+        'exact': {'type': 'boolean'},
         'kind': {
           'type': 'string',
           'enum': [
@@ -209,6 +226,25 @@ const _tools = [
       ['hub_ref', 'operation_id', 'arguments'],
       tier: 'temporary_light_output'),
   _Tool(
+      'staff_plan_profile_tuning',
+      'Review numeric changes to one shared lighting profile and compare curves sampled on this hub. The administrator confirms the saved hub plan in the console.',
+      {
+        ..._hub,
+        'profile_id': _str,
+        'date': _str,
+        'overrides': {
+          'type': 'object',
+          'properties': _profileSettings,
+          'additionalProperties': false,
+          'minProperties': 1
+        }
+      },
+      [
+        'hub_ref',
+        'profile_id',
+        'overrides'
+      ]),
+  _Tool(
       'staff_plan_fleet_report',
       'Review a support submission containing a diagnostic bundle from this hub and a finding category.',
       {
@@ -229,6 +265,11 @@ const _tools = [
       'Review deleting the selected cloud hub record and associated rows. The action keeps the home and sends no device command.',
       _hub,
       ['hub_ref']),
+  _Tool(
+      'staff_read_plan_outcome',
+      'Read the outcome and canonical readback of your pending or recently approved plan. Outcome records expire after ten minutes.',
+      {'plan_id': _str},
+      ['plan_id']),
   _Tool(
       'staff_apply_plan',
       'Request console approval for a reviewed staff proposal. An administrator must open the selected hub in the staff console and approve it.',
@@ -362,6 +403,15 @@ class StaffAssistant {
           if (tool.writes && !session.staff.isAdmin) throw _denied;
           tool.validate(args);
           final body = await _call(session, tool.id, args);
+          if (tool.id == 'staff_probe_hub' &&
+              body['identity_verified'] == true) {
+            // A human can match this observation to its hub in the private audit
+            // after the scan actor's selection expires. It grants no access.
+            final ref =
+                base64UrlEncode(List.generate(18, (_) => _rng.nextInt(256)));
+            target['audit_ref'] = ref;
+            body['audit_ref'] = ref;
+          }
           outcome = 'ok';
           result = {
             'content': [
@@ -481,9 +531,20 @@ class StaffAssistant {
     return r.value;
   }
 
-  Future<SupportHubDto> _hub(AdminSession s, String id) async =>
-      (await support.loadFleetHubs(s)).where((h) => h.id == id).firstOrNull ??
-      (throw _stale);
+  Future<SupportHubDto> _hub(AdminSession s, String id,
+      {bool cloudOnly = false}) async {
+    final fleet = await support.loadFleetHubs(s);
+    final selected = fleet.where((h) => h.id == id).firstOrNull;
+    if (selected == null) throw _stale;
+    if (!cloudOnly &&
+        (selected.serverInstanceId == null ||
+            fleet.any((h) =>
+                h.id != id &&
+                h.serverInstanceId == selected.serverInstanceId))) {
+      throw _stale;
+    }
+    return selected;
+  }
 
   Future<_Json> _request(
       AdminSession s, SupportHubDto h, String method, String path,
@@ -586,9 +647,11 @@ class StaffAssistant {
           for (final entry in customer.homes)
             if ([
               customer.customerEmail,
-              entry.home.name,
-              entry.home.id,
-              for (final h in entry.hubs) ...[h.name, h.id]
+              if (args['account_email_only'] != true) ...[
+                entry.home.name,
+                entry.home.id,
+                for (final h in entry.hubs) ...[h.name, h.id]
+              ]
             ].whereType<String>().any((v) => v.trim().toLowerCase() == needle))
               entry,
       ];
@@ -603,6 +666,14 @@ class StaffAssistant {
         if (offset + 100 < matches.length) 'next_offset': offset + 100,
       };
     }
+    if (id == 'staff_read_plan_outcome') {
+      final plan = args['plan_id'];
+      if (_refs[plan]?.kind == 'plan') {
+        _resolve(s, '', 'plan', plan);
+        return {'status': 'awaiting_console_approval', 'plan_id': plan};
+      }
+      return {..._resolve(s, '', 'outcome', plan) as _Json, 'plan_id': plan};
+    }
     if (id == 'staff_apply_plan') {
       if (args['confirmed'] != true || !s.staff.isAdmin) throw _denied;
       _resolve(s, '', 'plan', args['plan_id']);
@@ -613,7 +684,8 @@ class StaffAssistant {
             'Open the selected hub in the staff console and approve the pending change.'
       };
     }
-    final h = await _hub(s, _resolve(s, '', 'hub', args['hub_ref']) as String);
+    final h = await _hub(s, _resolve(s, '', 'hub', args['hub_ref']) as String,
+        cloudOnly: id == 'staff_plan_delete_hub');
     if (id == 'staff_plan_delete_hub') {
       return _preview(s, h, 'delete', {}, {
         'effect':
@@ -689,7 +761,9 @@ class StaffAssistant {
         if (limit < 1 || limit > 500) throw _badInput;
         final since = staffDiagnosticTime(args['since']),
             until = staffDiagnosticTime(args['until']);
-        if ((args.containsKey('since') && since == null) ||
+        final includeTimings = args['include_timings'] == true;
+        if ((includeTimings && (since == null || until == null)) ||
+            (args.containsKey('since') && since == null) ||
             (args.containsKey('until') && until == null) ||
             (since != null && until != null && !since.isBefore(until))) {
           throw _badInput;
@@ -697,7 +771,9 @@ class StaffAssistant {
         final body = await _request(s, h, 'GET', 'api/diag/logs/$source/tail',
             query: {'lines': '$limit'});
         return staffLogDiagnostics(body['tail']['lines'] as List,
-            since: since, until: until);
+            since: since, until: until, includeTimings: includeTimings);
+      case 'staff_plan_profile_tuning':
+        return _planProfileTuning(s, h, args);
       case 'staff_plan_fleet_report':
         return _preview(s, h, 'report', {
           'category': args['category'],
@@ -748,7 +824,7 @@ class StaffAssistant {
         final exact = nodes
             .where((n) => (n['name'] as String).toLowerCase() == query)
             .toList();
-        final matches = exact.isNotEmpty
+        final matches = exact.isNotEmpty || args['exact'] == true
             ? exact
             : nodes
                 .where(
@@ -782,6 +858,9 @@ class StaffAssistant {
         final body = await _request(
             s, h, 'POST', 'api/assistant/operations/$tool',
             body: arguments);
+        if (tool == 'read_profile_curve' && arguments['view'] == 'day') {
+          return _curveSamples(body);
+        }
         if (tool == 'read_lighting_history') {
           return {'status': 'available_in_private_hub_console'};
         }
@@ -891,8 +970,91 @@ class StaffAssistant {
     }
   }
 
+  Future<_Json> _planProfileTuning(
+      AdminSession s, SupportHubDto h, _Json args) async {
+    final catalog = await _catalog(s, h);
+    if (catalog['read_profile_curve'] == null ||
+        catalog['plan_profile_edit'] == null ||
+        (s.staff.isAdmin && catalog['apply_profile_edit'] == null)) {
+      throw _denied;
+    }
+    final profile = _restore(s, h.id, args['profile_id']);
+    final before = await _request(s, h, 'GET', 'api/config',
+        query: {'id': profile as String});
+    if (before['id'] != profile) throw _stale;
+    final draft = jsonDecode(jsonEncode(before)) as _Json;
+    final changes = <String, dynamic>{};
+    final overrides = args['overrides'] as _Json;
+    if (overrides.isEmpty) throw _badInput;
+    for (final e in overrides.entries) {
+      final spec = _profileSettings[e.key], v = e.value;
+      if (spec == null ||
+          v is! num ||
+          !v.isFinite ||
+          spec['type'] == 'integer' && v is! int ||
+          v < (spec['minimum'] as num) ||
+          v > (spec['maximum'] as num)) {
+        throw _badInput;
+      }
+      final parts = e.key.split('.');
+      final obj = parts.length == 1 ? draft : draft[parts.first];
+      if (obj is! _Json || obj[parts.last] is! num) throw _badInput;
+      changes[e.key] = {'before': obj[parts.last], 'after': v};
+      obj[parts.last] = v;
+    }
+    final curveArgs = {
+      'profile_id': profile,
+      'view': 'day',
+      'samples_per_hour': 12,
+      if (args['date'] != null) 'date': args['date']
+    };
+    Future<_Json> sample(_Json config) async {
+      final response = await _request(
+          s, h, 'POST', 'api/assistant/operations/read_profile_curve',
+          body: {...curveArgs, 'profile': config});
+      return _curveSamples(response);
+    }
+
+    final currentSamples = await sample(before),
+        draftSamples = await sample(draft);
+    final native = await _request(
+        s, h, 'POST', 'api/assistant/operations/plan_profile_edit',
+        body: {'profile_id': profile, 'profile': draft});
+    final reviewed = asStringMap(native['review']),
+        apply = asStringMap(native['apply_arguments']);
+    if (native['operation'] != 'apply_profile_edit' ||
+        native['server_instance_id'] != h.serverInstanceId ||
+        native['plan_id'] is! String ||
+        apply == null ||
+        apply['plan_id'] != native['plan_id'] ||
+        reviewed == null ||
+        canonicalJsonString(reviewed['before']) !=
+            canonicalJsonString(before) ||
+        canonicalJsonString(reviewed['after']) != canonicalJsonString(draft)) {
+      throw _stale;
+    }
+    final rooms = native['potentially_affected_rooms'];
+    if (rooms is! List) throw _stale;
+    return _preview(s, h, 'hub', {
+      'id': 'apply_profile_edit',
+      'arguments': apply
+    }, {
+      'reviewed_operation': 'plan_profile_edit',
+      'profile_id': _reference(s, h.id, 'value', profile),
+      'affected_room_count': rooms.length,
+      'changes': changes,
+      'current_curve': currentSamples,
+      'candidate_curve': draftSamples,
+    }, consoleReview: {
+      'review': reviewed,
+      'potentially_affected_rooms': rooms,
+      'pauses_adaptation': native['pauses_adaptation']
+    });
+  }
+
   _Json _preview(
-      AdminSession s, SupportHubDto h, String op, _Json args, _Json review) {
+      AdminSession s, SupportHubDto h, String op, _Json args, _Json review,
+      {_Json? consoleReview}) {
     final base = {
       'status': 'review',
       'location': 'staff_cloud',
@@ -909,7 +1071,8 @@ class StaffAssistant {
             'Ask an administrator to run a fresh preview before confirming this change.'
       };
     }
-    final plan = _reference(s, '', 'plan', _Proposal(h, op, args, review));
+    final plan = _reference(
+        s, '', 'plan', _Proposal(h, op, args, consoleReview ?? review));
     return {
       ...base,
       'operation': 'staff_apply_plan',
@@ -960,13 +1123,21 @@ class StaffAssistant {
   Future<_Json> approve(AdminSession s, String planId) async {
     if (!s.staff.isAdmin) throw _denied;
     final p = _resolve(s, '', 'plan', planId, consume: true) as _Proposal;
-    final h = await _hub(s, p.hub.id);
+    final h = await _hub(s, p.hub.id, cloudOnly: p.operation == 'delete');
     if (h.homeId != p.hub.homeId ||
         h.serverInstanceId != p.hub.serverInstanceId ||
         h.updatedAt != p.hub.updatedAt) {
       throw _stale;
     }
     var outcome = 'unverified';
+    final receipt = <String, dynamic>{'status': 'pending'};
+    _refs[planId] = (
+      actor: s.user.id,
+      hub: '',
+      kind: 'outcome',
+      value: receipt,
+      expires: DateTime.now().toUtc().add(const Duration(minutes: 10))
+    );
     try {
       if (p.operation == 'delete') {
         await support.deleteServerHub(h.id, reviewed: h);
@@ -984,6 +1155,7 @@ class StaffAssistant {
             finding: finding,
             reviewedServerId: h.serverInstanceId!);
         outcome = 'submitted';
+        receipt['issue_created'] = report.reportResult['issue_created'] == true;
         return {
           'status': 'submitted',
           'plan_id': planId,
@@ -1008,11 +1180,31 @@ class StaffAssistant {
           'uncertain' => 'uncertain',
           _ => 'acknowledged'
         };
-        return p.operation == 'console_hub' ? result : projected;
+        if (p.operation == 'hub' && outcome == 'applied') {
+          if (id == 'apply_profile_edit' && p.review['review'] is Map) {
+            final expected = p.review['review']['after'];
+            receipt['canonical_readback_verified'] = expected is Map &&
+                canonicalJsonString(result['canonical_readback']) ==
+                    canonicalJsonString(expected);
+          } else if (projected['canonical_readback_verified'] is bool) {
+            receipt['canonical_readback_verified'] =
+                projected['canonical_readback_verified'];
+          }
+        }
+        return p.operation == 'console_hub'
+            ? result
+            : {
+                ...projected,
+                if (receipt['canonical_readback_verified'] is bool)
+                  'canonical_readback_verified':
+                      receipt['canonical_readback_verified'],
+                'plan_id': planId
+              };
       }
       outcome = 'applied';
       return {'status': 'applied', 'operation': p.operation, 'plan_id': planId};
     } finally {
+      receipt['status'] = outcome;
       _audit(s, h, p.operation, outcome, planId);
     }
   }
@@ -1150,6 +1342,33 @@ const _reviewMetadata = {
   'expires_at_epoch_ms',
   'requires_confirmation',
 };
+
+// Only calculated numeric samples and solar hours leave the trusted service.
+_Json _curveSamples(_Json response) {
+  final curve = asStringMap(response['curve']);
+  final hours = curve?['hours'],
+      brightness = curve?['brightness'],
+      kelvin = curve?['kelvin'];
+  if (hours is! List ||
+      brightness is! List ||
+      kelvin is! List ||
+      hours.isEmpty ||
+      hours.length > 288 ||
+      hours.length != brightness.length ||
+      hours.length != kelvin.length ||
+      ![...hours, ...brightness, ...kelvin]
+          .every((v) => v is num && v.isFinite)) {
+    throw const AdminApiException(502, 'Invalid curve samples');
+  }
+  final solar = asStringMap(response['solar']);
+  return {
+    'hours': hours,
+    'brightness': brightness,
+    'kelvin': kelvin,
+    for (final key in ['sunrise', 'sunset'])
+      if (solar?[key] is num) key: solar![key]
+  };
+}
 
 bool _completeProjection(Object? source, Object? projected) {
   if (source is Map) {
