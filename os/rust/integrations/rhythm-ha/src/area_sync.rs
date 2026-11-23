@@ -613,6 +613,12 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
             (
                 entity.entity_id.clone(),
                 crate::light::HaLightCatalogEntry {
+                    matter_model: entity
+                        .device_id
+                        .as_ref()
+                        .filter(|_| entity.platform.as_deref() == Some("matter"))
+                        .and_then(|id| device_info_map.get(id))
+                        .and_then(|d| d.manufacturer.clone().zip(d.model.clone())),
                     identity,
                     name: state["attributes"]["friendly_name"]
                         .as_str()

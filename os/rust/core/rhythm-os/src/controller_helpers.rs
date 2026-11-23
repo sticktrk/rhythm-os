@@ -5,6 +5,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::control_profile::{
+    calibrated_hs_white, MatterColorRoute, MatterControlProfile, MatterProfileSource,
+};
 use rhythm_core::controller::{LightControlError, LightControlResult};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
@@ -84,6 +87,51 @@ pub fn adapt_lighting_command(
         command.transition_ms,
         preference,
     )
+}
+
+/// Use the same calibrated white point for direct Matter and Matter-backed HA entities.
+pub fn adapt_profiled_command(
+    caps: &mut LightCapabilities,
+    command: &LightingCommand,
+    profile: &MatterControlProfile,
+) -> AdaptedCommand {
+    // A Color Temperature physical range does not constrain whites
+    // rendered through RGB emitters. Once Audition has supplied an HS
+    // curve, preserve the requested Kelvin for curve interpolation.
+    if let Some((min_kelvin, max_kelvin)) = profile.kelvin_range.filter(|_| {
+        profile.color_route != MatterColorRoute::HueSaturation || profile.hs_white_curve.is_empty()
+    }) {
+        caps.min_kelvin = Some(min_kelvin);
+        caps.max_kelvin = Some(max_kelvin);
+    } else if profile.color_route == MatterColorRoute::HueSaturation
+        && !profile.hs_white_curve.is_empty()
+    {
+        caps.min_kelvin = None;
+        caps.max_kelvin = None;
+    }
+    if profile.source.min_brightness != MatterProfileSource::SafeDefault {
+        if let Some(min_brightness) = profile.min_brightness {
+            caps.min_brightness = Some(min_brightness);
+        }
+    }
+    if profile.source.supports_transition != MatterProfileSource::SafeDefault {
+        caps.supports_transition = profile.supports_transition;
+    }
+    let mut adapted = adapt_lighting_command(caps, command, profile_color_preference(profile));
+    if !command.is_direct_color && adapted.hue_saturation.is_some() {
+        if let Some(calibrated) = calibrated_hs_white(&profile.hs_white_curve, command.kelvin) {
+            adapted.hue_saturation = Some(calibrated);
+        }
+    }
+    adapted
+}
+
+fn profile_color_preference(profile: &MatterControlProfile) -> ColorPreference {
+    match profile.color_route {
+        MatterColorRoute::HueSaturation => ColorPreference::PreferHueSaturation,
+        MatterColorRoute::Xy => ColorPreference::PreferXy,
+        MatterColorRoute::ColorTemperature => ColorPreference::PreferColorTemperature,
+    }
 }
 
 fn clamp_kelvin(kelvin: u16, min_kelvin: Option<u16>, max_kelvin: Option<u16>) -> u16 {

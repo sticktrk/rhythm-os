@@ -1131,6 +1131,21 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     timeoutSeconds: 45
   },
   {
+    id: 'pro-settings-get', category: 'Remote & Cloud', label: 'Read Rhythm Pro settings',
+    description: 'Read the local owner’s cloud profile and remote MCP preferences.',
+    method: 'GET', path: 'api/pro/settings'
+  },
+  {
+    id: 'pro-settings-put', category: 'Remote & Cloud', label: 'Update Rhythm Pro settings',
+    description: 'Update one local hub preference.', method: 'PUT', path: 'api/pro/settings',
+    body: {remote_mcp: false}, danger: true
+  },
+  {
+    id: 'addon-linked-tunnel', category: 'Home Assistant', label: 'Control linked tunnel',
+    description: 'Pause or resume the tunnel provisioned by the mobile app.',
+    method: 'PUT', path: 'api/addon/tunnel', body: {enabled: false}, danger: true
+  },
+  {
     id: 'remote-access-status',
     category: 'Remote & Cloud',
     label: 'Read remote access',

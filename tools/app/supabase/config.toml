@@ -71,3 +71,6 @@ verify_jwt = false
 [functions.customer-assistant]
 # The function checks the resident's token against Auth before every request.
 verify_jwt = false
+
+[functions.lighting-agent-access]
+verify_jwt = false

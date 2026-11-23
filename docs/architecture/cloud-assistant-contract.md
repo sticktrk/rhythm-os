@@ -55,10 +55,39 @@ deletion are handoffs to the resident.
 
 ## Model and telemetry boundary
 
-The built-in resident and staff conversations run on their respective clients
-using guided steps and live operation descriptors. Neither calls a hosted model
-provider. The resident's trusted view can show household labels and their
-reviewed report. The staff console can open authorized diagnostics separately.
+Guided tools in the resident app and staff console run locally. Rhythm Pro also
+offers a hosted lighting chat. When a signed-in resident opens chat on a locally
+paired owner phone, the app requests a revocable agent credential and stores
+it in device secure storage scoped to the account and installation. The app
+reuses existing access. An owner revocation requires an explicit reconnect on
+the local network. Away from home the hub also requires an enabled tunnel and
+Remote MCP. Guided tools remain available for older hubs and account or motion tasks.
+
+A conversation starts with a message. The phone resolves room names against
+live hub topology. A named room takes priority over the current conversation
+room or the room open in the app. If a lighting change needs clarification, the
+assistant offers room choices inside the conversation and resumes the original
+request. Each proposed adjustment targets one room. General questions can be
+answered without a room.
+
+The phone reads a resolved room before sending its numerical and enumerated
+lighting values and supported adjustment types to the authenticated customer
+assistant function. An unresolved turn offers only conversation and local room
+discovery. Up to eight recent messages go to OpenAI with response storage
+disabled. Hub identifiers, credentials, inventory and raw readbacks stay on the
+phone. Room names typed by the resident can appear in their messages.
+
+A model can propose brightness, warmth, power, color or a curve preview. The
+phone validates the arguments, shows the exact target and calls the selected
+hub only after a tap. Its receipt distinguishes the hub's target from lamp
+readback. The app can undo a preview using the hub-issued trial ID.
+
+The Edge Function uses the server secret `OPENAI_API_KEY` and defaults to
+`gpt-4.1-mini`. `RHYTHM_CHAT_MODEL` can select a Responses API model that
+supports strict function calling. Apply the lighting chat usage migration
+before deployment. The free preview allows 60 model requests per resident per
+UTC day. The database keeps one counter per account and deletes it with the
+account. Closing chat discards its transcript.
 
 An external MCP client chooses and operates its own model. The account MCP
 response projection exposes opaque IDs, enumerated roles and outcomes, boolean

@@ -87,6 +87,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT"],
     },
     SharedRoute {
+        path: "/api/pro/settings",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
         path: "/api/remote-access/status",
         methods: &["GET"],
     },

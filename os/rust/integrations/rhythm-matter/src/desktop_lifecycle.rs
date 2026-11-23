@@ -40,6 +40,75 @@ fn get_hub_data(state: &SharedState) -> Result<Arc<MatterHubData>> {
         .ok_or_else(|| anyhow::anyhow!("Matter hub data missing"))
 }
 
+/// Reuse the commissioning resolver so live updates preserve local audition overrides.
+pub fn refresh_cloud_profiles(state: &SharedState) {
+    let Ok(hub) = get_hub_data(state) else { return };
+    let catalog = crate::cloud_profiles::load_or_sync_for_state(state);
+    if hub
+        .cloud_profiles
+        .lock()
+        .is_ok_and(|previous| previous.profiles == catalog.profiles)
+    {
+        return;
+    }
+    let Some(transport) = hub.transport.get() else {
+        return;
+    };
+    let devices = match transport.list_commissioned_devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            log::warn!("Unable to refresh commissioned bulb profiles: {error}");
+            return;
+        }
+    };
+    install_cloud_profiles(&hub, catalog, &devices);
+}
+
+fn install_cloud_profiles(
+    hub: &Arc<MatterHubData>,
+    catalog: crate::cloud_profiles::CloudMatterProfileCatalog,
+    devices: &[crate::transport::CommissionedDevice],
+) {
+    *hub.cloud_profiles.lock().expect("cloud catalog") = catalog;
+    // Older registries can retain a native-ID alias for a node. Update every
+    // cached alias on single-light nodes, and exact IDs on multi-light nodes.
+    let mut by_node = std::collections::HashMap::new();
+    for device in devices {
+        by_node
+            .entry(device.node_id)
+            .or_insert_with(Vec::new)
+            .push(device);
+    }
+    let ids = hub
+        .device_profiles
+        .lock()
+        .expect("device profiles")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for id in ids {
+        let Some((node, endpoint)) = crate::lifecycle::parse_device_id(&id) else {
+            continue;
+        };
+        if hub.is_decommission_suppressed(node) {
+            continue;
+        }
+        let Some(candidates) = by_node.get(&node) else {
+            continue;
+        };
+        let device = match candidates.as_slice() {
+            [device] => Some(*device),
+            _ => candidates
+                .iter()
+                .copied()
+                .find(|d| d.light_endpoint == endpoint),
+        };
+        if let Some(device) = device {
+            crate::commissioning::store_device_metadata(hub, device, &id);
+        }
+    }
+}
+
 fn get_transport(state: &SharedState) -> Result<Arc<dyn MatterTransport>> {
     let hub_data = get_hub_data(state)?;
     hub_data
@@ -970,6 +1039,36 @@ mod tests {
             last_turn_on_dispatch: Mutex::new(HashMap::new()),
             event_tx,
         })
+    }
+
+    #[test]
+    fn catalog_refresh_updates_paired_endpoints_and_rolls_back_aliases() {
+        let hub = hub_data();
+        let device = commissioned_device(12);
+        for id in ["matter-12-2", "matter-12"] {
+            crate::commissioning::store_device_metadata(&hub, &device, id);
+        }
+        let catalog: CloudMatterProfileCatalog =
+            serde_json::from_value(serde_json::json!({"profiles":[{
+                "profile_key":"lamp","match":{"matter_vendor_id":1,"matter_product_id":2},
+                "capabilities":{"min_brightness":44}
+            }]}))
+            .unwrap();
+        let devices = [device];
+        install_cloud_profiles(&hub, catalog, &devices);
+        for id in ["matter-12-2", "matter-12"] {
+            assert_eq!(
+                hub.device_profiles.lock().unwrap()[id].min_brightness,
+                Some(44)
+            );
+        }
+        install_cloud_profiles(&hub, Default::default(), &devices);
+        for id in ["matter-12-2", "matter-12"] {
+            assert_ne!(
+                hub.device_profiles.lock().unwrap()[id].min_brightness,
+                Some(44)
+            );
+        }
     }
 
     fn install_hub(state: &SharedState, hub_data: Arc<MatterHubData>) {

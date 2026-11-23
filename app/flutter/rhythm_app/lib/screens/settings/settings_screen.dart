@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../../backend/auth/auth_user.dart';
 import '../../config/platform_capabilities.dart';
+import '../../config/platform_context.dart';
+import 'rhythm_pro_screen.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/solar_orbit.dart'; // For CelestialColors
@@ -84,7 +86,19 @@ class SettingsScreen extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (caps.hasAccounts) AccountSection(user: user),
-        if (caps.hasAccounts)
+        if (caps.hasAccounts && PlatformCtx.isMobile)
+          SettingsGroup(children: [
+            SettingsRow(
+              icon: Icons.workspace_premium_outlined,
+              iconColor: CelestialColors.accentBlue,
+              label: 'Rhythm Pro',
+              value: 'Free preview',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const RhythmProScreen()),
+              ),
+            ),
+          ])
+        else if (caps.hasAccounts)
           SettingsGroup(children: [
             SettingsRow(icon: Icons.chat_bubble_outline,
               iconColor: CelestialColors.accentBlue, label: 'Rhythm assistant',

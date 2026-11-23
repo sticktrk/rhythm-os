@@ -7,6 +7,7 @@ const corsHeaders = {
 }
 
 type PublishedMatterDeviceProfileRow = {
+  id: string
   profile_key: string
   schema_version: number
   profile_version: number
@@ -38,37 +39,40 @@ Deno.serve(async (req) => {
     const supabaseSecretKey = readSupabaseSecretKey()
     const adminClient = createClient(supabaseUrl, supabaseSecretKey)
 
-    const { data, error } = await adminClient
-      .from('published_matter_device_profiles')
-      .select(
-        [
-          'profile_key',
-          'schema_version',
-          'profile_version',
-          'manufacturer',
-          'model',
-          'device_name',
-          'matter_vendor_id',
-          'matter_product_id',
-          'firmware_version',
-          'cluster_fingerprint',
-          'capabilities',
-          'quirks',
-          'recommended_control_strategy',
-          'evidence',
-          'report_count',
-          'updated_at',
-        ].join(','),
-      )
-      .eq('approved', true)
-      .order('profile_version', { ascending: false })
-
-    if (error) {
-      console.error('Matter profile feed failed:', error.message)
-      return jsonResponse({ error: error.message }, 500)
+    const columns = [
+      'id',
+      'profile_key',
+      'schema_version',
+      'profile_version',
+      'manufacturer',
+      'model',
+      'device_name',
+      'matter_vendor_id',
+      'matter_product_id',
+      'firmware_version',
+      'cluster_fingerprint',
+      'capabilities',
+      'quirks',
+      'recommended_control_strategy',
+      'evidence',
+      'report_count',
+      'updated_at',
+    ].join(',')
+    const rows: PublishedMatterDeviceProfileRow[] = []
+    let afterId: string | undefined
+    for (;;) {
+      let query = adminClient.from('published_matter_device_profiles')
+        .select(columns).eq('approved', true).order('id').limit(500)
+      if (afterId) query = query.gt('id', afterId)
+      const { data, error } = await query
+      if (error) throw new Error(error.message)
+      const page = (data ?? []) as unknown as PublishedMatterDeviceProfileRow[]
+      if (!page.length) break
+      rows.push(...page)
+      afterId = page[page.length - 1].id
     }
-
-    const rows = (data ?? []) as PublishedMatterDeviceProfileRow[]
+    // Hubs select the first matching profile. Preserve newest-first precedence.
+    rows.sort((a, b) => b.profile_version - a.profile_version)
     const maxVersion = rows.reduce(
       (max, row) => Math.max(max, Number(row.profile_version) || 0),
       0,

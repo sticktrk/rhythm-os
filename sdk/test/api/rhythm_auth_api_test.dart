@@ -73,6 +73,21 @@ void main() {
         throwsArgumentError);
   });
 
+  test('a single Pro switch preserves the other hub setting', () async {
+    when(() => dio.put<Map<String, dynamic>>('api/pro/settings',
+            data: any(named: 'data')))
+        .thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(),
+            data: {'bulb_profile_updates': true, 'remote_mcp': false}));
+    final result = await api.updateProSettings(remoteMcp: false);
+    expect(result.bulbProfileUpdates, isTrue);
+    expect(result.remoteMcp, isFalse);
+    verify(() => dio.put<Map<String, dynamic>>('api/pro/settings',
+        data: {'remote_mcp': false})).called(1);
+    expect(() => RhythmProSettings.fromJson({'remote_mcp': true}),
+        throwsA(isA<TypeError>()));
+  });
+
   group('getStatus', () {
     test('reports whether the supplied bearer authenticated as owner',
         () async {

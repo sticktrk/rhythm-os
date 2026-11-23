@@ -4,6 +4,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../backend/backend.dart';
 import '../config/app_orientation_policy.dart';
 
+enum LightingChatOutcome { reply, proposal, hubUnavailable, modelUnavailable }
+
 /// Singleton service for analytics tracking.
 ///
 /// Provides typed methods for all analytics events to ensure consistency
@@ -89,6 +91,23 @@ class AnalyticsService {
     } catch (e) {
       debugPrint('Analytics error: $e');
     }
+  }
+
+  Future<void> logLightingChatTurn(LightingChatOutcome outcome) =>
+      logEvent('lighting_chat_turn', {'outcome': outcome.name});
+
+  Future<void> logHomeAgentProgress(String journey, String outcome,
+      {int? latencyMs, int? steps}) async {
+    if (!RegExp(r'^[0-9a-f-]{36}$').hasMatch(journey) ||
+        !const {'answered', 'approved', 'cancelled', 'walk_started', 'verified', 'acknowledged',
+          'observed', 'uncertain', 'awaiting_owner', 'queued', 'partial', 'rejected'}.contains(outcome)) {
+      return;
+    }
+    await logEvent('home_agent_progress', {
+      'journey_id': journey, 'outcome': outcome,
+      if (latencyMs != null) 'latency_ms': latencyMs.clamp(0, 120000),
+      if (steps != null) 'steps': steps.clamp(0, 8),
+    });
   }
 
   /// Set a user property for segmentation.

@@ -8,14 +8,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::state::SharedState;
 use anyhow::{Context, Result};
 use log::{info, warn};
 use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 use rhythm_devices::{ColorMode, DeviceQuirk, LightCapabilities, LightType};
-use rhythm_os::state::SharedState;
 use serde::{Deserialize, Serialize};
 
-use crate::transport::CommissionedDevice;
+/// Registry-proven model identity. Matter IDs, when available, are authoritative.
+#[derive(Debug, Clone, Copy)]
+pub struct BulbModel<'a> {
+    pub manufacturer: &'a str,
+    pub model: &'a str,
+    pub matter_ids: Option<(u16, u16)>,
+}
 
 const DEFAULT_PROFILE_FEED_URL: &str =
     "https://sskwvfcnrnkewqucepbr.supabase.co/functions/v1/matter-device-profiles";
@@ -23,7 +29,7 @@ const PROFILE_FEED_URL_ENV: &str = "RHYTHM_MATTER_DEVICE_PROFILES_URL";
 const PROFILE_SYNC_DISABLE_ENV: &str = "RHYTHM_MATTER_PROFILE_SYNC";
 const PROFILE_SYNC_TIMEOUT_SECS: u64 = 6;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CloudMatterProfileCatalog {
     #[serde(default)]
     pub schema_version: u32,
@@ -31,11 +37,10 @@ pub struct CloudMatterProfileCatalog {
     pub profile_version: u64,
     #[serde(default)]
     pub generated_at: Option<String>,
-    #[serde(default)]
     pub profiles: Vec<CloudMatterDeviceProfile>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CloudMatterDeviceProfile {
     pub profile_key: String,
     #[serde(default)]
@@ -52,7 +57,7 @@ pub struct CloudMatterDeviceProfile {
     pub evidence: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CloudMatterProfileMatch {
     #[serde(default)]
     pub manufacturer: Option<String>,
@@ -70,7 +75,7 @@ pub struct CloudMatterProfileMatch {
     pub cluster_fingerprint: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CloudMatterProfileCapabilities {
     #[serde(default)]
     pub preferred_color_command: Option<String>,
@@ -86,7 +91,7 @@ pub struct CloudMatterProfileCapabilities {
     pub usable_max_kelvin: Option<u16>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CloudMatterProfileQuirks {
     #[serde(default)]
     pub runtime_quirks: Vec<serde_json::Value>,
@@ -111,7 +116,7 @@ pub struct CloudMatterProfileQuirks {
 impl CloudMatterProfileCatalog {
     pub fn apply_to_device(
         &self,
-        device: &CommissionedDevice,
+        device: BulbModel<'_>,
         caps: &mut LightCapabilities,
         quirks: &mut Vec<DeviceQuirk>,
     ) {
@@ -122,12 +127,10 @@ impl CloudMatterProfileCatalog {
         profile.apply(caps, quirks);
         info!(
             target: "sys",
-            "Matter: applied cloud profile {} v{} to {} ({}/{})",
+            "Applied cloud bulb profile {} v{} to {}",
             profile.profile_key,
             profile.profile_version,
-            device.node_id,
-            device.vendor_id,
-            device.product_id
+            device.model
         );
     }
 
@@ -135,7 +138,7 @@ impl CloudMatterProfileCatalog {
     /// metadata identifies the fields that are truly present in legacy feeds.
     pub fn control_profile_for_device(
         &self,
-        device: &CommissionedDevice,
+        device: BulbModel<'_>,
     ) -> Option<crate::control_profile::MatterControlProfile> {
         let cloud = self
             .profiles
@@ -148,24 +151,26 @@ impl CloudMatterProfileCatalog {
 }
 
 impl CloudMatterDeviceProfile {
-    fn matches(&self, device: &CommissionedDevice) -> bool {
+    fn matches(&self, device: BulbModel<'_>) -> bool {
         if let (Some(vendor_id), Some(product_id)) = (
             self.match_data.matter_vendor_id,
             self.match_data.matter_product_id,
         ) {
-            return vendor_id == device.vendor_id && product_id == device.product_id;
+            if let Some(ids) = device.matter_ids {
+                return ids == (vendor_id, product_id);
+            }
         }
 
         let manufacturer_matches = self
             .match_data
             .manufacturer
             .as_deref()
-            .is_some_and(|manufacturer| normalized_eq(manufacturer, &device.vendor_name));
+            .is_some_and(|manufacturer| normalized_eq(manufacturer, device.manufacturer));
         let model_matches = self
             .match_data
             .model
             .as_deref()
-            .is_some_and(|model| normalized_eq(model, &device.product_name));
+            .is_some_and(|model| normalized_eq(model, device.model));
         manufacturer_matches && model_matches
     }
 
@@ -315,37 +320,95 @@ impl CloudMatterDeviceProfile {
     }
 }
 
-pub fn load_or_sync_for_state(state: &SharedState) -> CloudMatterProfileCatalog {
-    if profile_sync_disabled() {
-        return load_cached_for_state(state).unwrap_or_default();
-    }
-
-    match fetch_profile_catalog() {
-        Ok(catalog) => {
-            if let Err(error) = save_cached_for_state(state, &catalog) {
-                warn!(
-                    target: "sys",
-                    "Matter: failed to cache cloud device profiles: {}",
-                    error
-                );
+/// Refresh off the lighting thread when the owner changes the switch and once an hour.
+pub async fn maintain_catalog(
+    state: SharedState,
+    refresh_at_start: bool,
+    refresh: fn(&SharedState),
+) {
+    let wake = match state.lock() {
+        Ok(app) => app.bulb_catalog_wake.clone(),
+        Err(_) => return,
+    };
+    let mut due = refresh_at_start;
+    loop {
+        if due {
+            let worker = state.clone();
+            if let Err(error) = tokio::task::spawn_blocking(move || refresh(&worker)).await {
+                warn!(target:"sys", "Bulb profile refresh failed: {error}");
             }
-            info!(
-                target: "sys",
-                "Matter: synced {} approved cloud device profile(s), feed version {}",
-                catalog.profiles.len(),
-                catalog.profile_version
-            );
-            catalog
         }
-        Err(error) => {
-            warn!(
-                target: "sys",
-                "Matter: cloud device profile sync failed: {}; using cached profiles",
-                error
-            );
-            load_cached_for_state(state).unwrap_or_default()
+        due = true;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(3600)) => {},
+            _ = wake.notified() => {},
         }
     }
+}
+
+pub fn refresh_addon_catalog(state: &SharedState) {
+    refresh_catalog(state);
+}
+
+pub fn load_or_sync_for_state(state: &SharedState) -> CloudMatterProfileCatalog {
+    refresh_catalog(state).as_ref().clone()
+}
+
+fn refresh_catalog(state: &SharedState) -> std::sync::Arc<CloudMatterProfileCatalog> {
+    let (generation, enabled) = match state.lock() {
+        Ok(app) => (
+            app.bulb_catalog_generation,
+            app.pro_settings.bulb_profile_updates,
+        ),
+        Err(_) => return Default::default(),
+    };
+    let downloaded = if enabled && !profile_sync_disabled() {
+        match fetch_profile_catalog() {
+            Ok(catalog) => Some(catalog),
+            Err(error) => {
+                warn!(target: "sys", "Cloud profile download failed: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let from_network = downloaded.is_some();
+    let catalog = downloaded.or_else(|| load_cached_for_state(state).ok());
+    let Some(catalog) = catalog else {
+        return state
+            .lock()
+            .map(|app| app.bulb_catalog.clone())
+            .unwrap_or_default();
+    };
+    // Downloading, parsing and staging the file happen outside the lighting
+    // state lock. Only publish the result for the original opt-in generation.
+    let staged = if from_network {
+        match stage_catalog(state, &catalog) {
+            Ok(paths) => Some(paths),
+            Err(error) => {
+                warn!(target:"sys", "Unable to cache cloud profiles: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut app = state.lock().expect("lighting state");
+    if app.bulb_catalog_generation != generation {
+        if let Some((tmp, _)) = staged {
+            let _ = fs::remove_file(tmp);
+        }
+        return app.bulb_catalog.clone();
+    }
+    if let Some((tmp, path)) = staged {
+        if let Err(error) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(tmp);
+            warn!(target:"sys", "Unable to install cached profiles: {error}");
+        }
+    }
+    app.bulb_catalog = std::sync::Arc::new(catalog);
+    app.bulb_catalog.clone()
 }
 
 pub fn load_cached_for_state(state: &SharedState) -> Result<CloudMatterProfileCatalog> {
@@ -354,17 +417,21 @@ pub fn load_cached_for_state(state: &SharedState) -> Result<CloudMatterProfileCa
     serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn save_cached_for_state(state: &SharedState, catalog: &CloudMatterProfileCatalog) -> Result<()> {
+fn stage_catalog(
+    state: &SharedState,
+    catalog: &CloudMatterProfileCatalog,
+) -> Result<(PathBuf, PathBuf)> {
     let path = cache_path(state).context("data_dir not configured on AppState")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let body = serde_json::to_vec_pretty(catalog).context("serializing cloud profiles")?;
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, body).with_context(|| format!("writing {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, &path)
-        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
-    Ok(())
+    let tmp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(error) = fs::write(&tmp_path, body) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error.into());
+    }
+    Ok((tmp_path, path))
 }
 
 fn fetch_profile_catalog() -> Result<CloudMatterProfileCatalog> {
@@ -376,14 +443,20 @@ fn fetch_profile_catalog() -> Result<CloudMatterProfileCatalog> {
         .timeout(Duration::from_secs(PROFILE_SYNC_TIMEOUT_SECS))
         .build()
         .context("building Matter cloud profile HTTP client")?;
-    client
+    let catalog: CloudMatterProfileCatalog = client
         .get(&url)
         .send()
         .with_context(|| format!("fetching Matter cloud profiles from {}", url))?
         .error_for_status()
         .with_context(|| format!("Matter cloud profile feed returned error from {}", url))?
         .json()
-        .context("decoding Matter cloud profile feed")
+        .context("decoding Matter cloud profile feed")?;
+    anyhow::ensure!(
+        catalog.schema_version == 1,
+        "Unsupported cloud catalog schema {}",
+        catalog.schema_version
+    );
+    Ok(catalog)
 }
 
 fn cache_path(state: &SharedState) -> Option<PathBuf> {
@@ -472,22 +545,11 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn device() -> CommissionedDevice {
-        CommissionedDevice {
-            node_id: 100,
-            vendor_name: "Shenzhen Qianyan Technology".to_string(),
-            product_name: "H6004".to_string(),
-            vendor_id: 1,
-            product_id: 2,
-            serial_number: None,
-            light_endpoint: 1,
-            color_modes: vec![
-                crate::transport::MatterColorMode::HueSaturation,
-                crate::transport::MatterColorMode::Xy,
-                crate::transport::MatterColorMode::ColorTemperature,
-            ],
-            min_kelvin: Some(2000),
-            max_kelvin: Some(6500),
+    fn device() -> BulbModel<'static> {
+        BulbModel {
+            manufacturer: "Shenzhen Qianyan Technology",
+            model: "H6004",
+            matter_ids: Some((1, 2)),
         }
     }
 
@@ -526,10 +588,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let mut quirks = Vec::new();
 
-        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        catalog.apply_to_device(device(), &mut caps, &mut quirks);
 
         assert!(!caps.supports_transition);
         assert_eq!(caps.min_brightness, Some(8));
@@ -539,7 +601,7 @@ mod tests {
             PREFER_COLOR_TEMPERATURE_QUIRK.to_string()
         )));
 
-        let overlay = catalog.control_profile_for_device(&device()).unwrap();
+        let overlay = catalog.control_profile_for_device(device()).unwrap();
         assert_eq!(
             overlay.source.color_route,
             crate::control_profile::MatterProfileSource::Cloud
@@ -588,16 +650,16 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(profile.matches(&device()));
+        assert!(profile.matches(device()));
 
         let catalog = CloudMatterProfileCatalog {
             profiles: vec![profile],
             ..Default::default()
         };
-        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let mut quirks = vec![DeviceQuirk::NeedsExplicitOn];
 
-        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        catalog.apply_to_device(device(), &mut caps, &mut quirks);
 
         assert_eq!(caps.min_brightness, Some(1));
         assert!(caps.supports_transition);
@@ -635,9 +697,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let mut quirks = Vec::new();
-        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        catalog.apply_to_device(device(), &mut caps, &mut quirks);
         assert_eq!(quirks, vec![DeviceQuirk::CommandThrottleMs(0)]);
 
         let catalog = CloudMatterProfileCatalog {
@@ -648,9 +710,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let mut quirks = Vec::new();
-        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        catalog.apply_to_device(device(), &mut caps, &mut quirks);
         assert!(!quirks
             .iter()
             .any(|quirk| matches!(quirk, DeviceQuirk::CommandThrottleMs(_))));
@@ -659,7 +721,7 @@ mod tests {
     #[test]
     fn cache_path_save_load_and_sync_disabled_env_are_deterministic() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let state = Arc::new(Mutex::new(crate::state::AppState::default()));
         assert!(cache_path(&state).is_none());
         assert!(load_cached_for_state(&state)
             .unwrap_err()
@@ -679,7 +741,10 @@ mod tests {
             }],
         };
 
-        save_cached_for_state(&state, &catalog).unwrap();
+        let (tmp, path) = stage_catalog(&state, &catalog).unwrap();
+        fs::rename(tmp, path).unwrap();
+        state.lock().unwrap().pro_settings.bulb_profile_updates = false;
+        assert_eq!(refresh_catalog(&state).profile_version, 99);
         let path = cache_path(&state).unwrap();
         assert_eq!(path, dir.join("matter").join("cloud_profiles.json"));
         assert!(path.exists());

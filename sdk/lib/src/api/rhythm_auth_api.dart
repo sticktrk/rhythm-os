@@ -265,6 +265,18 @@ class RhythmAssistantClientRegistration {
   final Duration expiresIn;
 }
 
+/// Local-owner choices on a hub that supports the Rhythm Pro preview.
+class RhythmProSettings {
+  final bool bulbProfileUpdates;
+  final bool remoteMcp;
+  const RhythmProSettings(
+      {required this.bulbProfileUpdates, required this.remoteMcp});
+  factory RhythmProSettings.fromJson(Map<String, dynamic> json) =>
+      RhythmProSettings(
+          bulbProfileUpdates: json['bulb_profile_updates'] as bool,
+          remoteMcp: json['remote_mcp'] as bool);
+}
+
 class RhythmAuthApi {
   static final _log = Logger('rhythm_sdk.api');
 
@@ -305,6 +317,22 @@ class RhythmAuthApi {
         cause: error,
       );
     }
+  }
+
+  Future<RhythmProSettings> getProSettings() async {
+    final response = await _dio.get<Map<String, dynamic>>('api/pro/settings');
+    return RhythmProSettings.fromJson(response.data!);
+  }
+
+  Future<RhythmProSettings> updateProSettings(
+      {bool? bulbProfileUpdates, bool? remoteMcp}) async {
+    final response =
+        await _dio.put<Map<String, dynamic>>('api/pro/settings', data: {
+      if (bulbProfileUpdates != null)
+        'bulb_profile_updates': bulbProfileUpdates,
+      if (remoteMcp != null) 'remote_mcp': remoteMcp,
+    });
+    return RhythmProSettings.fromJson(response.data!);
   }
 
   Future<List<RhythmAgentCredential>> listAgentCredentials() async {

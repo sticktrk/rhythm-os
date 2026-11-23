@@ -73,6 +73,7 @@ fn cache_and_state() -> (Arc<Mutex<HaEventRoutingCache>>, SharedState) {
     cache.lock().unwrap().lights.insert(
         "light.previous".into(),
         HaLightCatalogEntry {
+            matter_model: None,
             identify: None,
             identity: None,
             name: "previous".into(),

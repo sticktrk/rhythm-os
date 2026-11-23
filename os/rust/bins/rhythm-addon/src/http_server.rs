@@ -103,6 +103,10 @@ pub fn create_admin_router(state: SharedState, access: Arc<MobileAccess>) -> Rou
     crate::selection::install_assistant(&state);
     let api = shared_routes()
         .route(
+            "/api/addon/tunnel",
+            axum::routing::put(rhythm_os::remote_access::set_linked_tunnel),
+        )
+        .route(
             "/api/addon/enrollment",
             post(crate::mobile_access::create_enrollment),
         )
