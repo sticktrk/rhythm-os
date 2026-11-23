@@ -14,6 +14,8 @@ import '../../services/analytics_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/customer_assistant_service.dart';
 import '../../services/lighting_chat_service.dart';
+import '../../services/home_agent_client.dart';
+import 'home_agent_chat.dart';
 import '../../utils/app_color_temperature.dart';
 import '../settings/dialogs/sign_in_modal.dart';
 import '../../widgets/assistant_chat_widgets.dart';
@@ -30,12 +32,14 @@ class LightingChatScreen extends StatefulWidget {
       required this.changes,
       required this.local,
       required this.guided,
+      this.openAgent,
       this.pairPhone,
       this.initialRoomId});
   final Future<LightingChatHub> Function({bool reconnect}) openHub;
   final CustomerAssistantService account;
   final bool Function() current;
   final Listenable changes;
+  final Future<HomeAgentClient?> Function()? openAgent;
   final bool local;
   final VoidCallback guided;
   final String? initialRoomId;
@@ -96,6 +100,8 @@ class LightingChatScreen extends StatefulWidget {
                     instance: instance,
                     current: () => ctx.mounted && current(),
                   ).open(reconnect: reconnect),
+                  openAgent: () => HomeAgentClient.discover(
+                      hub.homeId, instance, () => ctx.mounted && current()),
                   initialRoomId: initialRoomId,
                   pairPhone: () => ConnectHubScreen.show(ctx),
                   current: current,
@@ -117,6 +123,7 @@ class _LightingChatState extends State<LightingChatScreen> {
   List<RhythmTopologyNode> _choices = [];
   StreamSubscription<void>? _accountSub;
   LightingChatHub? _hub;
+  HomeAgentClient? _agent;
   RhythmTopologyNode? _room;
   LightingProposal? _proposal;
   Object? _issue;
@@ -153,6 +160,7 @@ class _LightingChatState extends State<LightingChatScreen> {
   void dispose() {
     widget.changes.removeListener(_check);
     _accountSub?.cancel();
+    _agent?.close();
     _hub?.close();
     _scroll.dispose();
     _input.dispose();
@@ -171,7 +179,20 @@ class _LightingChatState extends State<LightingChatScreen> {
         hub.close();
         return;
       }
+      HomeAgentClient? agent;
+      try {
+        agent = await widget.openAgent?.call();
+      } catch (_) {
+        hub.close();
+        rethrow;
+      }
+      if (!_active) {
+        agent?.close();
+        hub.close();
+        return;
+      }
       setState(() {
+        _agent = agent;
         _hub = hub;
         _room = hub.rooms.length == 1
             ? hub.rooms.single
@@ -477,6 +498,14 @@ class _LightingChatState extends State<LightingChatScreen> {
   @override
   Widget build(BuildContext context) {
     final hub = _hub, room = _room, proposal = _proposal;
+    if (_active && _agent != null && hub != null) {
+      return HomeAgentChat(
+          client: _agent!,
+          hub: hub,
+          current: () => _active,
+          initialRoomId: widget.initialRoomId,
+          guided: widget.guided);
+    }
     final enabled = _active && !_busy;
     final suggestions = <(IconData, String, String)>[
       (
