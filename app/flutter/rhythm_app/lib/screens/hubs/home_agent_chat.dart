@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 import 'package:posthog_flutter/posthog_flutter.dart';
@@ -376,8 +377,17 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         }
       });
   Future<void> _pick(ImageSource source) => _run(() async {
-        final photo = await widget.pickPhoto(source);
-        if (_live && photo != null) setState(() => _photo = photo);
+        try {
+          final photo = await widget.pickPhoto(source);
+          if (_live && photo != null) setState(() => _photo = photo);
+        } on PlatformException {
+          _add(source == ImageSource.camera
+              ? 'The camera is unavailable. You can choose an existing photo or keep chatting.'
+              : 'The photo library is unavailable. You can keep chatting.');
+        } on FormatException {
+          _add(
+              'That image could not be attached. You can choose a smaller still or keep chatting.');
+        }
       });
   Future<void> _clear() => _run(() async {
         await widget.client.call('clear');

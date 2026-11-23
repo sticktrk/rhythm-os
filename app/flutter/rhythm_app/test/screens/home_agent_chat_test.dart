@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 import 'package:image_picker/image_picker.dart';
@@ -99,7 +100,9 @@ void main() {
       'voluntary still can be discarded or sent alone; camera denial and skipping a suggestion keep chat usable',
       (t) async {
     await open(t,
-        picker: (src) async => src == ImageSource.camera ? null : pixels);
+        picker: (src) async => src == ImageSource.camera
+            ? throw PlatformException(code: 'camera_access_denied')
+            : pixels);
     await pick(t, 'Take photo');
     expect(find.byTooltip('Remove photo'), findsNothing);
     await send(t, 'Why do these lamps look different?');
