@@ -10,6 +10,8 @@ import uuid
 
 
 VERSION = "2025-06-18"
+CLIENT_NAME = "rhythm-workflows"
+CLIENT_VERSION = "1"
 
 
 class McpError(RuntimeError):
@@ -27,6 +29,7 @@ class RhythmMcp:
             raise McpError("The selected MCP bearer is empty")
         self.url = url
         self.headers = {
+            "User-Agent": f"{CLIENT_NAME}/{CLIENT_VERSION}",
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -38,7 +41,7 @@ class RhythmMcp:
             {
                 "protocolVersion": VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "rhythm-workflows", "version": "1"},
+                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
             },
         )
         if (

@@ -71,6 +71,7 @@ class BetaVerificationTest(unittest.TestCase):
 
             def do_POST(self):
                 assert self.path == "/api/assistant/mcp"
+                assert self.headers["User-Agent"] == "rhythm-workflows/1"
                 assert (
                     self.headers["Authorization"] == "Bearer test-token"
                     and self.headers["X-Request-Id"] == "journey"
