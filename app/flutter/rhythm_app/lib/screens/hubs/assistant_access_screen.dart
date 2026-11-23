@@ -4,6 +4,10 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../widgets/assistant_chat_widgets.dart';
+import '../../widgets/settings_row.dart';
+import '../../widgets/solar_orbit.dart' show CelestialColors;
+
 /// A separate local-owner surface. Secrets are held only for the one-time
 /// display, and never become part of assistant state or a cloud service call.
 class AssistantAccessScreen extends StatefulWidget {
@@ -175,104 +179,165 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
   Widget build(BuildContext context) {
     final active = widget.isCurrentTarget();
     final enabled = active && _ready && !_busy;
-    return Scaffold(
-        appBar: AppBar(title: const Text('Assistant access')),
-        body: SafeArea(
-            child: ListView(padding: const EdgeInsets.all(16), children: [
-          if (!active)
-            const Text('Connect locally to the same hub to manage access.')
-          else ...[
-            const Text('MCP endpoint'),
-            SelectableText(widget.endpoint),
-            if (_error != null) Text(_error!),
-            if (_busy) const LinearProgressIndicator(),
-            if (!_busy)
-              TextButton(
-                  onPressed: _refresh, child: const Text('Refresh access')),
-            if (_ready && _approvals.isNotEmpty) ...[
-              Text('Pending approvals',
-                  style: Theme.of(context).textTheme.titleMedium),
-              for (final approval in _approvals)
-                Card(
-                    child: ExpansionTile(
-                        key: ValueKey(approval.planId),
-                        title: Text(_reviewLabel(approval.operation
-                            .replaceFirst(RegExp(r'^plan_'), ''))),
-                        subtitle: Text('Requested by ${approval.credentialId}'),
-                        childrenPadding: const EdgeInsets.all(12),
-                        children: [
-                      for (final field
-                          in approval.review.entries.where((entry) => !const {
-                                'plan_id',
-                                'apply_arguments',
-                                'operation',
-                                'correlation_id',
-                                'server_instance_id'
-                              }.contains(entry.key)))
-                        ListTile(
-                            title: Text(_reviewLabel(field.key)),
-                            subtitle: SelectableText(field.value is String
-                                ? field.value as String
-                                : const JsonEncoder.withIndent('  ')
-                                    .convert(field.value))),
-                      Wrap(children: [
-                        TextButton(
-                            onPressed:
-                                enabled ? () => _decide(approval, false) : null,
-                            child: const Text('Decline')),
-                        FilledButton(
-                            onPressed:
-                                enabled ? () => _decide(approval, true) : null,
-                            child: const Text('Approve'))
-                      ]),
-                    ])),
-            ],
-            if (enabled && _issued.isEmpty) ...[
-              const Text(
-                  'Create a credential for a client to read this hub and control its lights.'),
-              if (_supportsApprovals)
-                SwitchListTile(
-                    value: _unattended,
-                    onChanged: (value) => setState(() => _unattended = value),
-                    title: const Text('Allow unattended changes'),
-                    subtitle: const Text(
-                        'Lifecycle and ownership changes always require your approval.')),
-              FilledButton(
-                  onPressed: () => _issue(false),
-                  child: const Text('Create agent token')),
-              OutlinedButton(
-                  onPressed: () => _issue(true),
-                  child: const Text('Connect Home Assistant Assist')),
-            ],
-            if (_issued.isNotEmpty) ...[
-              Text(_issued.length == 1
-                  ? 'Use this bearer token in your MCP client. It is shown once.'
-                  : 'In Home Assistant, add MCP Client with this endpoint, client ID and secret. Use the activation code when Rhythm asks for approval.'),
-              for (final entry in _issued.entries)
-                ListTile(
-                    title: Text(entry.key),
-                    subtitle: SelectableText(
-                        _revealed ? entry.value : '•••• •••• ••••')),
-              TextButton(
-                  onPressed: () => setState(() => _revealed = !_revealed),
-                  child: Text(_revealed ? 'Hide' : 'Reveal')),
-              TextButton(
-                  onPressed: () => setState(() {
-                        _issued = {};
-                        _revealed = false;
-                      }),
-                  child: const Text('Done')),
-            ],
-            for (final entry in _credentials)
-              ListTile(
-                  title: Text(entry.kind),
-                  subtitle: Text(entry.unattendedChanges
-                      ? '${entry.id} · unattended changes allowed'
-                      : entry.id),
-                  trailing: TextButton(
-                      onPressed: enabled ? () => _revoke(entry) : null,
-                      child: const Text('Revoke'))),
-          ],
-        ])));
+    const gap = SizedBox(height: 12);
+    return RhythmAssistantPage(
+        title: 'Assistant access',
+        body: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            children: [
+              if (!active)
+                const Text('Connect locally to the same hub to manage access.')
+              else ...[
+                AssistantReviewCard(children: [
+                  const AssistantNote('MCP endpoint'),
+                  SelectableText(widget.endpoint),
+                ]),
+                gap,
+                if (_error != null) ...[Text(_error!), gap],
+                if (_busy) const AssistantWorking(label: 'Checking access…'),
+                if (!_busy)
+                  Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton(
+                          onPressed: _refresh,
+                          child: const Text('Refresh access'))),
+                if (_ready && _approvals.isNotEmpty) ...[
+                  const SettingsSectionHeader(title: 'Pending approvals'),
+                  for (final approval in _approvals)
+                    Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Card(
+                            color: CelestialColors.backgroundCard,
+                            margin: EdgeInsets.zero,
+                            elevation: 0,
+                            clipBehavior: Clip.antiAlias,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                side: const BorderSide(
+                                    color: CelestialColors.orbitRing)),
+                            // Read the page's theme, not the app's above it.
+                            child: Builder(
+                                builder: (context) => Theme(
+                                data: Theme.of(context).copyWith(
+                                    dividerColor: Colors.transparent),
+                                child: ExpansionTile(
+                                    key: ValueKey(approval.planId),
+                                    title: Text(_reviewLabel(approval.operation
+                                        .replaceFirst(RegExp(r'^plan_'), ''))),
+                                    subtitle: Text(
+                                        'Requested by ${approval.credentialId}'),
+                                    childrenPadding: const EdgeInsets.fromLTRB(
+                                        16, 0, 16, 16),
+                                    expandedCrossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    expandedAlignment: Alignment.centerLeft,
+                                    children: [
+                                      for (final field in approval
+                                          .review.entries
+                                          .where((entry) => !const {
+                                                'plan_id',
+                                                'apply_arguments',
+                                                'operation',
+                                                'correlation_id',
+                                                'server_instance_id'
+                                              }.contains(entry.key))) ...[
+                                        AssistantNote(_reviewLabel(field.key)),
+                                        SelectableText(field.value is String
+                                            ? field.value as String
+                                            : const JsonEncoder.withIndent('  ')
+                                                .convert(field.value)),
+                                        gap,
+                                      ],
+                                      Wrap(spacing: 8, children: [
+                                        FilledButton(
+                                            onPressed: enabled
+                                                ? () => _decide(approval, true)
+                                                : null,
+                                            child: const Text('Approve')),
+                                        TextButton(
+                                            onPressed: enabled
+                                                ? () => _decide(approval, false)
+                                                : null,
+                                            child: const Text('Decline')),
+                                      ]),
+                                    ]))))),
+                ],
+                if (enabled && _issued.isEmpty) ...[
+                  gap,
+                  const Text(
+                      'Create a credential for a client to read this hub and control its lights.'),
+                  gap,
+                  if (_supportsApprovals) ...[
+                    SettingsGroup(children: [
+                      SettingsRow(
+                          icon: Icons.auto_mode_outlined,
+                          iconColor: const Color(0xFF607D8B),
+                          label: 'Allow unattended changes',
+                          subtitle:
+                              'Lifecycle and ownership changes always require your approval.',
+                          showChevron: false,
+                          trailing: SettingsSwitch(
+                              value: _unattended,
+                              onChanged: (value) =>
+                                  setState(() => _unattended = value)),
+                          onTap: () =>
+                              setState(() => _unattended = !_unattended)),
+                    ]),
+                    gap,
+                  ],
+                  FilledButton(
+                      onPressed: () => _issue(false),
+                      child: const Text('Create agent token')),
+                  const SizedBox(height: 8),
+                  OutlinedButton(
+                      onPressed: () => _issue(true),
+                      child: const Text('Connect Home Assistant Assist')),
+                ],
+                if (_issued.isNotEmpty) ...[
+                  gap,
+                  AssistantReviewCard(children: [
+                    Text(_issued.length == 1
+                        ? 'Use this bearer token in your MCP client. It is shown once.'
+                        : 'In Home Assistant, add MCP Client with this endpoint, client ID and secret. Use the activation code when Rhythm asks for approval.'),
+                    for (final entry in _issued.entries) ...[
+                      gap,
+                      AssistantNote(entry.key),
+                      SelectableText(
+                          _revealed ? entry.value : '•••• •••• ••••'),
+                    ],
+                    gap,
+                    Wrap(spacing: 8, children: [
+                      FilledButton(
+                          onPressed: () => setState(() {
+                                _issued = {};
+                                _revealed = false;
+                              }),
+                          child: const Text('Done')),
+                      TextButton(
+                          onPressed: () =>
+                              setState(() => _revealed = !_revealed),
+                          child: Text(_revealed ? 'Hide' : 'Reveal')),
+                    ]),
+                  ]),
+                ],
+                if (_credentials.isNotEmpty) ...[
+                  const SettingsSectionHeader(title: 'Credentials'),
+                  SettingsGroup(children: [
+                    for (final entry in _credentials)
+                      SettingsRow(
+                          icon: Icons.key,
+                          iconColor: CelestialColors.accentBlue,
+                          label: entry.kind,
+                          subtitle: entry.unattendedChanges
+                              ? '${entry.id} · unattended changes allowed'
+                              : entry.id,
+                          showChevron: false,
+                          trailing: TextButton(
+                              onPressed: enabled ? () => _revoke(entry) : null,
+                              child: const Text('Revoke'))),
+                  ]),
+                ],
+              ],
+            ]));
   }
 }

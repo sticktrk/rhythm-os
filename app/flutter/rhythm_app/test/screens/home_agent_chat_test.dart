@@ -10,6 +10,7 @@ import 'package:rhythm_app/services/customer_assistant_service.dart';
 import 'package:rhythm_app/services/home_agent_catalog.dart';
 import 'package:rhythm_app/services/home_agent_client.dart';
 import 'package:rhythm_app/services/lighting_chat_service.dart';
+import 'package:rhythm_app/widgets/assistant_chat_widgets.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class TestAgent extends HomeAgentClient {
@@ -118,6 +119,42 @@ void main() {
     expect(find.byTooltip('Add a photo'), findsOneWidget);
     await send(t, 'Why are my lights different?');
     expect(client.calls.where((call) => call.$1 == 'turn'), hasLength(1));
+  });
+  testWidgets(
+      'a starter prompt opens the conversation and the plan arrives as one review card',
+      (t) async {
+    await open(t);
+    expect(find.text('How should the light feel?'), findsOneWidget);
+    client.plan = {
+      'id': '1b9af27c-a109-4e92-94ed-bd6a7c6cc6b5',
+      'expires':
+          DateTime.now().add(const Duration(minutes: 5)).millisecondsSinceEpoch,
+      'steps': [
+        {
+          'target': client.reference('r', 'a'),
+          'operation': 'adjust_room_brightness',
+          'arguments': {'delta_percent': -10},
+          'status': 'review'
+        }
+      ]
+    };
+    await t.tap(find.text('A little brighter'));
+    await t.pumpAndSettle();
+    final turn = client.calls.singleWhere((c) => c.$1 == 'turn').$2;
+    expect(turn['messages'].last['text'], 'Make the lights a little brighter.');
+    expect(find.text('How should the light feel?'), findsNothing);
+    final card = find.byType(AssistantReviewCard);
+    expect(card, findsOneWidget);
+    for (final text in [
+      'Kitchen',
+      '-10 brightness points',
+      'Awaiting review',
+      'Apply reviewed steps'
+    ]) {
+      expect(find.descendant(of: card, matching: find.text(text)),
+          findsOneWidget);
+    }
+    expect(find.byType(ListTile), findsNothing);
   });
   testWidgets(
       'voluntary still can be discarded or sent alone; camera denial and skipping a suggestion keep chat usable',

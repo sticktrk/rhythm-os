@@ -14,6 +14,9 @@ class SettingsRow extends StatelessWidget {
   final IconData icon;
   final Color? iconColor;
   final String label;
+
+  /// A line of supporting copy under the label.
+  final String? subtitle;
   final String? value;
   final Widget? trailing;
   final bool showChevron;
@@ -24,6 +27,7 @@ class SettingsRow extends StatelessWidget {
     required this.icon,
     this.iconColor,
     required this.label,
+    this.subtitle,
     this.value,
     this.trailing,
     this.showChevron = true,
@@ -62,14 +66,31 @@ class SettingsRow extends StatelessWidget {
             const SizedBox(width: 14),
             // Label only (value moved to trailing area)
             Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w400,
-                  letterSpacing: -0.2,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w400,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  if (subtitle != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        subtitle!,
+                        style: const TextStyle(
+                          color: CelestialColors.textSecondary,
+                          fontSize: 13,
+                          height: 1.3,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
             // Value text (if present, shown before trailing)
@@ -176,6 +197,22 @@ class SettingsSectionHeader extends StatelessWidget {
   }
 }
 
+/// The hairline between rows of a [SettingsGroup], inset past the icon.
+class SettingsDivider extends StatelessWidget {
+  const SettingsDivider({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 66),
+      child: Container(
+        height: 0.5,
+        color: CelestialColors.orbitRing.withValues(alpha: 0.2),
+      ),
+    );
+  }
+}
+
 /// A group of settings rows contained in a single card with dividers.
 /// This creates the clean, grouped look like the Streaks app.
 class SettingsGroup extends StatelessWidget {
@@ -198,17 +235,24 @@ class SettingsGroup extends StatelessWidget {
         children: [
           for (int i = 0; i < children.length; i++) ...[
             children[i],
-            if (i < children.length - 1)
-              Padding(
-                padding: const EdgeInsets.only(left: 66),
-                child: Container(
-                  height: 0.5,
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.2),
-                ),
-              ),
+            if (i < children.length - 1) const SettingsDivider(),
           ],
         ],
       ),
     );
   }
+}
+
+/// The on/off control for a [SettingsRow]'s trailing slot.
+class SettingsSwitch extends StatelessWidget {
+  const SettingsSwitch({super.key, required this.value, this.onChanged});
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) => Switch.adaptive(
+        value: value,
+        activeTrackColor: const Color(0xFF22C55E),
+        onChanged: onChanged,
+      );
 }

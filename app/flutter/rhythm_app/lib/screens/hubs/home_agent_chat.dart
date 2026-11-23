@@ -13,6 +13,7 @@ import '../../services/home_agent_client.dart';
 import '../../services/home_agent_catalog.dart';
 import '../../services/lighting_chat_service.dart';
 import '../../widgets/assistant_chat_widgets.dart';
+import '../../widgets/solar_orbit.dart' show CelestialColors;
 
 class HomeAgentChat extends StatefulWidget {
   const HomeAgentChat(
@@ -422,16 +423,53 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         'cancelled' => 'Skipped',
         _ => status
       };
+  static const _disclosure =
+      'Ask about your lights, or share a photo. Messages, readings and photos you send are processed by Cloudflare Workers AI.';
+  static const _checkable = {
+    'walk_started',
+    'awaiting_owner',
+    'uncertain',
+    'claimed'
+  };
+
+  /// A readable name for a step the hub has not described yet.
+  String _operation(String id) {
+    final words =
+        id.replaceFirst(RegExp(r'^(plan|apply)_'), '').replaceAll('_', ' ');
+    return words.isEmpty ? words : words[0].toUpperCase() + words.substring(1);
+  }
+
+  Color _statusColor(String status) => switch (status) {
+        'observed' || 'acknowledged' || 'verified' => const Color(0xFF22C55E),
+        'claimed' ||
+        'uncertain' ||
+        'partial' ||
+        'rejected' =>
+          CelestialColors.warning,
+        _ => CelestialColors.textSecondary
+      };
+
   @override
   Widget build(BuildContext context) {
-    final steps = _steps, plan = _plan;
+    final steps = _steps, plan = _plan, catalog = _catalog;
     final expired = plan != null &&
         (plan['expires'] as num) < DateTime.now().millisecondsSinceEpoch;
+    final rooms =
+        catalog?.targets.values.where((t) => t.kind == 'r').toList() ??
+            const <AgentTarget>[];
+    final earlier = [
+      for (final old in _history.reversed)
+        for (final row in (old['steps'] as List).whereType<Map>())
+          if (_checkable.contains(row['status'])) CustomerAction.from(row)
+    ];
+    final canAsk = !_busy && catalog != null && !_pending;
     return PostHogMaskWidget(
         child: RhythmAssistantPage(
             title: 'Lighting assistant',
             actions: [
               PopupMenuButton<String>(
+                  tooltip: 'More options',
+                  icon: const Icon(Icons.more_horiz),
                   onSelected: (v) {
                     if (v == 'guided') {
                       widget.guided();
@@ -454,133 +492,175 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
               Expanded(
                   child: ListView(
                       controller: _scroll,
-                      padding: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                       children: [
-                    if (_messages.isEmpty)
-                      const Text(
-                          'Ask about your lights, or share a photo. Messages, readings and photos you send are processed by Cloudflare Workers AI.'),
+                    if (_messages.isEmpty && plan == null && earlier.isEmpty)
+                      LightingChatWelcome(
+                          tools: widget.hub.tools,
+                          onPrompt: canAsk ? _send : null,
+                          disclosure: _disclosure)
+                    else if (_messages.isEmpty)
+                      const AssistantNote(_disclosure),
                     if (_messages.isEmpty && _lastResult == 'photo_advice')
-                      const Text(
-                          'A photo was discussed earlier. You can continue here or share it again if another look would help.'),
-                    for (final old in _history.reversed)
-                      for (final row in (old['steps'] as List).whereType<Map>())
-                        if ([
-                          'walk_started',
-                          'claimed',
-                          'uncertain',
-                          'awaiting_owner'
-                        ].contains(row['status']))
-                          ListTile(
-                              title: Text(
-                                  _catalog?.targets[row['target']]?.name ??
-                                      'Previous request'),
-                              subtitle: Text(_status(row['status'])),
-                              trailing: TextButton(
-                                  onPressed: _busy
-                                      ? null
-                                      : () =>
-                                          _inspect(CustomerAction.from(row)),
-                                  child: const Text('Check progress'))),
+                      const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: AssistantNote(
+                              'A photo was discussed earlier. You can continue here or share it again if another look would help.')),
+                    if (_messages.isEmpty) const SizedBox(height: 14),
+                    for (final row in earlier)
+                      Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: AssistantReviewCard(children: [
+                            Row(children: [
+                              Expanded(
+                                  child: _StepStatus(
+                                      title: catalog
+                                              ?.targets[row['target']]?.name ??
+                                          'Previous request',
+                                      status: _status(row['status']),
+                                      color: _statusColor(row['status']))),
+                              TextButton(
+                                  onPressed: _busy ? null : () => _inspect(row),
+                                  child: const Text('Check progress')),
+                            ]),
+                          ])),
                     for (final m in _messages)
                       AssistantMessageBubble(
                           resident: m.resident, text: m.text),
-                    if (_catalog != null)
-                      Wrap(spacing: 6, children: [
-                        for (final t in _catalog!.targets.values
-                            .where((t) => t.kind == 'r'))
-                          ChoiceChip(
-                              label: Text(_catalog!.targets.values
-                                          .where((v) => v.name == t.name)
-                                          .length >
-                                      1
-                                  ? '${t.name} (${t.id})'
-                                  : t.name),
-                              selected: _focus == t.ref,
-                              onSelected: _busy
-                                  ? null
-                                  : (selected) {
-                                      setState(() =>
-                                          _focus = selected ? t.ref : null);
-                                    })
-                      ]),
-                    if (plan != null) ...[
-                      for (final (i, s) in steps.indexed)
-                        ListTile(
-                            title: Text(_reviews[i]?.description ??
-                                '${_catalog?.targets[s['target']]?.name ?? 'Target'} · ${s['operation']}'),
-                            subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                      _reviewErrors[i] ?? _status(s['status'])),
-                                  if (_reviews[i] case final review?
-                                      when !LightingProposal.supported
-                                              .contains(review.operation) &&
-                                          review.proof.isNotEmpty)
-                                    ExpansionTile(
-                                        title:
-                                            const Text('Review exact changes'),
-                                        children: [
-                                          SelectableText(
-                                              const JsonEncoder.withIndent('  ')
-                                                  .convert(review.proof))
-                                        ]),
-                                  if ([
-                                    'walk_started',
-                                    'awaiting_owner',
-                                    'uncertain',
-                                    'claimed'
-                                  ].contains(s['status']))
-                                    TextButton(
-                                        onPressed:
-                                            _busy ? null : () => _inspect(s),
-                                        child: Text(
-                                            s['status'] == 'walk_started'
-                                                ? 'Check walk'
-                                                : 'Check outcome'))
-                                ])),
-                      if (_pending)
-                        Wrap(children: [
-                          FilledButton(
-                              onPressed: _busy ||
-                                      expired ||
-                                      steps.indexed.any((x) =>
-                                          x.$2['status'] == 'review' &&
-                                          !_reviews.containsKey(x.$1))
-                                  ? null
-                                  : _apply,
-                              child: Text(expired
-                                  ? 'Review expired'
-                                  : 'Apply reviewed steps')),
-                          TextButton(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _run(() async => _showState(
-                                      await widget.client.call(
-                                          'cancel', {'plan': plan['id']}))),
-                              child: const Text('Skip remaining'))
-                        ]),
-                    ],
-                    if (_busy) const LinearProgressIndicator(),
+                    if (plan != null && steps.isNotEmpty)
+                      Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: AssistantReviewCard(children: [
+                            for (final (i, s) in steps.indexed) ...[
+                              if (i > 0)
+                                const Divider(
+                                    height: 29,
+                                    thickness: 1,
+                                    color: CelestialColors.orbitRing),
+                              _AgentStep(
+                                  target: _reviews[i]?.target.name ??
+                                      catalog?.targets[s['target']]?.name ??
+                                      'Target',
+                                  title: _reviews[i]?.title ??
+                                      _operation(s['operation']),
+                                  detail: _reviews[i]?.detail,
+                                  operation: s['operation'],
+                                  arguments: s['arguments'] is Map
+                                      ? CustomerAction.from(s['arguments'])
+                                      : const {},
+                                  status:
+                                      _reviewErrors[i] ?? _status(s['status']),
+                                  statusColor: _reviewErrors[i] != null
+                                      ? CelestialColors.warning
+                                      : _statusColor(s['status']),
+                                  proof: switch (_reviews[i]) {
+                                    final review?
+                                        when !LightingProposal.supported
+                                                .contains(review.operation) &&
+                                            review.proof.isNotEmpty =>
+                                      review.proof,
+                                    _ => null
+                                  },
+                                  checkLabel: !_checkable.contains(s['status'])
+                                      ? null
+                                      : s['status'] == 'walk_started'
+                                          ? 'Check walk'
+                                          : 'Check outcome',
+                                  onCheck: _busy ? null : () => _inspect(s)),
+                            ],
+                            if (_pending) ...[
+                              const SizedBox(height: 14),
+                              Wrap(spacing: 8, children: [
+                                FilledButton(
+                                    onPressed: _busy ||
+                                            expired ||
+                                            steps.indexed.any((x) =>
+                                                x.$2['status'] == 'review' &&
+                                                !_reviews.containsKey(x.$1))
+                                        ? null
+                                        : _apply,
+                                    child: Text(expired
+                                        ? 'Review expired'
+                                        : 'Apply reviewed steps')),
+                                TextButton(
+                                    onPressed: _busy
+                                        ? null
+                                        : () => _run(() async => _showState(
+                                            await widget.client.call('cancel',
+                                                {'plan': plan['id']}))),
+                                    child: const Text('Skip remaining'))
+                              ]),
+                            ],
+                          ])),
+                    if (_busy)
+                      AssistantWorking(
+                          label: catalog == null
+                              ? 'Connecting to your hub…'
+                              : 'Working…'),
                   ])),
+              if (rooms.isNotEmpty)
+                SizedBox(
+                    height: 48,
+                    child: Row(children: [
+                      const Padding(
+                          padding: EdgeInsets.only(left: 20, right: 10),
+                          child: AssistantNote('Room')),
+                      Expanded(
+                          child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              padding: const EdgeInsets.only(right: 16),
+                              itemCount: rooms.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (_, i) {
+                                final t = rooms[i];
+                                return Center(
+                                    child: ChoiceChip(
+                                        showCheckmark: false,
+                                        label: Text(rooms
+                                                    .where(
+                                                        (v) => v.name == t.name)
+                                                    .length >
+                                                1
+                                            ? '${t.name} (${t.id})'
+                                            : t.name),
+                                        selected: _focus == t.ref,
+                                        onSelected: _busy
+                                            ? null
+                                            : (selected) => setState(() =>
+                                                _focus =
+                                                    selected ? t.ref : null)));
+                              })),
+                    ])),
               if (_photo != null)
-                ListTile(
-                    leading: Image.memory(_photo!,
-                        height: 48, width: 48, fit: BoxFit.cover),
-                    title: const Text(
-                        'Photo ready to send to Cloudflare Workers AI'),
-                    trailing: IconButton(
-                        tooltip: 'Remove photo',
-                        onPressed:
-                            _busy ? null : () => setState(() => _photo = null),
-                        icon: const Icon(Icons.close))),
+                Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 6, 0),
+                    child: Row(children: [
+                      ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.memory(_photo!,
+                              height: 44, width: 44, fit: BoxFit.cover)),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                          child: AssistantNote(
+                              'Photo ready to send to Cloudflare Workers AI')),
+                      IconButton(
+                          tooltip: 'Remove photo',
+                          color: CelestialColors.textSecondary,
+                          onPressed: _busy
+                              ? null
+                              : () => setState(() => _photo = null),
+                          icon: const Icon(Icons.close_rounded)),
+                    ])),
               AssistantComposer(
                   controller: _input,
-                  hint: 'Message about your lights…',
+                  hint: _pending
+                      ? 'Review the change above'
+                      : 'Message about your lights…',
                   sendLabel: 'Send message',
                   maxLength: 1000,
                   canSendEmpty: _photo != null,
-                  onSend: _busy || _catalog == null || _pending ? null : _send,
+                  onSend: canAsk ? _send : null,
                   leading: PopupMenuButton<ImageSource>(
                       tooltip: 'Add a photo',
                       enabled: !_busy && !_pending,
@@ -595,5 +675,80 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                 child: Text('Choose photo'))
                           ])),
             ])));
+  }
+}
+
+/// A target and where its request stands.
+class _StepStatus extends StatelessWidget {
+  const _StepStatus(
+      {required this.title, required this.status, required this.color});
+  final String title, status;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: Theme.of(context).textTheme.labelLarge),
+        Text(status,
+            style: TextStyle(color: color, fontSize: 13, height: 1.45)),
+      ]);
+}
+
+/// One step of the agent's plan inside the review card.
+class _AgentStep extends StatelessWidget {
+  const _AgentStep(
+      {required this.target,
+      required this.title,
+      required this.operation,
+      required this.arguments,
+      required this.status,
+      required this.statusColor,
+      this.detail,
+      this.proof,
+      this.checkLabel,
+      this.onCheck});
+  final String target, title, operation, status;
+  final CustomerAction arguments;
+  final Color statusColor;
+  final String? detail, checkLabel;
+  final CustomerAction? proof;
+  final VoidCallback? onCheck;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      AssistantReviewHeader(
+          target: target,
+          title: title,
+          operation: operation,
+          arguments: arguments),
+      const SizedBox(height: 12),
+      if (detail != null) Text(detail!),
+      Text(status,
+          style: TextStyle(color: statusColor, fontSize: 13, height: 1.45)),
+      if (proof != null)
+        Theme(
+            data: theme.copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                expandedAlignment: Alignment.centerLeft,
+                iconColor: CelestialColors.accentBlue,
+                collapsedIconColor: CelestialColors.textSecondary,
+                title: Text('Review exact changes',
+                    style: theme.textTheme.labelLarge),
+                children: [
+                  SelectableText(
+                      const JsonEncoder.withIndent('  ').convert(proof),
+                      style: const TextStyle(
+                          color: CelestialColors.textSecondary,
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          height: 1.4))
+                ])),
+      if (checkLabel != null)
+        TextButton(onPressed: onCheck, child: Text(checkLabel!)),
+    ]);
   }
 }

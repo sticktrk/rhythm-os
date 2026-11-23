@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/settings/rhythm_pro_screen.dart';
+import 'package:rhythm_app/widgets/settings_row.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -42,10 +43,13 @@ void main() {
 
     await show(false);
     expect(api.reads, 0);
-    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.byType(Switch), findsNothing);
     await show(true);
     expect(api.reads, 1);
-    expect(find.byType(SwitchListTile), findsNWidgets(2));
+    expect(find.byType(Switch), findsNWidgets(2));
+    // Pro controls are settings rows like the rest of Settings.
+    expect(find.byType(SettingsRow), findsNWidgets(2));
+    expect(find.byType(ListTile), findsNothing);
     await tester.tap(find.text('Remote MCP'));
     await tester.pumpAndSettle();
     expect(api.changes, [(null, true)]);
@@ -54,10 +58,10 @@ void main() {
     await tester.tap(find.text('Bulb profile updates'));
     await tester.pumpAndSettle();
     expect(api.changes.last, (false, null));
-    expect(find.byType(SwitchListTile), findsNothing);
+    expect(find.byType(Switch), findsNothing);
     await tester.tap(find.byTooltip('Refresh hub settings'));
     await tester.pumpAndSettle();
     expect(api.reads, 2);
-    expect(find.byType(SwitchListTile), findsNWidgets(2));
+    expect(find.byType(Switch), findsNWidgets(2));
   });
 }
