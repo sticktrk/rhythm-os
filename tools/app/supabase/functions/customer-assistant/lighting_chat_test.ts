@@ -118,3 +118,40 @@ Deno.test("returns an ordinary conversational follow-up with no mutation", async
   );
   if (reply.text !== "Would you like it warmer or dimmer?") throw Error();
 });
+
+Deno.test("a conversation can start without room data or mutation tools", async () => {
+  const turn = { ...input, room: {}, tools: [], scope: "unresolved" };
+  for (const reason of ["list", "clarify"]) {
+    const reply = await lightingChat(
+      turn,
+      reserve,
+      config,
+      async (_url, init) => {
+        const request = JSON.parse(String(init?.body));
+        if (
+          request.tools.length !== 1 || request.tools[0].name !== "show_rooms"
+        ) throw Error();
+        return Response.json({
+          status: "completed",
+          output: [{
+            type: "function_call",
+            name: "show_rooms",
+            arguments: JSON.stringify({ reason }),
+          }],
+        });
+      },
+    );
+    if (reply.rooms !== reason) throw Error();
+  }
+  await reject(
+    lightingChat(turn, reserve, config, () =>
+      Promise.resolve(
+        Response.json({ status: "completed", output: [proposal] }),
+      )),
+    502,
+  );
+  await reject(
+    lightingChat({ ...input, scope: "unresolved" }, reserve, config),
+    400,
+  );
+});

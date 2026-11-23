@@ -40,7 +40,6 @@ const specs = {
 } as const;
 const instructions = [
   "You are Rhythm's lighting assistant. Answer briefly using ordinary lighting language.",
-  "The resident picked one room in the app. All actions affect only that room. If they name another room, ask them to select it first.",
   "Use the supplied hub reading as evidence. Its brightness and Kelvin are targets. Never claim to see a physical result.",
   "Use an available tool to propose one concrete adjustment for an explicit request. The resident confirms on their phone.",
   "If the goal is unclear, ask one short question or offer two distinct lighting options. Never say a proposed change happened.",
@@ -71,6 +70,18 @@ export async function lightingChat(
     return { role: m.role, content: m.text };
   });
   if (messages.at(-1)?.role !== "user") throw invalid();
+  // Older preview builds explicitly select a room. New builds start in chat
+  // and resolve names on the phone, where the hub inventory stays private.
+  const scope = input.scope ?? "selected";
+  if (
+    typeof scope !== "string" ||
+    !["selected", "unresolved", "mentioned", "continuing", "clarified"]
+      .includes(scope)
+  ) throw invalid();
+  if (
+    scope === "unresolved" &&
+    (input.tools.length || Object.keys(input.room).length)
+  ) throw invalid();
   const reading: Fields = {};
   for (const [k, v] of Object.entries(input.room)) {
     if (
@@ -94,7 +105,7 @@ export async function lightingChat(
   const offered = [...new Set(input.tools as Tool[])];
   if (!config.key) throw new Rejection(503, "chat_unavailable");
   if (!await reserve()) throw new Rejection(429, "chat_daily_limit");
-  const tools = offered.map((name) => ({
+  const tools: Fields[] = offered.map((name) => ({
     type: "function",
     name,
     description: specs[name].description,
@@ -106,6 +117,35 @@ export async function lightingChat(
       additionalProperties: false,
     },
   }));
+  if (scope !== "selected") {
+    tools.push({
+      type: "function",
+      name: "show_rooms",
+      description:
+        "Display the actual rooms on the phone. Use list when asked which rooms exist. Use clarify when a room-specific request has no resolved room, names an unknown room, or needs more than one room. The phone offers the choices in the conversation.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: { reason: { type: "string", enum: ["list", "clarify"] } },
+        required: ["reason"],
+        additionalProperties: false,
+      },
+    });
+  }
+  const context = scope === "selected"
+    ? "The resident picked one room in the app. All actions affect only that room. If they name another room, ask them to select it first."
+    : [
+      "Start with the resident's request. Answer general lighting questions directly without asking for a room.",
+      "For live status or an adjustment, use the phone's room context. If no room is resolved, call show_rooms with clarify. Never invent room names or readings.",
+      "One proposal affects one room. Use show_rooms to clarify a multi-room request. Use list when asked which rooms exist.",
+      scope === "continuing"
+        ? "The reading is for the previous room. If the latest message names another room, it did not match on this phone; clarify instead of acting on the previous room."
+        : scope === "mentioned"
+        ? "The phone matched a room named in the latest request."
+        : scope === "clarified"
+        ? "The resident has answered which room to use. Address their outstanding request using the supplied reading."
+        : "There is no resolved room or live reading.",
+    ].join(" ");
   let data;
   try {
     const res = await request("https://api.openai.com/v1/responses", {
@@ -117,7 +157,7 @@ export async function lightingChat(
       signal: AbortSignal.timeout(30000),
       body: JSON.stringify({
         model: config.model,
-        instructions,
+        instructions: instructions + " " + context,
         input: [{
           role: "developer",
           content: "Current selected room reading: " + JSON.stringify(reading),
@@ -143,7 +183,7 @@ export async function lightingChat(
   if (calls.length) {
     const { name, arguments: raw } = calls[0];
     if (
-      calls.length !== 1 || !tool(name) || !offered.includes(name) ||
+      calls.length !== 1 || !tools.some((t) => t.name === name) ||
       typeof raw !== "string"
     ) throw invalidReply();
     let args;
@@ -152,6 +192,14 @@ export async function lightingChat(
     } catch {
       throw invalidReply();
     }
+    if (name === "show_rooms") {
+      if (
+        !object(args) || Object.keys(args).length !== 1 ||
+        (args.reason !== "list" && args.reason !== "clarify")
+      ) throw invalidReply();
+      return { rooms: args.reason };
+    }
+    if (!tool(name)) throw invalidReply();
     const fields = specs[name].fields;
     if (
       !object(args) || Object.keys(args).length !== Object.keys(fields).length
