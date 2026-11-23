@@ -75,6 +75,10 @@ Run the portable repository checks from the root:
 ./tools/check-repo-invariants.sh
 ```
 
+That script checks source boundaries, licenses, and deployment fixtures. While
+editing, run the narrowest product test for the change. See
+[Test and contribute](development.md#test-and-contribute).
+
 
 ## Contributing and security
 

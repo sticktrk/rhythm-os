@@ -7,10 +7,25 @@ Open an issue or pull request in this repository with the intended behavior,
 a focused change and the tests you ran. Keep unrelated formatting and generated
 build output out of changes. Follow existing Rust, Flutter and Dart patterns.
 
-Run `./tools/check-repo-invariants.sh` and the focused tests for affected code.
-For Flutter changes, run `flutter analyze` from `app/flutter/rhythm_app`.
-For backend changes, run the relevant Rust or Edge Function tests. Explain any
-platform or hardware validation that remains outstanding.
+During development, run only the narrowest test for the change. Do not run the
+full test corpus until one final check before the pull request. CI runs that
+corpus.
+
+```text
+cargo test -p <crate> <filter>
+```
+
+From `app/flutter/rhythm_app`, run `flutter test test/<file>_test.dart`. From
+`sdk` or `admin-api`, run `dart test test/<file>_test.dart`. Add
+`--name <test>` to run one test inside the file. Final check only:
+`cargo test --workspace --all-targets --locked`, plus `flutter test` or
+`dart test` with no file path.
+
+Run `./tools/check-repo-invariants.sh` for source boundaries, licenses, and
+deployment fixtures. For Flutter changes, run `flutter analyze` from
+`app/flutter/rhythm_app`. For backend changes, run the relevant Rust or Edge
+Function test file. Explain any platform or hardware validation that remains
+outstanding.
 
 Use normal Git branches, commits and pushes, then open a pull request here.
 Every push and PR runs public checks on GitHub-hosted runners without staff

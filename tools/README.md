@@ -50,7 +50,7 @@ entrypoint forwards to this shared generator.
 - `tools/config/` - Credential-profile schemas, examples, privacy-safe
   provisioning, loading, and validation for local and scheduled tooling. Live
   values stay outside the repository under `~/.config/rhythm/`.
-- `tools/check-repo-invariants.sh` - Source boundaries, licenses and deployment fixture checks.
+- `tools/check-repo-invariants.sh` - Source boundaries, licenses, and deployment fixture checks. Product tests stay on the narrowest crate, package, or file for the change; see `AGENTS.md`.
 - `tools/install-git-hooks.sh` - Install the local source-check hook.
 - `tools/ci/check-*.sh` and `check-commissioning-reuse.py` - product ownership guards run by public CI.
 - `tools/ci/detect-changed-surfaces.sh` - Shared path classifier for CI jobs.

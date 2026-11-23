@@ -159,12 +159,31 @@ snapshot, then reconnects to HA and revalidates selected identities before write
 
 ## Build and qualification
 
-Run `cargo test -p rhythm-addon`, `cargo test -p rhythm-ha --features test-support`
-and `cargo test -p rhythm-os --lib`. In `admin-api`, run `dart analyze` and
-`dart test`; in `admin-ui`, run both `npm run build` and
-`npm run build:homeassistant`. Run the SDK and affected Flutter tests, repository
-invariants and the packaging validation/smoke harness. Public image builds consume
-an immutable product revision.
+While editing, run the narrowest test for the change:
+
+```text
+cargo test -p <crate> <filter>
+cargo test -p rhythm-ha --features test-support <filter>
+```
+
+From `admin-api`, run `dart test test/<file>_test.dart`. From `sdk`, run
+`dart test test/<file>_test.dart`. From `app/flutter/rhythm_app`, run
+`flutter test test/<file>_test.dart`.
+
+Run this qualification check once before a pull request. CI also runs the
+workspace and package suites.
+
+```bash
+cargo test -p rhythm-addon
+cargo test -p rhythm-ha --features test-support
+cargo test -p rhythm-os --lib
+```
+
+In `admin-api`, that check is `dart analyze` and `dart test` with no file
+path. In `admin-ui`, run both `npm run build` and
+`npm run build:homeassistant`. Also run the affected SDK and Flutter tests,
+repository invariants, and the packaging validation/smoke harness. Public
+image builds consume an immutable product revision.
 
 `/health` and `/api/addon/status` include the same additive `build` object with
 the product version, HA image version, product and packaging revisions, and

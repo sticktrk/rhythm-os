@@ -20,9 +20,16 @@ cargo build -p rhythm-addon           # Build the HA add-on binary
 
 ## Testing
 
+During development, run the narrowest test for the change. Do not run the
+workspace suite until a final check before a pull request. CI runs that suite.
+
+```text
+cargo test -p <crate> <filter>
+```
+
 ```bash
-cargo test                            # Run all workspace tests
-cargo test -p rhythm-core solar       # Filter by crate + test name
+cargo test -p rhythm-core solar                    # Example filter
+cargo test --workspace --all-targets --locked      # Final check only
 ```
 
 ## Code style
@@ -32,12 +39,13 @@ Recommended local checks:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets
-cargo test
 ```
 
 Run `cargo fmt` to auto-fix formatting before committing.
 
-Current GitHub CI runs `cargo check` and `cargo test`. `fmt` and `clippy` are still good local gates before opening a PR.
+`fmt` and `clippy` are useful local gates. Run
+`cargo test --workspace --all-targets --locked` once before opening a pull
+request. CI runs that workspace suite.
 
 ## Making changes
 

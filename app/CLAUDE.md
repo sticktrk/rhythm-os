@@ -38,6 +38,22 @@ flutter pub get && flutter build web --release
 ./tools/app/scripts/build-mobile.sh --codegen --clean  # Regenerate FRB bindings
 ```
 
+## Tests
+
+During development, run one test file. Do not run the full Flutter or Dart
+suites until a single final check before a pull request.
+
+```text
+cd app/flutter/rhythm_app
+flutter test test/<file>_test.dart
+
+cd sdk
+dart test test/<file>_test.dart
+```
+
+`--name <test>` runs one test inside that file. Final check only: `flutter test`
+in `app/flutter/rhythm_app`, and `dart test` in `sdk`.
+
 ## Flutter Architecture
 
 ### rhythm_core (shared package)

@@ -103,11 +103,21 @@ Compile-check the runtime crates:
 cargo check -p rhythm-runtime-api -p rhythm-adaptive -p rhythm-os-runtime-modules
 ```
 
-Run runtime tests with:
+During development, test the crate you changed:
+
+```text
+cargo test -p <crate> <filter>
+```
+
+Running these runtime crates together is the final check when a change spans
+them:
 
 ```sh
 cargo test -p rhythm-runtime-api -p rhythm-adaptive -p rhythm-os-runtime-modules
 ```
+
+The repository suite, `cargo test --workspace --all-targets --locked`, is a
+final check before a pull request. CI runs that command.
 
 Format with:
 
@@ -115,8 +125,8 @@ Format with:
 cargo fmt --all
 ```
 
-The module bundle is part of the same workspace as the OS binaries, so full
-product checks include it naturally:
+The module bundle is part of the same workspace as the OS binaries, so a
+binary compile check includes it:
 
 ```sh
 cargo check -p rhythm-server -p rhythm-addon -p rhythm-linux-appliance
