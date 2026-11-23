@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -13,7 +14,6 @@ REMOTE="origin"
 UPDATES_BASE_URL="${RHYTHM_UPDATES_PUBLIC_BASE_URL:-https://dl.rhythm.lighting/server}"
 DEVICE=""
 TOKEN_FILE=""
-DEVICE_TOKEN="${RHYTHM_DEVICE_TOKEN:-}"
 SCENARIO="smoke"
 RECEIPT=""
 WAIT_SECONDS=0
@@ -34,7 +34,7 @@ Options:
   --remote NAME           Git remote containing the beta tag (default: origin).
   --updates-base-url URL  OTA base URL (default: $UPDATES_BASE_URL).
   --device URL            Device base URL, for example http://192.168.1.20:54448.
-  --token-file FILE       Read the device bearer token from FILE.
+  --token-file FILE       Read a scoped hub assistant bearer from FILE.
                           RHYTHM_DEVICE_TOKEN is also supported.
   --scenario NAME         smoke, state, onboarding, or ota (default: smoke).
   --journey-id ID         Reuse this value as X-Request-Id across device checks.
@@ -174,7 +174,6 @@ if [ -n "$TOKEN_FILE" ]; then
         echo "Error: token file is not readable: $TOKEN_FILE" >&2
         exit 1
     }
-    DEVICE_TOKEN="$(sed -n '1p' "$TOKEN_FILE")"
 fi
 
 DEVICE="${DEVICE%/}"
@@ -183,7 +182,11 @@ MANIFEST_URL="${UPDATES_BASE_URL%/}/rpiz/manifest.json"
 echo "Beta verification plan"
 echo "  Tag:      $BETA_TAG ($LOCAL_COMMIT)"
 echo "  Manifest: $MANIFEST_URL"
-echo "  Device:   ${DEVICE:-(feed only)}"
+if [ -n "$DEVICE" ]; then
+    echo "  Device:   selected hub MCP endpoint"
+else
+    echo "  Device:   feed only"
+fi
 echo "  Scenario: $SCENARIO"
 echo "  Journey:  $JOURNEY_ID"
 echo "  Receipt:  $RECEIPT"
@@ -225,89 +228,21 @@ while true; do
 done
 
 WARNINGS_JSON='[]'
-DEVICE_JSON='null'
+DEVICE_FILE="$TMP_DIR/device.json"
+printf '%s\n' null > "$DEVICE_FILE"
 
-request_json() {
-    endpoint="$1"
-    output="$2"
-    curl_args=(
-        -sS
-        --max-time 30
-        -o "$output"
-        -w '%{http_code}'
-        -H "X-Request-Id: $JOURNEY_ID"
-    )
-    if [ -n "$DEVICE_TOKEN" ]; then
-        curl_args+=( -H "Authorization: Bearer $DEVICE_TOKEN" )
-    fi
-    code="$(curl "${curl_args[@]}" "$DEVICE$endpoint")"
-    case "$code" in
-        2??)
-            ;;
-        *)
-            echo "Error: device request $endpoint returned HTTP $code" >&2
-            exit 1
-            ;;
-    esac
-    jq -e . "$output" >/dev/null 2>&1 || {
-        echo "Error: device request $endpoint did not return JSON" >&2
-        exit 1
-    }
-}
-
+RESULT=verified
 if [ -n "$DEVICE" ]; then
-    HEALTH_FILE="$TMP_DIR/health.json"
-    OTA_FILE="$TMP_DIR/ota.json"
-    STATE_FILE="$TMP_DIR/state.json"
-    AUTH_FILE="$TMP_DIR/auth.json"
-    REMOTE_FILE="$TMP_DIR/remote.json"
-
-    request_json "/health" "$HEALTH_FILE"
-    [ "$(jq -r '.status // empty' "$HEALTH_FILE")" = "healthy" ] || {
-        echo "Error: device health response is not healthy" >&2
-        exit 1
-    }
-
-    request_json "/api/ota/status" "$OTA_FILE"
-    INSTALLED_VERSION="$(jq -r '.current_package_version // .current_version // empty' "$OTA_FILE")"
-    if [ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]; then
-        echo "Error: device package version is $INSTALLED_VERSION, expected $EXPECTED_VERSION" >&2
-        exit 1
+    require_command python3
+    device_args=(--device "$DEVICE" --scenario "$SCENARIO" --expected "$EXPECTED_VERSION" --journey-id "$JOURNEY_ID")
+    if [ -n "$TOKEN_FILE" ]; then
+        device_args+=(--token-file "$TOKEN_FILE")
     fi
-    if [ "$(jq -r '.state // empty' "$OTA_FILE")" = "failed" ]; then
-        echo "Error: device OTA state is failed: $(jq -r '.last_error // .message // "unknown"' "$OTA_FILE")" >&2
-        exit 1
+    python3 "$SCRIPT_DIR/verify_mcp_device.py" "${device_args[@]}" > "$DEVICE_FILE"
+    if [ "$SCENARIO" = onboarding ]; then
+        RESULT=awaiting_owner_verification
+        WARNINGS_JSON='["Owner must verify enrollment and remote access in the selected home."]'
     fi
-
-    STATE_JSON='null'
-    AUTH_JSON='null'
-    REMOTE_JSON='null'
-    case "$SCENARIO" in
-        state)
-            request_json "/api/state?authoritative=true" "$STATE_FILE"
-            STATE_JSON="$(jq -c . "$STATE_FILE")"
-            ;;
-        onboarding)
-            request_json "/api/state?authoritative=true" "$STATE_FILE"
-            request_json "/api/auth/status" "$AUTH_FILE"
-            request_json "/api/remote-access/status" "$REMOTE_FILE"
-            STATE_JSON="$(jq -c . "$STATE_FILE")"
-            AUTH_JSON="$(jq -c . "$AUTH_FILE")"
-            REMOTE_JSON="$(jq -c . "$REMOTE_FILE")"
-            ;;
-        smoke|ota)
-            ;;
-    esac
-
-    DEVICE_JSON="$(jq -n \
-        --arg url "$DEVICE" \
-        --arg scenario "$SCENARIO" \
-        --slurpfile health "$HEALTH_FILE" \
-        --slurpfile ota "$OTA_FILE" \
-        --argjson state "$STATE_JSON" \
-        --argjson auth "$AUTH_JSON" \
-        --argjson remote "$REMOTE_JSON" \
-        '{url:$url, scenario:$scenario, health:$health[0], ota:$ota[0], state:$state, auth:$auth, remote_access:$remote}')"
 else
     WARNINGS_JSON='["live device not checked"]'
 fi
@@ -315,19 +250,24 @@ fi
 mkdir -p "$(dirname "$RECEIPT")"
 RECEIPT_TMP="$RECEIPT.tmp.$$"
 jq -n \
-    --arg schema_version "1" \
+    --arg result "$RESULT" \
+    --arg schema_version "2" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg journey_id "$JOURNEY_ID" \
     --arg beta_tag "$BETA_TAG" \
     --arg commit "$LOCAL_COMMIT" \
     --arg manifest_url "$MANIFEST_URL" \
     --slurpfile manifest "$MANIFEST_FILE" \
-    --argjson device "$DEVICE_JSON" \
+    --slurpfile device "$DEVICE_FILE" \
     --argjson warnings "$WARNINGS_JSON" \
-    '{schema_version:($schema_version|tonumber), generated_at:$generated_at, journey_id:$journey_id, beta_tag:$beta_tag, commit:$commit, manifest_url:$manifest_url, manifest:$manifest[0], device:$device, warnings:$warnings, result:"verified"}' \
+    '{schema_version:($schema_version|tonumber), generated_at:$generated_at, journey_id:$journey_id, beta_tag:$beta_tag, commit:$commit, manifest_url:$manifest_url, manifest:$manifest[0], device:$device[0], warnings:$warnings, result:$result}' \
     > "$RECEIPT_TMP"
 mv "$RECEIPT_TMP" "$RECEIPT"
 
+if [ "$RESULT" = awaiting_owner_verification ]; then
+    echo "Hub version verified. Onboarding needs owner verification. Receipt: $RECEIPT" >&2
+    exit 1
+fi
 echo "Verified $BETA_TAG against the public beta feed."
 if [ -n "$DEVICE" ]; then
     echo "Verified device package $EXPECTED_VERSION for scenario $SCENARIO."

@@ -133,5 +133,4 @@ echo "respawned; version:"
 REMOTE
 
 echo ""
-echo "Done. Tail logs with:"
-echo "  ssh $SSH_DEST 'tail -f /var/log/rhythm-server.log'"
+echo "After restart, connect to the bench hub MCP endpoint and call read_hub_status to verify its installation and running version."

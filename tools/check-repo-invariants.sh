@@ -38,7 +38,7 @@ CHECK
 python3 -m unittest tools/tests/test_prepare_supabase_workdir.py
 bash tools/app/scripts/tests/deploy-supabase-functions-test.sh
 bash tools/app/scripts/tests/deploy-supabase-test.sh
-python3 -m unittest tools/tests/test_release_publication.py
+python3 -m unittest tools/tests/test_release_publication.py tools/tests/test_mcp_beta_verification.py
 python3 -m unittest tools/tests/test_testflight_build.py
 python3 tools/config/test_rhythm_env.py
 python3 tools/app/scripts/tests/testflight-version-test.py
