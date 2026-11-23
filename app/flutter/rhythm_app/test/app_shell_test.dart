@@ -528,7 +528,7 @@ void main() {
     await tester.tap(find.text('Rhythm Pro'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Free during preview'), findsOneWidget);
+    expect(find.text('FREE DURING PREVIEW'), findsOneWidget);
     expect(find.text('Connect your Rhythm account'), findsOneWidget);
     expect(find.text('Lighting assistant'), findsOneWidget);
     expect(find.text('Remote access tunnel'), findsOneWidget);

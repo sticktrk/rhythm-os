@@ -45,10 +45,10 @@ void main() {
     }, () {});
   });
   Future<void> open(WidgetTester tester,
-      {Future<LightingChatHub?> Function(bool)? connect}) async {
+      {Future<LightingChatHub> Function({bool reconnect})? connect}) async {
     await tester.pumpWidget(MaterialApp(
         home: LightingChatScreen(
-      openHub: connect ?? (_) async => hub,
+      openHub: connect ?? ({bool reconnect = false}) async => hub,
       current: () => account.value,
       changes: account,
       local: true,
@@ -68,6 +68,7 @@ void main() {
     await open(tester);
     await tester.enterText(
         find.byType(TextField), 'A warmer glow for reading, please');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send message'));
     await tester.pumpAndSettle();
     expect(calls.map((c) => c.$1), ['explain_room_output']);
@@ -98,6 +99,7 @@ void main() {
     final pending = Completer<CustomerAction>();
     reply = () => pending.future;
     await tester.enterText(find.byType(TextField), 'Softer for a movie');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send message'));
     await tester.pump();
     account.value = false;
@@ -110,19 +112,19 @@ void main() {
     expect(find.text('Apply to room'), findsNothing);
   });
   testWidgets(
-      'pairing is explicit and older offline hubs retain guided fallback',
+      'revoked access needs an intentional reconnect, then the composer opens',
       (tester) async {
-    final enrollment = <bool>[];
-    await open(tester, connect: (enroll) async {
-      enrollment.add(enroll);
-      if (enroll) throw UnsupportedError('older hub');
-      return null;
+    final attempts = <bool>[];
+    await open(tester, connect: ({bool reconnect = false}) async {
+      attempts.add(reconnect);
+      if (!reconnect) throw LightingChatAccessIssue.revoked;
+      return hub;
     });
-    expect(enrollment, [false]);
-    await tester.tap(find.text('Connect lighting chat'));
+    expect(attempts, [false]);
+    await tester.tap(find.text('Reconnect chat'));
     await tester.pumpAndSettle();
-    expect(enrollment, [false, true]);
-    expect(find.text('Open guided tools'), findsOneWidget);
+    expect(attempts, [false, true]);
+    expect(find.byType(TextField), findsOneWidget);
     expect(turns, isEmpty);
   });
   testWidgets(
@@ -144,6 +146,7 @@ void main() {
     expect(find.text('Apply to room'), findsNothing);
     reply = () async => {'text': 'The hub target is 2800 K.'};
     await tester.enterText(find.byType(TextField), 'What is it set to now?');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send message'));
     await tester.pumpAndSettle();
     expect(calls.map((c) => c.$1),
@@ -177,6 +180,96 @@ void main() {
     expect(calls.last.$1, 'undo_room_trial');
     expect(calls.last.$2, {'room_id': room.id, 'trial_id': 'local-trial'});
     expect(jsonEncode(turns), isNot(contains('local-trial')));
+  });
+
+  testWidgets(
+      'multi-room chat opens on a small phone, answers without a room and carries a named target across follow-ups',
+      (tester) async {
+    tester.view.physicalSize = const Size(375, 667);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const office = RhythmTopologyNode(
+        id: 'office-id', name: 'Office', kind: RhythmNodeKind.room);
+    hub = LightingChatHub([room, office], tools, (op, args) async {
+      calls.add((op, args));
+      return {'room_id': args['room_id'], 'canonical_kelvin': 3200};
+    }, () {});
+    await open(tester);
+    Future<void> send(String text) async {
+      await tester.enterText(find.byType(TextField), text);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    expect(find.text('Choose a room'), findsNothing);
+    reply = () async => {'text': 'Warmer lighting has a lower Kelvin target.'};
+    await send('How does warmth work?');
+    expect(turns.single['scope'], 'unresolved');
+    expect(turns.single['tools'], isEmpty);
+    expect(calls, isEmpty);
+    reply = () async => {'rooms': 'clarify'};
+    await send('Make it warmer');
+    expect(find.widgetWithText(ActionChip, 'Office'), findsOneWidget);
+    reply = () async => plan;
+    await tester.tap(find.widgetWithText(ActionChip, 'Office'));
+    await tester.pumpAndSettle();
+    expect(turns.last['scope'], 'clarified');
+    expect((turns.last['messages'] as List).last['text'], 'Make it warmer');
+    expect(jsonEncode(turns.last), isNot(contains('Office')));
+    expect(calls.last.$2['room_id'], 'office-id');
+    await tester.ensureVisible(find.text('Skip'));
+    await tester.tap(find.text('Skip'));
+    await tester.pumpAndSettle();
+    await send('Make the private kitchen warmer');
+    expect(turns.last['scope'], 'mentioned');
+    expect(calls.last.$2['room_id'], room.id);
+    await tester.ensureVisible(find.text('Skip'));
+    await tester.tap(find.text('Skip'));
+    await tester.pumpAndSettle();
+    reply = () async => {'text': 'The target is 3200 K.'};
+    await send('What is it set to now?');
+    expect(turns.last['scope'], 'continuing');
+    expect(calls.last.$2['room_id'], room.id);
+    await tester.drag(find.byType(ListView), const Offset(0, 1800));
+    await tester.pumpAndSettle();
+    expect(find.text('How does warmth work?'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'typing a room answer resumes the original request and an unresolved turn cannot write',
+      (tester) async {
+    const kitchen =
+        RhythmTopologyNode(id: 'k', name: 'Kitchen', kind: RhythmNodeKind.room);
+    const kitchenette = RhythmTopologyNode(
+        id: 'kn', name: 'Kitchen Nook', kind: RhythmNodeKind.room);
+    hub = LightingChatHub([kitchen, kitchenette], tools, (op, args) async {
+      calls.add((op, args));
+      return {'room_id': args['room_id']};
+    }, () {});
+    expect(hub.mentionedRooms('Warm the KITCHEN nook.'), [kitchenette]);
+    expect(hub.mentionedRooms('Compare kitchen nook and kitchen.'),
+        [kitchen, kitchenette]);
+    await open(tester);
+    Future<void> send(String prompt) async {
+      await tester.enterText(find.byType(TextField), prompt);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    await send('Try a warmer light');
+    expect(find.text('Apply to room'), findsNothing);
+    expect(calls, isEmpty);
+    reply = () async => {'rooms': 'clarify'};
+    await send('Set my lights to 2800 K');
+    reply = () async => plan;
+    await send('The kitchen nook, please');
+    expect(turns.last['scope'], 'clarified');
+    expect((turns.last['messages'] as List).last['text'],
+        'Set my lights to 2800 K');
+    expect(calls.single.$2['room_id'], kitchenette.id);
+    expect(find.text('Apply to room'), findsOneWidget);
   });
 
   test('model cannot supply a room ID, unknown tool or invalid Kelvin', () {

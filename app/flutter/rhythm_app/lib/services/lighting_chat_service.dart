@@ -7,7 +7,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'customer_assistant_service.dart';
 
 /// A tool call the phone can display completely before dispatch. Room identity
-/// always comes from the picker, never from the model.
+/// always comes from the current hub topology, never from the model.
 class LightingProposal {
   LightingProposal._(this.operation, this.arguments, this.label, this.detail);
   final String operation, label, detail;
@@ -87,6 +87,38 @@ class LightingChatHub {
   final Set<String> tools;
   final Future<CustomerAction> Function(String, CustomerAction) call;
   final void Function() close;
+
+  static String words(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^\p{L}\p{N}]+', unicode: true), ' ')
+      .trim();
+
+  /// Match whole room names on the device. Claim longer names first so that
+  /// "main bedroom" does not also select a separate room called "bedroom".
+  List<RhythmTopologyNode> mentionedRooms(String message) {
+    var remaining = ' ${words(message)} ';
+    final names = rooms
+        .map((room) => words(room.name))
+        .where((n) => n.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    final found = <String>{};
+    for (final name in names) {
+      final phrase = ' $name ';
+      if (remaining.contains(phrase)) {
+        found.add(name);
+        remaining = remaining.replaceAll(phrase, ' ');
+      }
+    }
+    return rooms.where((room) => found.contains(words(room.name))).toList();
+  }
+}
+
+enum LightingChatAccessIssue implements Exception {
+  localNetwork,
+  owner,
+  revoked
 }
 
 class LightingChatConnection {
@@ -112,30 +144,80 @@ class LightingChatConnection {
     if (!current()) throw StateError('Hub or account changed');
   }
 
-  Future<LightingChatHub?> open(bool enroll) async {
+  // A double tap or a second route can open the same room while the hub
+  // is issuing access. Share only issuance, never the MCP client or its scope.
+  static final _issuing = <String, Future<String>>{};
+
+  Future<String> _issue(String? previous) async {
     _check();
-    var stored = await _storage.read(key: _key);
+    if (!local) throw LightingChatAccessIssue.localNetwork;
+    if (ownerToken?.isNotEmpty != true) throw LightingChatAccessIssue.owner;
+    final active = _issuing[_key];
+    if (active != null) return active;
+    final pending = _issueOnce(previous);
+    _issuing[_key] = pending;
+    try {
+      return await pending;
+    } finally {
+      _issuing.remove(_key);
+    }
+  }
+
+  Future<String> _issueOnce(String? previous) async {
+    final stored = await _storage.read(key: _key);
     _check();
-    if (stored == null) {
-      if (!enroll) return null;
-      if (!local || ownerToken?.isNotEmpty != true) {
-        throw StateError('Local owner access required');
-      }
-      final auth = RhythmAuthApi(baseUrl: baseUrl, authToken: ownerToken);
+    if (stored != null && stored != previous) return stored;
+    final auth = RhythmAuthApi(baseUrl: baseUrl, authToken: ownerToken);
+    try {
       final issued = await auth.createAgentCredential();
       try {
         _check();
-        stored = jsonEncode({'id': issued.id, 'token': issued.token});
-        await _storage.write(key: _key, value: stored);
+        final entry = jsonEncode({'id': issued.id, 'token': issued.token});
+        await _storage.write(key: _key, value: entry);
+        // Restore the prior revoked entry if the resident left during storage.
+        if (!current()) {
+          if (stored == null) {
+            await _storage.delete(key: _key);
+          } else {
+            await _storage.write(key: _key, value: stored);
+          }
+          throw StateError('Hub or account changed');
+        }
+        return entry;
       } catch (_) {
         await auth.revokeAgentCredential(issued.id);
         rethrow;
       }
+    } on DioException catch (error) {
+      if ([401, 403].contains(error.response?.statusCode)) {
+        throw LightingChatAccessIssue.owner;
+      }
+      rethrow;
     }
+  }
+
+  Future<LightingChatHub> open({bool reconnect = false}) async {
     _check();
-    final entry = jsonDecode(stored) as Map;
-    final mcp =
-        RhythmMcpApi(baseUrl: baseUrl, agentToken: entry['token'] as String);
+    final stored = await _storage.read(key: _key);
+    _check();
+    final entry = stored ?? await _issue(null);
+    try {
+      return await _discover(entry);
+    } on DioException catch (error) {
+      if (error.response?.statusCode != 401) rethrow;
+      // Keep a rejected credential until the resident explicitly reconnects.
+      // Reopening the screen should respect an owner's revocation.
+      if (!reconnect || stored == null || !local) {
+        throw LightingChatAccessIssue.revoked;
+      }
+      return _discover(await _issue(stored));
+    }
+  }
+
+  Future<LightingChatHub> _discover(String entry) async {
+    _check();
+    final token = (jsonDecode(entry) as Map)['token'] as String;
+    final mcp = RhythmMcpApi(baseUrl: baseUrl, agentToken: token);
     try {
       final tools = await mcp.discover();
       _check();
@@ -153,15 +235,8 @@ class LightingChatConnection {
         _check();
         return result;
       }, mcp.close, canUndo: tools.contains('undo_room_trial'));
-    } catch (e) {
+    } catch (_) {
       mcp.close();
-      if (e is DioException &&
-          e.response?.statusCode == 401 &&
-          current() &&
-          local) {
-        // A local owner can explicitly pair again after revocation.
-        await _storage.delete(key: _key);
-      }
       rethrow;
     }
   }

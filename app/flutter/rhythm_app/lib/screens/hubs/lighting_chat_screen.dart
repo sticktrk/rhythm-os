@@ -8,6 +8,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 
 import '../../providers/home_provider.dart';
+import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/auth_service.dart';
@@ -15,7 +16,10 @@ import '../../services/customer_assistant_service.dart';
 import '../../services/lighting_chat_service.dart';
 import '../../utils/app_color_temperature.dart';
 import '../settings/dialogs/sign_in_modal.dart';
-import 'customer_assistant_screen.dart';
+import '../../widgets/assistant_chat_widgets.dart';
+import '../../widgets/connect_hub_screen.dart';
+import '../../widgets/solar_orbit.dart' show CelestialColors;
+import 'assistant_chat_screen.dart';
 
 class LightingChatScreen extends StatefulWidget {
   const LightingChatScreen(
@@ -25,35 +29,48 @@ class LightingChatScreen extends StatefulWidget {
       required this.current,
       required this.changes,
       required this.local,
-      required this.guided});
-  final Future<LightingChatHub?> Function(bool enroll) openHub;
+      required this.guided,
+      this.pairPhone,
+      this.initialRoomId});
+  final Future<LightingChatHub> Function({bool reconnect}) openHub;
   final CustomerAssistantService account;
   final bool Function() current;
   final Listenable changes;
   final bool local;
   final VoidCallback guided;
+  final String? initialRoomId;
+  final Future<void> Function()? pairPhone;
 
   static Future<void> show(BuildContext context) async {
+    if (CustomerAssistantService.signedIn() == null) {
+      await SignInModal.show(context, returnToCaller: true);
+      if (!context.mounted) return;
+    }
     final account = CustomerAssistantService.signedIn();
     final user = AuthService().currentUserId;
-    if (account == null || user == null) {
-      SignInModal.show(context);
-      return;
-    }
+    if (account == null || user == null) return;
+
     final homes = context.read<HomeProvider>(),
         sync = context.read<ServerSyncProvider>();
-    final hub = homes.activeServerHub, endpoint = sync.activeConnectionEndpoint;
-    final instance = sync.connectedServerInstanceId;
-    if (hub == null ||
-        endpoint == null ||
-        instance == null ||
-        !sync.connection.connected ||
-        sync.connectedServerHub?.id != hub.id ||
-        sync.connectedServerHub?.homeId != hub.homeId) {
-      await CustomerAssistantScreen.show(context,
-          account: account, openHubChat: LightingChatScreen.show);
-      return;
+    bool connected() {
+      final hub = homes.activeServerHub;
+      return hub != null &&
+          sync.connection.connected &&
+          sync.connectedServerHub?.id == hub.id &&
+          sync.connectedServerHub?.homeId == hub.homeId &&
+          sync.activeConnectionEndpoint != null &&
+          sync.connectedServerInstanceId != null;
     }
+
+    if (!connected()) {
+      await ConnectHubScreen.show(context);
+      if (!context.mounted || !account.isCurrentAccount() || !connected()) {
+        return;
+      }
+    }
+    final hub = homes.activeServerHub!,
+        endpoint = sync.activeConnectionEndpoint!;
+    final instance = sync.connectedServerInstanceId!;
     final direct = DirectHubAccess.capture();
     bool current() =>
         account.isCurrentAccount() &&
@@ -66,25 +83,27 @@ class LightingChatScreen extends StatefulWidget {
         sync.connectedServerInstanceId == instance &&
         sync.activeConnectionEndpoint == endpoint;
     final local = endpoint == hub.endpoint;
-    final connection = LightingChatConnection(
-        baseUrl: endpoint.baseUrl,
-        ownerToken: hub.token,
-        local: local,
-        accountId: user,
-        instance: instance,
-        current: current);
+    final initialRoomId = context.read<RoomProvider>().currentRoom?.id;
     await Navigator.push<void>(
         context,
         MaterialPageRoute(
             builder: (ctx) => LightingChatScreen(
-                  openHub: connection.open,
+                  openHub: ({bool reconnect = false}) => LightingChatConnection(
+                    baseUrl: endpoint.baseUrl,
+                    ownerToken: homes.activeServerHub?.token,
+                    local: local,
+                    accountId: user,
+                    instance: instance,
+                    current: () => ctx.mounted && current(),
+                  ).open(reconnect: reconnect),
+                  initialRoomId: initialRoomId,
+                  pairPhone: () => ConnectHubScreen.show(ctx),
                   current: current,
                   local: local,
                   account: account,
                   changes:
                       Listenable.merge([homes, sync, DirectHubAccess.changes]),
-                  guided: () =>
-                      CustomerAssistantScreen.show(ctx, account: account),
+                  guided: () => AssistantChatScreen.show(ctx, account: account),
                 )));
   }
 
@@ -94,12 +113,14 @@ class LightingChatScreen extends StatefulWidget {
 
 class _LightingChatState extends State<LightingChatScreen> {
   final _input = TextEditingController(), _scroll = ScrollController();
-  final _messages = <({bool resident, String text})>[];
+  final _messages = <({bool resident, String text, bool share})>[];
+  List<RhythmTopologyNode> _choices = [];
   StreamSubscription<void>? _accountSub;
   LightingChatHub? _hub;
   RhythmTopologyNode? _room;
   LightingProposal? _proposal;
-  String? _issue, _trial;
+  Object? _issue;
+  String? _trial;
   CustomerAction _reading = {};
   bool _busy = false, _ended = false;
   bool get _active =>
@@ -113,7 +134,7 @@ class _LightingChatState extends State<LightingChatScreen> {
     super.initState();
     widget.changes.addListener(_check);
     _accountSub = widget.account.accountChanges.listen((_) => _check());
-    _connect(false);
+    _connect();
   }
 
   void _check() {
@@ -138,42 +159,51 @@ class _LightingChatState extends State<LightingChatScreen> {
     super.dispose();
   }
 
-  Future<void> _connect(bool enroll) async {
+  Future<void> _connect({bool reconnect = false}) async {
     if (!_active || _busy) return;
     setState(() {
       _busy = true;
       _issue = null;
     });
     try {
-      final hub = await widget.openHub(enroll);
+      final hub = await widget.openHub(reconnect: reconnect);
       if (!_active) {
-        hub?.close();
+        hub.close();
         return;
       }
       setState(() {
         _hub = hub;
-        if (hub?.rooms.length == 1) _room = hub!.rooms.single;
+        _room = hub.rooms.length == 1
+            ? hub.rooms.single
+            : hub.rooms.where((r) => r.id == widget.initialRoomId).firstOrNull;
       });
     } catch (error) {
-      if (_active) {
-        setState(() => _issue = switch (error) {
-              DioException(response: final r) when r?.statusCode == 403 => widget
-                      .local
-                  ? 'Pair this phone locally using the hub owner account.'
-                  : 'Remote MCP must be enabled on this hub to chat away from home.',
-              DioException(response: final r) when r?.statusCode == 401 =>
-                'Chat access has expired. Reconnect locally to pair this phone.',
-              _ =>
-                'Could not open lighting chat on this hub. Check its connection and MCP support, or use Guided tools.',
-            });
-      }
+      if (_active) setState(() => _issue = error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  void _append(String text, {bool resident = false}) {
-    _messages.add((resident: resident, text: text));
+  bool _lostAccess(Object error) {
+    if (error is! DioException) return false;
+    final status = error.response?.statusCode;
+    if (status != 401 && !(status == 403 && !widget.local)) return false;
+    setState(() {
+      _issue = status == 401 ? LightingChatAccessIssue.revoked : error;
+      _hub?.close();
+      _hub = null;
+      _room = null;
+      _proposal = null;
+      _trial = null;
+      _choices.clear();
+      _messages.clear();
+      _input.clear();
+    });
+    return true;
+  }
+
+  void _append(String text, {bool resident = false, bool share = true}) {
+    _messages.add((resident: resident, text: text, share: share));
     _showLatest();
   }
 
@@ -185,40 +215,100 @@ class _LightingChatState extends State<LightingChatScreen> {
     });
   }
 
-  Future<void> _send(String message) async {
-    final hub = _hub, room = _room, prompt = message.trim();
+  String _label(RhythmTopologyNode room) {
+    if (room.name.isEmpty) return room.id;
+    final duplicate =
+        _hub!.rooms.any((r) => r.id != room.id && r.name == room.name);
+    return duplicate ? '${room.name} (${room.id})' : room.name;
+  }
+
+  void _askRoom(List<RhythmTopologyNode> rooms) {
+    _choices = rooms;
+    _append(
+        rooms.isEmpty
+            ? 'Your hub has no rooms yet. Add a room to control its lights.'
+            : 'Which room should I use for that?',
+        share: false);
+  }
+
+  Future<void> _send(String message, {RhythmTopologyNode? choice}) async {
+    final hub = _hub, prompt = message.trim();
     if (!_active ||
         _busy ||
         hub == null ||
-        room == null ||
         prompt.isEmpty ||
-        prompt.length > 1000 ||
+        (choice == null && prompt.length > 1000) ||
         _proposal != null) {
       return;
     }
+    final matches = hub.mentionedRooms(prompt);
+    // A typed room answer resumes the outstanding request just like a tap.
+    if (choice == null && _choices.isNotEmpty && matches.length == 1) {
+      final answer = LightingChatHub.words(prompt)
+          .replaceFirst(RegExp(r'^the '), '')
+          .replaceFirst(RegExp(r' please$'), '');
+      if (_choices.contains(matches.single) &&
+          (answer == LightingChatHub.words(matches.single.name) ||
+              LightingChatHub.words(prompt) ==
+                  LightingChatHub.words(matches.single.name))) {
+        choice = matches.single;
+      }
+    }
+    final room =
+        choice ?? (matches.length > 1 ? null : matches.firstOrNull ?? _room);
+    final scope = choice != null
+        ? 'clarified'
+        : matches.length == 1
+            ? 'mentioned'
+            : room == null
+                ? 'unresolved'
+                : 'continuing';
     setState(() {
       _input.clear();
+      _choices = [];
+      _append(prompt, resident: true, share: choice == null);
+      if (room != null && room.id != _room?.id) {
+        _trial = null;
+        _room = room;
+      }
       _busy = true;
-      _append(prompt, resident: true);
     });
     var outcome = LightingChatOutcome.hubUnavailable;
     try {
-      final current =
-          await hub.call('explain_room_output', {'room_id': room.id});
-      if (!_active) return;
-      if (current['room_id'] != room.id) throw StateError('Room changed');
+      CustomerAction current = {};
+      if (room != null) {
+        current = await hub.call('explain_room_output', {'room_id': room.id});
+        if (!_active) return;
+        if (current['room_id'] != room.id) throw StateError('Room changed');
+      }
       outcome = LightingChatOutcome.modelUnavailable;
+      final history = _messages.where((m) => m.share).toList();
       final result = await widget.account.lightingChat({
         'messages': [
-          for (final m in _messages
-              .skip(_messages.length > 8 ? _messages.length - 8 : 0))
+          for (final m
+              in history.skip(history.length > 8 ? history.length - 8 : 0))
             {'role': m.resident ? 'user' : 'assistant', 'text': m.text}
         ],
-        'tools': hub.tools.toList(),
+        'scope': scope,
+        'tools': room == null ? <String>[] : hub.tools.toList(),
         'room': lightingReading(current),
       });
       if (!_active) return;
-      if (result['operation'] != null) {
+      if (result['rooms'] == 'clarify') {
+        setState(() => _askRoom(matches.length > 1 ? matches : hub.rooms));
+        outcome = LightingChatOutcome.reply;
+      } else if (result['rooms'] == 'list') {
+        setState(() => _append(
+            hub.rooms.isEmpty
+                ? 'Your hub has no rooms yet.'
+                : 'Your rooms are ${hub.rooms.map(_label).join(', ')}.',
+            share: false));
+        outcome = LightingChatOutcome.reply;
+      } else if (result['operation'] != null) {
+        if (room == null) {
+          throw const FormatException(
+              'A lighting change requires a resolved room');
+        }
         final proposal = LightingProposal.parse(result, hub.tools);
         setState(() {
           _proposal = proposal;
@@ -236,6 +326,9 @@ class _LightingChatState extends State<LightingChatScreen> {
       }
     } catch (e) {
       if (_active) {
+        if (outcome == LightingChatOutcome.hubUnavailable && _lostAccess(e)) {
+          return;
+        }
         setState(() => _append(switch (e) {
               FunctionException(status: 429) =>
                 'You’ve reached today’s chat preview limit. Guided tools are still available.',
@@ -318,8 +411,9 @@ class _LightingChatState extends State<LightingChatScreen> {
             : 'Fresh readings from $fresh of ${lights.length} managed lights.',
       ].join(' ');
       setState(() => _append(receipt));
-    } catch (_) {
+    } catch (error) {
       if (_active) {
+        if (sent && _lostAccess(error)) return;
         setState(() => _append(sent
             ? 'The result is uncertain. Ask what the lights are doing to read the room again.'
             : 'Sign in again to make changes. The request stopped before reaching the hub.'));
@@ -329,9 +423,59 @@ class _LightingChatState extends State<LightingChatScreen> {
     }
   }
 
+  Widget _connectionHelp() {
+    final (message, action, callback) = switch (_issue) {
+      LightingChatAccessIssue.owner => (
+          'Pair this phone as the hub owner on your home Wi-Fi to start chatting.',
+          'Pair this phone',
+          widget.pairPhone == null
+              ? null
+              : () async {
+                  await widget.pairPhone!();
+                  if (_active) await _connect();
+                }
+        ),
+      LightingChatAccessIssue.revoked when widget.local => (
+          'Chat access for this phone has ended. Reconnect to use it again.',
+          'Reconnect chat',
+          () => _connect(reconnect: true)
+        ),
+      LightingChatAccessIssue.localNetwork ||
+      LightingChatAccessIssue.revoked =>
+        (
+          'Open chat on your home Wi-Fi to connect this phone to your hub.',
+          'Check connection',
+          () => _connect()
+        ),
+      DioException(response: final r)
+          when r?.statusCode == 403 && !widget.local =>
+        (
+          'To chat away from home, turn on Remote MCP in Rhythm Pro on your home Wi-Fi.',
+          'Check connection',
+          () => _connect()
+        ),
+      UnsupportedError() ||
+      FormatException() ||
+      DioException(response: Response(statusCode: 404)) =>
+        (
+          'Update your hub to use lighting chat. Guided tools are available now.',
+          'Open guided tools',
+          widget.guided
+        ),
+      _ => (
+          'Your hub couldn’t open chat. Check that it’s online, then try again.',
+          'Try again',
+          () => _connect()
+        ),
+    };
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      AssistantMessageBubble(resident: false, text: message),
+      OutlinedButton(onPressed: callback, child: Text(action)),
+    ]);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context), colors = theme.colorScheme;
     final hub = _hub, room = _room, proposal = _proposal;
     final enabled = _active && !_busy;
     final suggestions = <(IconData, String, String)>[
@@ -344,7 +488,7 @@ class _LightingChatState extends State<LightingChatScreen> {
         (
           Icons.brightness_6_outlined,
           'A little brighter',
-          'Make this room a little brighter.'
+          'Make the lights a little brighter.'
         ),
       if (hub?.tools.contains('adjust_room_warmth') == true)
         (
@@ -359,184 +503,119 @@ class _LightingChatState extends State<LightingChatScreen> {
           'Suggest a one-minute amber color preview.'
         ),
     ];
-    return Scaffold(
-        appBar: AppBar(title: const Text('Lighting assistant'), actions: [
-          if (_active)
-            IconButton(
-                tooltip: 'Guided tools',
-                onPressed: _busy ? null : widget.guided,
-                icon: const Icon(Icons.tune)),
-        ]),
-        body: SafeArea(
-            child: !_active
-                ? const Center(
-                    child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text(
-                            'Your account or hub changed. Open a new chat to continue.')))
-                : Center(
-                    child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 640),
-                        child: Column(children: [
-                          if (_busy) const LinearProgressIndicator(),
-                          if (hub != null && hub.rooms.isNotEmpty)
-                            Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 6),
-                                child: DropdownButtonFormField<String>(
-                                  initialValue: room?.id,
-                                  isExpanded: true,
-                                  decoration: const InputDecoration(
-                                      labelText: 'Room',
-                                      prefixIcon:
-                                          Icon(Icons.meeting_room_outlined)),
-                                  items: [
-                                    for (final r in hub.rooms)
-                                      DropdownMenuItem(
-                                          value: r.id,
-                                          child: Text(
-                                              r.name.isEmpty ? r.id : r.name,
-                                              overflow: TextOverflow.ellipsis))
-                                  ],
-                                  onChanged: !enabled
-                                      ? null
-                                      : (id) => setState(() {
-                                            if (_room?.id == id) return;
-                                            _room = hub.rooms
-                                                .firstWhere((r) => r.id == id);
-                                            _messages.clear();
-                                            _input.clear();
-                                            _proposal = null;
-                                            _trial = null;
-                                          }),
-                                )),
+    return RhythmAssistantPage(
+      title: 'Lighting assistant',
+      actions: [
+        if (_active)
+          PopupMenuButton<void Function()>(
+            tooltip: 'More options',
+            enabled: !_busy,
+            icon: const Icon(Icons.more_horiz),
+            onSelected: (action) => action(),
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                  value: widget.guided, child: const Text('Guided tools'))
+            ],
+          ),
+      ],
+      body: !_active
+          ? const Center(
+              child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                      'Your account or hub changed. Open a new chat to continue.')))
+          : Column(children: [
+              Expanded(
+                child: ListView(
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                    children: [
+                      if (hub == null && !_busy) _connectionHelp(),
+                      if (hub != null && _messages.isEmpty) ...[
+                        SizedBox(
+                            height: (MediaQuery.sizeOf(context).height * 0.12 -
+                                    MediaQuery.viewInsetsOf(context).bottom)
+                                .clamp(0.0, 96.0)),
+                        const Text('How should the light feel?',
+                            style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.w600,
+                                height: 1.2,
+                                color: CelestialColors.textPrimary)),
+                        const SizedBox(height: 14),
+                        Wrap(spacing: 8, runSpacing: 4, children: [
+                          for (final s in suggestions)
+                            ActionChip(
+                                avatar: Icon(s.$1),
+                                label: Text(s.$2),
+                                onPressed: enabled ? () => _send(s.$3) : null),
+                        ]),
+                        const SizedBox(height: 14),
+                        const Text(
+                            'Chat shares your messages and room readings with OpenAI. You review each lighting change.',
+                            style: TextStyle(
+                                color: CelestialColors.textSecondary,
+                                fontSize: 13,
+                                height: 1.45)),
+                      ],
+                      for (final m in _messages)
+                        AssistantMessageBubble(
+                            resident: m.resident, text: m.text),
+                      if (_choices.isNotEmpty)
+                        Wrap(spacing: 8, runSpacing: 4, children: [
+                          for (final r in _choices)
+                            ActionChip(
+                                label: Text(_label(r)),
+                                onPressed: enabled
+                                    ? () => _send(_label(r), choice: r)
+                                    : null),
+                        ]),
+                      if (_busy)
+                        Row(children: [
+                          const SizedBox.square(
+                              dimension: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2)),
+                          const SizedBox(width: 10),
                           Expanded(
-                              child: ListView(
-                                  controller: _scroll,
-                                  padding: const EdgeInsets.all(16),
-                                  children: [
-                                if (hub == null && !_busy) ...[
-                                  Text(
-                                      _issue ??
-                                          (widget.local
-                                              ? 'Connect lighting chat to this hub'
-                                              : 'Pair chat at home first'),
-                                      style: theme.textTheme.titleLarge),
-                                  const SizedBox(height: 12),
-                                  Text(widget.local
-                                      ? 'Chat sends your messages and room lighting readings to OpenAI. This phone uses a revocable credential to control the lights. You can manage access in the hub’s Assistant access settings.'
-                                      : 'Open this screen on the hub’s local network to connect this phone. Away from home, chat uses your enabled remote MCP connection.'),
-                                  const SizedBox(height: 16),
-                                  if (_issue != null || widget.local)
-                                    FilledButton(
-                                        onPressed: enabled
-                                            ? () => _connect(_issue == null)
-                                            : null,
-                                        child: Text(_issue == null
-                                            ? 'Connect lighting chat'
-                                            : 'Check connection')),
-                                  TextButton(
-                                      onPressed: widget.guided,
-                                      child: const Text('Open guided tools')),
-                                ],
-                                if (hub != null && _messages.isEmpty) ...[
-                                  Text(
-                                      room == null
-                                          ? (hub.rooms.isEmpty
-                                              ? 'No rooms found on this hub'
-                                              : 'Choose a room to start')
-                                          : 'How should the light feel?',
-                                      style: theme.textTheme.headlineSmall),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                      'Your messages and the selected room’s lighting readings are sent to OpenAI. You review each adjustment before it reaches your lights.'),
-                                  if (room != null)
-                                    Padding(
-                                        padding: const EdgeInsets.only(top: 16),
-                                        child: Wrap(
-                                            spacing: 8,
-                                            runSpacing: 8,
-                                            children: [
-                                              for (final s in suggestions)
-                                                ActionChip(
-                                                    avatar:
-                                                        Icon(s.$1, size: 18),
-                                                    label: Text(s.$2),
-                                                    onPressed: enabled
-                                                        ? () => _send(s.$3)
-                                                        : null),
-                                            ])),
-                                ],
-                                for (final m in _messages)
-                                  Align(
-                                      alignment: m.resident
-                                          ? Alignment.centerRight
-                                          : Alignment.centerLeft,
-                                      child: Container(
-                                        constraints:
-                                            const BoxConstraints(maxWidth: 480),
-                                        margin:
-                                            const EdgeInsets.only(bottom: 10),
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 14, vertical: 10),
-                                        decoration: BoxDecoration(
-                                            color: m.resident
-                                                ? colors.secondaryContainer
-                                                : colors.surfaceContainerHigh,
-                                            borderRadius:
-                                                BorderRadius.circular(16)),
-                                        child: SelectableText(m.text,
-                                            style: TextStyle(
-                                                color: m.resident
-                                                    ? colors
-                                                        .onSecondaryContainer
-                                                    : colors.onSurface)),
-                                      )),
-                                if (proposal != null)
-                                  _LightingReview(
-                                      proposal: proposal,
-                                      roomName: room!.name.isEmpty
-                                          ? room.id
-                                          : room.name,
-                                      reading: _reading,
-                                      apply: enabled ? () => _apply() : null,
-                                      skip: enabled
-                                          ? () => setState(() {
-                                                _proposal = null;
-                                                _append(
-                                                    'Skipped ${proposal.label}.');
-                                              })
-                                          : null),
-                                if (_trial != null && proposal == null)
-                                  Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: ActionChip(
-                                          label: const Text('Undo preview'),
-                                          onPressed: enabled
-                                              ? () => _apply(undo: true)
-                                              : null)),
-                              ])),
-                          if (room != null)
-                            Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                                child: TextField(
-                                  controller: _input,
-                                  enabled: enabled && proposal == null,
-                                  maxLength: 1000,
-                                  textInputAction: TextInputAction.send,
-                                  onSubmitted: _send,
-                                  decoration: InputDecoration(
-                                      hintText: 'Ask about this room…',
-                                      counterText: '',
-                                      suffixIcon: IconButton(
-                                          tooltip: 'Send message',
-                                          icon: const Icon(Icons.arrow_upward),
-                                          onPressed: enabled && proposal == null
-                                              ? () => _send(_input.text)
-                                              : null)),
-                                )),
-                        ])))));
+                              child: Semantics(
+                                  liveRegion: true,
+                                  child: Text(hub == null
+                                      ? 'Connecting to your hub…'
+                                      : 'Working…'))),
+                        ]),
+                      if (proposal != null)
+                        _LightingReview(
+                            proposal: proposal,
+                            roomName: _label(room!),
+                            reading: _reading,
+                            apply: enabled ? () => _apply() : null,
+                            skip: enabled
+                                ? () => setState(() {
+                                      _proposal = null;
+                                      _append('Skipped ${proposal.label}.');
+                                    })
+                                : null),
+                      if (_trial != null && proposal == null)
+                        Align(
+                            alignment: Alignment.centerLeft,
+                            child: ActionChip(
+                                avatar: const Icon(Icons.undo_rounded),
+                                label: const Text('Undo preview'),
+                                onPressed:
+                                    enabled ? () => _apply(undo: true) : null)),
+                    ]),
+              ),
+              if (hub != null)
+                AssistantComposer(
+                    controller: _input,
+                    maxLength: 1000,
+                    sendLabel: 'Send message',
+                    hint: proposal != null
+                        ? 'Review the change above'
+                        : 'Message about your lights…',
+                    onSend: enabled && proposal == null ? _send : null),
+            ]),
+    );
   }
 }
 
@@ -570,18 +649,26 @@ class _LightingReview extends StatelessWidget {
       _ => null
     };
     return Card(
+        color: CelestialColors.backgroundCard,
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: CelestialColors.orbitRing)),
         child: Padding(
             padding: const EdgeInsets.all(16),
             child:
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 CircleAvatar(
-                    backgroundColor:
-                        swatch ?? theme.colorScheme.secondaryContainer,
+                    backgroundColor: swatch ??
+                        CelestialColors.sunWarm.withValues(alpha: 0.18),
                     child: swatch == null
-                        ? Icon(proposal.operation == 'try_room_offset'
-                            ? Icons.schedule
-                            : Icons.lightbulb_outline)
+                        ? Icon(
+                            color: CelestialColors.sunWarm,
+                            proposal.operation == 'try_room_offset'
+                                ? Icons.schedule
+                                : Icons.lightbulb_outline)
                         : null),
                 const SizedBox(width: 12),
                 Expanded(

@@ -12,6 +12,9 @@ import '../../services/auth_service.dart';
 import '../../services/remote_access_service.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/remote_tunnel_tile.dart';
+import '../../widgets/assistant_chat_widgets.dart';
+import '../../widgets/settings_row.dart';
+import '../../widgets/solar_orbit.dart' show CelestialColors;
 import '../hubs/assistant_access_screen.dart';
 import '../hubs/lighting_chat_screen.dart';
 import 'dialogs/sign_in_modal.dart';
@@ -30,82 +33,84 @@ class RhythmProScreen extends StatelessWidget {
         sync.connection.connected &&
         sync.connectedServerHub?.id == hub.id &&
         sync.connectedServerInstanceId != null;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Rhythm Pro')),
-      body: SafeArea(
-          child: StreamBuilder<AuthUser?>(
+    return RhythmAssistantPage(
+      title: 'Rhythm Pro',
+      body: StreamBuilder<AuthUser?>(
         stream: AuthService().authStateChanges,
         initialData: AuthService().currentUser,
         builder: (context, snapshot) {
           final user = snapshot.data;
           final signedIn = user != null && !user.isAnonymous;
-          return ListView(children: [
-            Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text('Free during preview',
-                    style: Theme.of(context).textTheme.titleMedium)),
-            ListTile(
-                leading: const Icon(Icons.account_circle_outlined),
-                title: Text(signedIn
-                    ? 'Rhythm account'
-                    : 'Connect your Rhythm account'),
-                subtitle: Text(signedIn
-                    ? user.email ?? 'Signed in'
-                    : 'Sign in or create an account for remote access and the assistant.'),
-                onTap: !signedIn && FeatureFlags.auxSignIn
-                    ? () => SignInModal.show(context)
-                    : null),
-            ListTile(
-                leading: const Icon(Icons.chat_bubble_outline),
-                title: const Text('Lighting assistant'),
-                subtitle:
-                    const Text('Chat about a room, try a color, or adjust its brightness and warmth.'),
-                onTap: signedIn || FeatureFlags.auxSignIn
-                    ? () => LightingChatScreen.show(context)
-                    : null),
-            const Divider(),
-            ListTile(
-                leading: const Icon(Icons.home_outlined),
-                title: Text(hub?.name ?? 'Connect a hub'),
-                subtitle: Text(hub == null
-                    ? 'Pair your LightBox or Home Assistant add-on.'
-                    : home?.name ?? 'Selected hub'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => RhythmServerDetailScreen.show(context)),
-            if (hub != null)
-              const RemoteTunnelTile()
-            else
-              const ListTile(
-                  leading: Icon(Icons.public),
-                  title: Text('Remote access tunnel'),
-                  subtitle:
-                      Text('Pair a hub to set up access away from home.')),
-            if (hub != null && connected)
-              RhythmProHubControls(
-                key: ValueKey((
-                  home?.id,
-                  hub.id,
-                  sync.connectedServerInstanceId,
-                  user?.id
-                )),
-                hub: hub,
-                isLocal: sync.activeConnectionEndpoint == hub.endpoint,
-              )
-            else ...[
-              const ListTile(
-                  leading: Icon(Icons.cloud_download_outlined),
-                  title: Text('Bulb profile updates'),
-                  subtitle: Text(
-                      'Connect locally to manage color-matching updates.')),
-              const ListTile(
-                  leading: Icon(Icons.link),
-                  title: Text('Remote MCP'),
-                  subtitle:
-                      Text('Connect locally to manage external agent access.')),
-            ],
-          ]);
+          return ListView(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+              children: [
+                const SettingsSectionHeader(title: 'Free during preview'),
+                SettingsGroup(children: [
+                  SettingsRow(
+                    icon: Icons.chat_bubble_outline_rounded,
+                    iconColor: CelestialColors.sunWarm,
+                    label: 'Lighting assistant',
+                    onTap: signedIn || FeatureFlags.auxSignIn
+                        ? () => LightingChatScreen.show(context)
+                        : null,
+                  ),
+                  ListTile(
+                      leading: const Icon(Icons.account_circle_outlined),
+                      title: Text(signedIn
+                          ? 'Rhythm account'
+                          : 'Connect your Rhythm account'),
+                      subtitle: Text(signedIn
+                          ? user.email ?? 'Signed in'
+                          : 'Sign in to use lighting chat and remote access.'),
+                      onTap: !signedIn && FeatureFlags.auxSignIn
+                          ? () => SignInModal.show(context)
+                          : null),
+                ]),
+                const SizedBox(height: 20),
+                SettingsGroup(children: [
+                  ListTile(
+                      leading: const Icon(Icons.home_outlined),
+                      title: Text(hub?.name ?? 'Connect a hub'),
+                      subtitle: Text(hub == null
+                          ? 'Pair your LightBox or Home Assistant add-on.'
+                          : home?.name ?? 'Selected hub'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => RhythmServerDetailScreen.show(context)),
+                  if (hub != null)
+                    const RemoteTunnelTile()
+                  else
+                    const ListTile(
+                        leading: Icon(Icons.public),
+                        title: Text('Remote access tunnel'),
+                        subtitle: Text(
+                            'Pair a hub to set up access away from home.')),
+                  if (hub != null && connected)
+                    RhythmProHubControls(
+                      key: ValueKey((
+                        home?.id,
+                        hub.id,
+                        sync.connectedServerInstanceId,
+                        user?.id
+                      )),
+                      hub: hub,
+                      isLocal: sync.activeConnectionEndpoint == hub.endpoint,
+                    )
+                  else ...[
+                    const ListTile(
+                        leading: Icon(Icons.cloud_download_outlined),
+                        title: Text('Bulb profile updates'),
+                        subtitle: Text(
+                            'Connect locally to manage color-matching updates.')),
+                    const ListTile(
+                        leading: Icon(Icons.link),
+                        title: Text('Remote MCP'),
+                        subtitle: Text(
+                            'Connect locally to manage external agent access.')),
+                  ],
+                ]),
+              ]);
         },
-      )),
+      ),
     );
   }
 }

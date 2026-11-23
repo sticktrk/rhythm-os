@@ -514,7 +514,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                               widget.hub.id) ...[
                         ListTile(
                           leading: const Icon(Icons.chat_bubble_outline),
-                          title: const Text('Lighting assistant'),
+                          title: const Text('Guided lighting tools'),
                           onTap: () => AssistantChatScreen.show(context),
                         ),
                         ListTile(

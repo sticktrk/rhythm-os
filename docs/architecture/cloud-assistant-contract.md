@@ -56,19 +56,26 @@ deletion are handoffs to the resident.
 ## Model and telemetry boundary
 
 Guided tools in the resident app and staff console run locally. Rhythm Pro also
-offers a hosted lighting chat. A signed-in resident pairs their phone once on
-the local network using the hub owner's authorization. The phone stores its
-revocable agent credential in device secure storage scoped to the account and
-installation. Away from home the hub also requires an enabled tunnel and Remote
-MCP. Guided tools remain available for older hubs and account or motion tasks.
+offers a hosted lighting chat. When a signed-in resident opens chat on a locally
+paired owner phone, the app requests a revocable agent credential and stores
+it in device secure storage scoped to the account and installation. The app
+reuses existing access. An owner revocation requires an explicit reconnect on
+the local network. Away from home the hub also requires an enabled tunnel and
+Remote MCP. Guided tools remain available for older hubs and account or motion tasks.
 
-The phone discovers rooms and tools over the hub's MCP endpoint. It reads the
-selected room before each turn. The authenticated customer assistant function
-sends up to eight recent conversation messages, selected numerical or
-enumerated lighting readings and supported adjustment types to OpenAI with
-response storage disabled. Hub and account credentials, topology, device
-names and raw readbacks stay on the phone. Room names typed by the resident
-are part of their message. Changing rooms starts a new conversation.
+A conversation starts with a message. The phone resolves room names against
+live hub topology. A named room takes priority over the current conversation
+room or the room open in the app. If a lighting change needs clarification, the
+assistant offers room choices inside the conversation and resumes the original
+request. Each proposed adjustment targets one room. General questions can be
+answered without a room.
+
+The phone reads a resolved room before sending its numerical and enumerated
+lighting values and supported adjustment types to the authenticated customer
+assistant function. An unresolved turn offers only conversation and local room
+discovery. Up to eight recent messages go to OpenAI with response storage
+disabled. Hub identifiers, credentials, inventory and raw readbacks stay on the
+phone. Room names typed by the resident can appear in their messages.
 
 A model can propose brightness, warmth, power, color or a curve preview. The
 phone validates the arguments, shows the exact target and calls the selected
