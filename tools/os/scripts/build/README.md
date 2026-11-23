@@ -189,7 +189,7 @@ cd ../..
 RHYTHM_CHIP_ROOT=os/connectedhomeip RHYTHM_CHIP_OUT_DIR=os/connectedhomeip/out/host \
   tools/os/scripts/build/chip-bridge-syntax-check.sh
 
-# full native build + tests, then the image
+# Bridge crate check before the image. While iterating, append a test-name filter.
 RHYTHM_CHIP_ROOT=os/connectedhomeip RHYTHM_CHIP_OUT_DIR=os/connectedhomeip/out/host \
   cargo test -p rhythm-chipd --features chip-ffi
 ./tools/os/scripts/build/refresh-builder-image.sh --push     # new hash, new tag, lock updated

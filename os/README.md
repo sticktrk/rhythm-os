@@ -43,8 +43,12 @@ from source:
 
 ```bash
 cargo build -p rhythm-server --release
-cargo test
 ```
+
+While changing the server, run `cargo test -p rhythm-server <filter>`.
+`cargo test` with no package filter runs the workspace suite. That command is
+a final check before a pull request. CI runs
+`cargo test --workspace --all-targets --locked`.
 
 Then use [`install/install.sh`](install/install.sh) with the built binary. For
 the Pi Zero appliance, flash the current production image from

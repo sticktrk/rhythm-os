@@ -44,19 +44,21 @@ python3 tools/ci/smoke-server.py --binary target/debug/rhythm-server
 
 ## Test and contribute
 
-Start with a focused Rust package test, then run the portable source checks:
+During development, run only the narrowest test that covers the change: one
+test, one file, one crate, or one package. Do not run the full Rust workspace,
+Flutter, or Dart suites while iterating. Run that corpus once, as a final
+check, before opening a pull request. CI runs it on every push and pull
+request.
 
-```bash
-cargo test --locked -p rhythm-core --lib
-./tools/check-repo-invariants.sh
+Rust, from the repository root. `<filter>` is a test or module name:
+
+```text
+cargo test -p <crate> <filter>
 ```
 
-The source-check command requires Python 3.11+, Bash, Git, ripgrep (`rg`), jq and
-Ruby, plus standard Unix utilities. Public CI installs its own dependencies.
-It includes the BlueZ ownership, canonical Supabase root, analytics anchor and
-shared commissioning guards under `tools/ci/`; those commands are also useful
-individually while editing. The BlueZ exceptions are maintained in
-`tools/ci/references/bluez-owner-exceptions.tsv` alongside their contract tests.
+```bash
+cargo test -p rhythm-core solar
+```
 
 The hub's scenario tests share one integration-test binary. To add a scenario,
 place its file in `os/rust/core/rhythm-os/tests/scenarios/` and declare the
@@ -64,28 +66,52 @@ module in that directory's `main.rs`. To run a single module, pass its name
 followed by `::` as the test filter.
 
 ```bash
-cargo test --locked -p rhythm-os --test scenarios scenario_backup_nodes::
+cargo test -p rhythm-os --test scenarios scenario_backup_nodes::
 ```
 
-On ARM64 GNU/Linux with 8 GiB of RAM, GNU ld.bfd can still run out of memory
-linking tests in other workspace crates. Install `lld` to run the full suite
-with Cargo's default parallelism and full debug information.
+Flutter and Dart, one file. `--name <test>` selects a single test inside it:
+
+```text
+cd app/flutter/rhythm_app && flutter test test/<file>_test.dart
+cd sdk && dart test test/<file>_test.dart
+cd admin-api && dart test test/<file>_test.dart
+```
+
+`./tools/check-repo-invariants.sh` checks source boundaries, licenses, and
+deployment fixtures. The command requires Python 3.11+, Bash, Git, ripgrep
+(`rg`), jq and Ruby, plus standard Unix utilities. Public CI installs its own
+dependencies. It includes the BlueZ ownership, canonical Supabase root,
+analytics anchor and shared commissioning guards under `tools/ci/`; those
+commands are also useful individually while editing. The BlueZ exceptions are
+maintained in `tools/ci/references/bluez-owner-exceptions.tsv` alongside their
+contract tests.
+
+On ARM64 GNU/Linux with 8 GiB of RAM, GNU ld.bfd can run out of memory when a
+final workspace run links many test binaries at once. Install `lld` and set
+the linker flag below for that final check. A single-crate filter links one
+test target.
 
 ```bash
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C link-arg=-fuse-ld=lld' \
-  cargo test --workspace --all-targets --all-features --locked
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+cargo test --workspace --all-targets --locked
 ```
 
+`--all-features` on that same command links still more test binaries. Use it
+only when the final check needs feature-gated targets. The portable CI Rust
+job runs the command above without the linker override.
+
 Push your branch to your fork and open a public PR. Include the intended
-behavior, focused tests and any outstanding hardware verification. See
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+behavior, the focused tests you ran, and any outstanding hardware verification.
+See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Optional surfaces
 
-- Flutter: use Flutter **3.44.6**, then run `flutter pub get`, `flutter analyze`
-  and `flutter test` from `app/flutter/rhythm_app`. The SDK dependency resolves
-  within this checkout. See [app build helpers](../tools/app/scripts/README.md)
-  for the additional native and WASM toolchains used to run each platform.
+- Flutter: use Flutter **3.44.6**, then run `flutter pub get` and
+  `flutter analyze` from `app/flutter/rhythm_app`. Test one file with
+  `flutter test test/<file>_test.dart`. `flutter test` with no file argument
+  is the app-suite final check. The SDK dependency resolves within this
+  checkout. See [app build helpers](../tools/app/scripts/README.md) for the
+  additional native and WASM toolchains used to run each platform.
 - Cloud backend: follow [the Supabase guide](supabase.md) to start a local
   backend or deploy your own project. Cloud authentication, remote access and
   optional integrations need their documented configuration. Native app account

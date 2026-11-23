@@ -12,11 +12,13 @@ Rhythm OS is adaptive lighting that follows the sun. This is the open-source Rus
 
 ```bash
 # Rust workspace
-cargo build -p rhythm-addon              # Build addon
-cargo test                               # Test all workspace crates
-cargo test -p rhythm-core solar          # Filter by crate + test name
-cargo test -p rhythm-core -- --nocapture # Show println output
-cargo clippy --all-targets               # Lint
+cargo build -p rhythm-addon                     # Build addon
+# Development: cargo test -p <crate> <filter>
+cargo test -p rhythm-core solar                 # Example filter
+cargo test -p rhythm-core solar -- --nocapture  # Show println output for that filter
+cargo clippy --all-targets                      # Lint
+# Final check only, once before a pull request. CI runs this:
+# cargo test --workspace --all-targets --locked
 RUST_LOG=debug cargo run -p rhythm-addon # Run addon locally (needs .env)
 
 # Build scripts
@@ -270,8 +272,12 @@ For the integration system architecture (adding new lighting integrations), see 
 **Changelog**: `install/addon/CHANGELOG.md`
 
 ```bash
-# Build and test before committing
-./tools/os/scripts/build-rust.sh --release && cargo test
+# While iterating, build the target you changed.
+./tools/os/scripts/build-rust.sh --release
+# Then test one filter, for example: cargo test -p rhythm-addon <filter>
+
+# Once, before opening a pull request. CI runs this:
+# cargo test --workspace --all-targets --locked
 
 # Deploy
 ./tools/os/scripts/deploy-addon.sh --push             # Docker Hub + addon repo (auto-bumps version)
