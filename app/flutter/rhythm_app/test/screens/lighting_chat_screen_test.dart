@@ -130,8 +130,9 @@ void main() {
       (tester) async {
     hub = LightingChatHub([room], tools, (op, args) async {
       calls.add((op, args));
-      if (op == 'adjust_room_warmth')
+      if (op == 'adjust_room_warmth') {
         throw TimeoutException('lost acknowledgement');
+      }
       return {'room_id': room.id, 'canonical_kelvin': 2800};
     }, () {});
     await open(tester);
