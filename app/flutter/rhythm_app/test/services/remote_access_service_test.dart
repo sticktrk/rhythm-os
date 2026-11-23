@@ -1726,6 +1726,7 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
     required String hostname,
     required String connectorToken,
     bool enabled = true,
+    bool resumePaused = false,
     String? tunnelId,
     String? tunnelName,
   }) async {

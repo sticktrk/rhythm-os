@@ -778,6 +778,25 @@ pub async fn require_api_auth_middleware(
     let scoped = verified_bearer
         .as_ref()
         .is_some_and(|token| token.role == ApiTokenRole::Agent);
+    if auth_info.via_remote_access && (scoped || req.uri().path() == crate::assistant::MCP_PATH) {
+        if !state.lock().is_ok_and(|s| s.pro_settings.remote_mcp) {
+            return forbidden("Remote MCP is turned off on this hub");
+        }
+        if verified_bearer.is_none() {
+            return unauthorized("Agent credential required");
+        }
+        let storage = state.lock().ok().and_then(|s| s.storage.clone());
+        let enabled = tokio::task::spawn_blocking(move || {
+            storage
+                .and_then(|s| s.load_remote_access_config().ok().flatten())
+                .is_some_and(|config| config.enabled && !config.connector_token.trim().is_empty())
+        })
+        .await
+        .unwrap_or(false);
+        if !enabled {
+            return forbidden("The managed tunnel is turned off on this hub");
+        }
+    }
     if scoped && !crate::assistant::transport::agent_route(req.method(), req.uri().path()) {
         return forbidden("Agent credentials are scoped to assistant operations");
     }
@@ -866,19 +885,21 @@ fn auth_status_payload(
 }
 
 pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthRequestInfo {
-    let (stored_requires_auth, owner_configured, is_appliance, is_addon) = state
-        .lock()
-        .map(|s| {
-            (
-                s.require_api_auth,
-                s.api_auth.has_owner(),
-                s.platform_type == "appliance",
-                s.platform_context == "ha_addon",
-            )
-        })
-        .unwrap_or((true, true, false, false));
+    let (stored_requires_auth, owner_configured, is_appliance, is_addon, has_tunnel_controller) =
+        state
+            .lock()
+            .map(|s| {
+                (
+                    s.require_api_auth,
+                    s.api_auth.has_owner(),
+                    s.platform_type == "appliance",
+                    s.platform_context == "ha_addon",
+                    s.remote_access_controller.is_some(),
+                )
+            })
+            .unwrap_or((true, true, false, false, true));
 
-    let via_remote_access = (is_appliance || is_addon)
+    let via_remote_access = (is_appliance || is_addon || has_tunnel_controller)
         && req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
@@ -1780,6 +1801,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn desktop_managed_tunnel_uses_remote_authorization() {
+        let state = test_state();
+        {
+            let mut app = state.lock().unwrap();
+            app.platform_type = "desktop";
+            app.remote_access_controller = Some(Arc::new(
+                crate::remote_access::ChildProcessRemoteAccessController::new("/missing"),
+            ));
+        }
+        let info = auth_request_info(
+            &state,
+            &tunnel_request(Method::GET, "/api/pro/settings", Body::empty()),
+        );
+        assert!(info.via_remote_access && info.requires_auth && !info.claim_available);
     }
 
     #[tokio::test]

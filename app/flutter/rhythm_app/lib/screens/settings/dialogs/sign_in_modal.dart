@@ -13,13 +13,14 @@ import '../../../widgets/connect_hub_screen.dart';
 /// Full-screen sign-in modal.
 class SignInModal {
   /// Show the sign-in modal as a full-screen slide-up sheet.
-  static void show(BuildContext context) {
+  static Future<void> show(BuildContext context,
+      {bool returnToCaller = false}) async {
     // Guard: don't show modal when auxiliary sign-in is disabled
     if (!FeatureFlags.auxSignIn) return;
     AnalyticsService().logScreenView('sign_in');
     final hostContext = context;
 
-    Navigator.of(hostContext).push(
+    await Navigator.of(hostContext).push<void>(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black54,
@@ -86,9 +87,11 @@ class SignInModal {
                         Expanded(
                           child: AccountScreen(
                             onComplete: () => _finishSignIn(hostContext,
-                                openHomeChooser: false),
+                                openHomeChooser: false,
+                                returnToCaller: returnToCaller),
                             onSignedInComplete: () => _finishSignIn(hostContext,
-                                openHomeChooser: true),
+                                openHomeChooser: true,
+                                returnToCaller: returnToCaller),
                           ),
                         ),
                       ],
@@ -122,12 +125,17 @@ class SignInModal {
   static Future<void> _finishSignIn(
     BuildContext context, {
     required bool openHomeChooser,
+    required bool returnToCaller,
   }) async {
     if (!context.mounted) return;
 
     await AppStateRefresh.sync(context);
     if (!context.mounted) return;
 
+    if (returnToCaller) {
+      Navigator.of(context).pop();
+      return;
+    }
     Navigator.of(context).popUntil((route) => route.isFirst);
 
     if (!openHomeChooser) return;

@@ -163,6 +163,12 @@ pub trait Storage: Send + Sync {
     fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()>;
     fn load_location(&self) -> Result<StoredLocation>;
     fn save_location(&self, loc: &StoredLocation) -> Result<()>;
+    fn load_pro_settings(&self) -> Result<Option<crate::pro_settings::ProSettings>> {
+        Ok(None)
+    }
+    fn save_pro_settings(&self, _settings: &crate::pro_settings::ProSettings) -> Result<()> {
+        anyhow::bail!("This storage does not support Pro settings")
+    }
     fn load_settings(&self) -> Result<StoredSettings>;
     fn save_settings(&self, settings: &StoredSettings) -> Result<()>;
     fn load_scenes(&self) -> Result<Option<StoredScenes>> {
@@ -1397,6 +1403,17 @@ impl Storage for FileStorage {
         self.write_atomic("location.json", data.as_bytes())
     }
 
+    fn load_pro_settings(&self) -> Result<Option<crate::pro_settings::ProSettings>> {
+        match std::fs::read(self.file_path("pro_settings.json")) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn save_pro_settings(&self, settings: &crate::pro_settings::ProSettings) -> Result<()> {
+        self.write_atomic_durable("pro_settings.json", &serde_json::to_vec(settings)?)
+    }
+
     fn load_settings(&self) -> Result<StoredSettings> {
         self.read_json("settings.json")
     }
@@ -2297,6 +2314,8 @@ impl Storage for FileStorage {
             "managed-ha-lights.json.tmp",
             "managed-ha-lights-v2.json",
             "managed-ha-lights-v2.json.tmp",
+            "pro_settings.json",
+            "pro_settings.json.tmp",
             "managed-ha-lights-v1.rollback.json",
             "light_profiles.json",
             "location.json",
@@ -2499,6 +2518,22 @@ pub(crate) fn seed_new_factory_default_scenes(
 }
 
 pub fn load_persisted_state(s: &mut crate::state::AppState) {
+    if let Some(storage) = &s.storage {
+        s.pro_settings = storage
+            .load_pro_settings()
+            .map(|v| {
+                v.unwrap_or_else(|| {
+                    crate::pro_settings::ProSettings::for_platform(s.platform_context)
+                })
+            })
+            .unwrap_or_else(|_| {
+                warn!(target: "sys", "Pro settings unreadable; cloud features disabled");
+                crate::pro_settings::ProSettings {
+                    bulb_profile_updates: false,
+                    remote_mcp: false,
+                }
+            });
+    }
     if s.storage.is_none() {
         return;
     }

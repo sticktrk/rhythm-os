@@ -30,7 +30,7 @@ import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
-import '../../services/remote_access_service.dart';
+import '../../widgets/remote_tunnel_tile.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
@@ -514,7 +514,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                               widget.hub.id) ...[
                         ListTile(
                           leading: const Icon(Icons.chat_bubble_outline),
-                          title: const Text('Lighting assistant'),
+                          title: const Text('Guided lighting tools'),
                           onTap: () => AssistantChatScreen.show(context),
                         ),
                         ListTile(
@@ -2470,8 +2470,6 @@ class _RhythmServerAdvancedSettingsScreenState
   static const _enabledGreen = Color(0xFF22C55E);
   static const _disabledRed = Color(0xFFEF4444);
 
-  bool _isTogglingRemoteAccess = false;
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2544,7 +2542,6 @@ class _RhythmServerAdvancedSettingsScreenState
 
   Widget _buildAutomaticLightingSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final homeProvider = context.watch<HomeProvider>();
     final connected =
         syncProvider.connectionState == RhythmConnectionState.connected;
     final enabled = syncProvider.lightBreakerEnabled;
@@ -2554,25 +2551,6 @@ class _RhythmServerAdvancedSettingsScreenState
         : enabled
             ? _enabledGreen
             : _disabledRed;
-    final serverHub = homeProvider.activeServerHub;
-    final canUseRemoteAccess = _canUseRemoteAccess();
-    final remoteAccessEnabled = serverHub?.remoteEndpoint != null;
-    final remoteAccessAvailable = serverHub != null && canUseRemoteAccess;
-    final remoteAccessStatusText = _isTogglingRemoteAccess
-        ? 'Updating...'
-        : remoteAccessEnabled
-            ? 'On'
-            : remoteAccessAvailable
-                ? 'Off'
-                : 'Unavailable';
-    final remoteAccessStatusColor = _isTogglingRemoteAccess
-        ? Colors.amber
-        : !remoteAccessAvailable
-            ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-            : remoteAccessEnabled
-                ? _enabledGreen
-                : _disabledRed;
-
     return _buildSection(
       title: 'SERVER',
       children: [
@@ -2591,130 +2569,8 @@ class _RhythmServerAdvancedSettingsScreenState
               : null,
         ),
         const SizedBox(height: 10),
-        _buildSwitchRow(
-          icon: Icons.public_rounded,
-          iconColor: remoteAccessStatusColor,
-          label: 'Remote Access',
-          tooltip:
-              'Turn off to remove the current tunnel. Turn on again to provision a fresh tunnel.',
-          statusText: remoteAccessStatusText,
-          statusColor: remoteAccessStatusColor,
-          value: remoteAccessEnabled,
-          activeTrackColor: _enabledGreen,
-          busy: _isTogglingRemoteAccess,
-          onChanged: remoteAccessAvailable && !_isTogglingRemoteAccess
-              ? (next) => unawaited(_setRemoteAccessEnabled(next))
-              : null,
-        ),
+        const RemoteTunnelTile(),
       ],
-    );
-  }
-
-  bool _canUseRemoteAccess() {
-    try {
-      return RemoteAccessService.instance.canUseRemoteAccess;
-    } catch (error) {
-      debugPrint('Remote access unavailable: $error');
-      return false;
-    }
-  }
-
-  Future<void> _setRemoteAccessEnabled(bool enabled) async {
-    if (_isTogglingRemoteAccess) return;
-
-    final homeProvider = context.read<HomeProvider>();
-    final syncProvider = context.read<ServerSyncProvider>();
-    final home = homeProvider.currentHome;
-    var serverHub = homeProvider.activeServerHub;
-    if (home == null || serverHub == null) {
-      _showSnackBar(
-        'No active server is available.',
-        backgroundColor: Colors.red.shade400,
-      );
-      return;
-    }
-
-    setState(() => _isTogglingRemoteAccess = true);
-    try {
-      final service = RemoteAccessService.instance;
-      Hub updatedHub;
-      var routeVerified = true;
-      if (enabled) {
-        var tokenHub = await service.ensureOwnerTokenForHub(serverHub);
-        if (tokenHub.token != serverHub.token) {
-          final saved = await homeProvider.updateHub(tokenHub);
-          if (!saved) {
-            throw StateError('Could not save the server owner token.');
-          }
-          tokenHub = homeProvider.activeServerHub ?? tokenHub;
-        }
-
-        final result = await service.enableForHub(
-          tokenHub,
-          home: home,
-          explicitUserEnable: true,
-        );
-        updatedHub = result.updatedHub;
-        routeVerified = result.routeVerified;
-      } else {
-        updatedHub = await service.disableForHub(serverHub, home: home);
-      }
-
-      final saved = await homeProvider.updateHub(
-        updatedHub,
-        clearCloudRemoteEndpoint: !enabled,
-      );
-      if (!saved) {
-        throw StateError('Could not save the remote access setting.');
-      }
-
-      syncProvider.connectIfAvailable();
-      if (enabled && !routeVerified) {
-        service.scheduleAutoEnableForHub(
-          home: home,
-          serverHub: updatedHub,
-          saveHub: homeProvider.updateHub,
-          resolveLatestHub: (homeId, hubId) {
-            if (homeProvider.currentHome?.id != homeId) return null;
-            for (final hub in homeProvider.currentHomeHubs) {
-              if (hub.id == hubId) return hub;
-            }
-            return null;
-          },
-          onEnabled: (_) => syncProvider.connectIfAvailable(),
-        );
-      }
-      _showSnackBar(
-        enabled
-            ? routeVerified
-                ? 'Remote access enabled.'
-                : 'Remote access is starting in the background.'
-            : 'Remote access disabled.',
-      );
-    } catch (error, stackTrace) {
-      debugPrint('Remote access toggle failed: $error');
-      debugPrint('$stackTrace');
-      _showSnackBar(
-        enabled
-            ? 'Could not enable remote access.'
-            : 'Could not disable remote access.',
-        backgroundColor: Colors.red.shade400,
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _isTogglingRemoteAccess = false);
-      }
-    }
-  }
-
-  void _showSnackBar(String message, {Color? backgroundColor}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: backgroundColor,
-      ),
     );
   }
 

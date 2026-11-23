@@ -356,7 +356,7 @@ pub fn profile_overlay_from_legacy_local(
 /// audition. A local report contains the complete effective profile for audit
 /// purposes, but copied cloud/builtin/default fields must not shadow newer
 /// lower-precedence inputs on a later resolve.
-pub(crate) fn overlay_sourced_audition_profile(
+pub fn overlay_sourced_audition_profile(
     target: &mut MatterControlProfile,
     audition: &MatterControlProfile,
 ) {
@@ -432,6 +432,41 @@ pub(crate) fn overlay_profile(
         readback_trust: source,
         subscription: source,
     };
+}
+
+pub fn calibrated_hs_white(curve: &[MatterHsWhitePoint], kelvin: u16) -> Option<(u8, u8)> {
+    let first = curve.first()?;
+    if kelvin <= first.kelvin {
+        return Some((first.hue, first.saturation));
+    }
+    for points in curve.windows(2) {
+        let low = &points[0];
+        let high = &points[1];
+        if kelvin <= high.kelvin {
+            let span = u32::from(high.kelvin.saturating_sub(low.kelvin)).max(1);
+            let offset = u32::from(kelvin.saturating_sub(low.kelvin));
+            let interpolate = |low: u8, high: u8| -> u8 {
+                let low = i64::from(low);
+                let delta = i64::from(high) - low;
+                (low + delta * i64::from(offset) / i64::from(span)).clamp(0, 254) as u8
+            };
+            let interpolate_hue = |low: u8, high: u8| -> u8 {
+                let low = i64::from(low);
+                let mut delta = i64::from(high) - low;
+                if delta > 127 {
+                    delta -= 255;
+                } else if delta < -127 {
+                    delta += 255;
+                }
+                (low + delta * i64::from(offset) / i64::from(span)).rem_euclid(255) as u8
+            };
+            return Some((
+                interpolate_hue(low.hue, high.hue),
+                interpolate(low.saturation, high.saturation),
+            ));
+        }
+    }
+    curve.last().map(|point| (point.hue, point.saturation))
 }
 
 #[cfg(test)]

@@ -171,7 +171,11 @@ class AppStateRefresh {
 
     final home = homeProvider.currentHome;
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
-    if (home == null || serverHub == null) return;
+    // Rhythm Pro starts a new tunnel only after an explicit owner action.
+    // Background retries maintain a route that was already set up.
+    if (home == null || serverHub == null || serverHub.remoteEndpoint == null) {
+      return;
+    }
 
     RemoteAccessService.instance.scheduleAutoEnableForHub(
       home: home,

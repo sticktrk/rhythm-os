@@ -57,6 +57,7 @@ enum _AutoEnableOutcome { complete, retry }
 enum _ExistingRemoteAccessState {
   healthy,
   routePending,
+  paused,
   needsRepair,
   unreachable,
 }
@@ -301,6 +302,7 @@ class RemoteAccessService {
     final configured = await _putConfigThroughReachableEndpoint(
       serverHub: serverHub,
       bootstrapEndpoint: remoteEndpoint,
+      resumePaused: explicitUserEnable,
       checkIntent: assistantPlanId == null ? null : checkReviewedIntent,
       expectedServerInstanceId: expectedServerInstanceId,
       hostname: hostname,
@@ -586,6 +588,9 @@ class RemoteAccessService {
 
       if (hub.remoteEndpoint != null) {
         final existingState = await _existingRemoteAccessState(hub);
+        if (existingState == _ExistingRemoteAccessState.paused) {
+          return _AutoEnableOutcome.complete;
+        }
         if (existingState == _ExistingRemoteAccessState.healthy) {
           await _grantSupportAccessForHub(hub);
           onEnabled?.call(hub);
@@ -721,6 +726,9 @@ class RemoteAccessService {
       }
     }
 
+    if (status != null && status.configured && !status.enabled) {
+      return _ExistingRemoteAccessState.paused;
+    }
     if (status != null && !_isActivated(status)) {
       return _ExistingRemoteAccessState.needsRepair;
     }
@@ -1018,6 +1026,7 @@ class RemoteAccessService {
       })> _putConfigThroughReachableEndpoint({
     required Hub serverHub,
     required HubEndpoint bootstrapEndpoint,
+    required bool resumePaused,
     void Function()? checkIntent,
     required String? expectedServerInstanceId,
     required String hostname,
@@ -1050,6 +1059,7 @@ class RemoteAccessService {
         }
         checkIntent?.call();
         final status = await api.putConfig(
+          resumePaused: resumePaused,
           hostname: hostname,
           connectorToken: connectorToken,
           tunnelId: tunnelId,

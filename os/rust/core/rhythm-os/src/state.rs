@@ -417,6 +417,10 @@ impl Default for PlatformConfig {
 
 /// Application state shared across threads.
 pub struct AppState {
+    pub pro_settings: crate::pro_settings::ProSettings,
+    pub bulb_catalog: Arc<crate::cloud_profiles::CloudMatterProfileCatalog>,
+    pub bulb_catalog_generation: u64,
+    pub bulb_catalog_wake: Arc<tokio::sync::Notify>,
     /// Stored light profile configs keyed by profile ID.
     pub light_profile_configs: BTreeMap<String, LightProfileConfig>,
     /// Shareable mode/state profile mappings keyed by high-level mode.
@@ -1085,6 +1089,10 @@ impl Default for AppState {
             light_schedule_write_lock: Arc::new(Mutex::new(())),
             scenes: default_scene_map(),
             seeded_factory_scene_ids: factory_default_scene_ids(),
+            pro_settings: Default::default(),
+            bulb_catalog: Default::default(),
+            bulb_catalog_generation: 0,
+            bulb_catalog_wake: Default::default(),
             assistant_approvals: Default::default(),
             assistant_transfers: Default::default(),
             assistant_automation_plans: Default::default(),

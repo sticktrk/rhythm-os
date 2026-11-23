@@ -838,17 +838,11 @@ pub(crate) fn store_device_metadata(
     device: &CommissionedDevice,
     device_id: &str,
 ) {
-    let cloud_profiles = hub_data
-        .cloud_profiles
-        .lock()
-        .map(|profiles| profiles.clone())
-        .unwrap_or_default();
-    let local_overrides = hub_data
-        .local_overrides
-        .lock()
-        .map(|overrides| overrides.clone())
-        .unwrap_or_default();
-    let resolved = resolve_device_metadata(device, device_id, &cloud_profiles, &local_overrides);
+    let resolved = {
+        let cloud = hub_data.cloud_profiles.lock().expect("cloud catalog");
+        let local = hub_data.local_overrides.lock().expect("audition overrides");
+        resolve_device_metadata(device, device_id, &cloud, &local)
+    };
 
     if let Ok(mut device_caps) = hub_data.device_caps.lock() {
         device_caps.insert(device_id.to_string(), resolved.capabilities);
@@ -892,7 +886,7 @@ pub(crate) fn resolve_device_metadata(
     let mut capabilities = builtin_capabilities.clone();
     let mut quirks = builtin_quirks.clone();
 
-    cloud_profiles.apply_to_device(device, &mut capabilities, &mut quirks);
+    cloud_profiles.apply_to_device(device.into(), &mut capabilities, &mut quirks);
 
     if let Some(override_caps) = local_overrides.capabilities.get(device_id) {
         crate::local_quirks::apply_capability_override(&mut capabilities, override_caps);
@@ -900,7 +894,7 @@ pub(crate) fn resolve_device_metadata(
     if let Some(local_quirks) = local_overrides.quirks.get(device_id) {
         quirks = crate::local_quirks::apply_quirk_override(&quirks, local_quirks);
     }
-    let cloud_profile = cloud_profiles.control_profile_for_device(device);
+    let cloud_profile = cloud_profiles.control_profile_for_device(device.into());
     let legacy_local_profile = if local_overrides.capabilities.contains_key(device_id)
         || local_overrides.quirks.contains_key(device_id)
     {

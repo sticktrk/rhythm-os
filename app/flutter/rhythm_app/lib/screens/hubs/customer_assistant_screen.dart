@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../../widgets/assistant_chat_widgets.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -502,10 +503,9 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
                 ],
                 if (_offers('list_pending_actions')) 'Pending actions',
               ];
-    return Scaffold(
-        appBar: AppBar(title: const Text('Rhythm assistant')),
-        body: SafeArea(
-            child: Column(children: [
+    return RhythmAssistantPage(
+        title: 'Rhythm assistant',
+        body: Column(children: [
           Expanded(
               child: ListView(
                   controller: _scroll,
@@ -513,14 +513,8 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
                   children: [
                 if (_active)
                   for (final item in _history)
-                    Align(
-                        alignment: item.resident
-                            ? Alignment.centerRight
-                            : Alignment.centerLeft,
-                        child: Card(
-                            child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: SelectableText(item.text)))),
+                    AssistantMessageBubble(
+                        resident: item.resident, text: item.text),
               ])),
           if (!_active)
             const Text('Account changed. Open a new conversation to continue.'),
@@ -553,20 +547,11 @@ class _CustomerAssistantState extends State<CustomerAssistantScreen> {
                         label: Text(action),
                         onPressed: enabled ? () => _send(action) : null),
                 ]))),
-          Padding(
-              padding: const EdgeInsets.all(12),
-              child: TextField(
-                  controller: _text,
-                  enabled: enabled,
-                  maxLength: reporting ? 1500 : null,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: _send,
-                  decoration: InputDecoration(
-                      labelText: reporting ? 'Report summary' : 'Message',
-                      suffixIcon: IconButton(
-                          icon: const Icon(Icons.send),
-                          onPressed:
-                              enabled ? () => _send(_text.text) : null)))),
-        ])));
+          AssistantComposer(
+              controller: _text,
+              onSend: enabled ? _send : null,
+              hint: reporting ? 'Report summary' : 'Message',
+              maxLength: reporting ? 1500 : null),
+        ]));
   }
 }

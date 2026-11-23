@@ -60,6 +60,16 @@ class CustomerAssistantService {
           [CustomerAction arguments = const {}]) =>
       _request({'operation': operation, 'arguments': arguments});
 
+  Future<void> verifyChatSession() async {
+    final reply = await _request({'jsonrpc': '2.0', 'id': 1, 'method': 'ping'});
+    if (reply['id'] != 1 || reply['result'] is! Map) {
+      throw StateError('Could not verify the resident session');
+    }
+  }
+
+  Future<CustomerAction> lightingChat(CustomerAction turn) =>
+      _request({'lighting_chat': turn});
+
   static const _reviewFields = [
     'plan_id',
     'change',

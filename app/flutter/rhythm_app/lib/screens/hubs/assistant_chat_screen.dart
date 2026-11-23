@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/assistant_chat_widgets.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' show DirectHubAccess;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -788,8 +789,9 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
       _Step.room => _rooms,
       _ => <RhythmTopologyNode>[],
     };
-    return Scaffold(
-      appBar: AppBar(title: const Text('Lighting assistant'), actions: [
+    return RhythmAssistantPage(
+      title: 'Guided lighting tools',
+      actions: [
         if (widget.openAccountTools != null)
           IconButton(
               tooltip: 'Account and Home tools',
@@ -811,9 +813,8 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                           isCurrentTarget: () => _active,
                           targetChanges: Listenable.merge(
                               [widget.targetChanges, _accountEnded]))))),
-      ]),
-      body: SafeArea(
-          child: Column(children: [
+      ],
+      body: Column(children: [
         Expanded(
             child: ListView(
                 controller: _scroll,
@@ -821,14 +822,8 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                 children: [
               if (_active)
                 for (final message in _messages)
-                  Align(
-                      alignment: message.resident
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      child: Card(
-                          child: Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: SelectableText(message.text))))
+                  AssistantMessageBubble(
+                      resident: message.resident, text: message.text)
             ])),
         if (!_active)
           Padding(
@@ -872,20 +867,8 @@ class _AssistantChatScreenState extends State<AssistantChatScreen> {
                   ActionChip(
                       label: Text(choice), onPressed: () => _reply(choice)),
               ]))),
-        Padding(
-            padding: const EdgeInsets.all(12),
-            child: TextField(
-                controller: _text,
-                enabled: enabled,
-                textInputAction: TextInputAction.send,
-                decoration: InputDecoration(
-                    labelText: 'Message',
-                    suffixIcon: IconButton(
-                        icon: const Icon(Icons.send),
-                        tooltip: 'Send',
-                        onPressed: enabled ? () => _reply(_text.text) : null)),
-                onSubmitted: _reply)),
-      ])),
+        AssistantComposer(controller: _text, onSend: enabled ? _reply : null),
+      ]),
     );
   }
 }

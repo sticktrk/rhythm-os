@@ -1916,3 +1916,227 @@ async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
     assert_eq!(handoff["status"], "handoff");
     assert_eq!(handoff["actor"], "ha_administrator");
 }
+
+#[tokio::test]
+async fn pro_preferences_persist_and_gate_only_tunneled_agent_access() {
+    let f = Fixture::new();
+    let owner = f.enroll().await;
+    let owner = owner["token"].as_str().unwrap();
+    let (_, issued) = json_request(
+        f.admin(),
+        Method::POST,
+        "/api/auth/agent-tokens",
+        Some(ADMIN),
+        json!({}),
+    )
+    .await;
+    let agent = issued["token"].as_str().unwrap();
+    let path = "/api/pro/settings";
+    let mcp = rhythm_os::assistant::MCP_PATH;
+    let list = json!({"jsonrpc":"2.0", "id":1, "method":"tools/list", "params":{}});
+    let remote = |method, path, token, body| {
+        let mut req = request(method, path, Some(token), body);
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:2345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        req.headers_mut()
+            .insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+        f.mobile().oneshot(req)
+    };
+    let (status, initial) =
+        json_request(f.mobile(), Method::GET, path, Some(owner), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        initial,
+        json!({"bulb_profile_updates":false, "remote_mcp":false})
+    );
+    for token in [owner, agent] {
+        assert_eq!(
+            remote(Method::PUT, path, token, json!({"remote_mcp":true}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        json_request(
+            f.mobile(),
+            Method::PUT,
+            path,
+            Some(agent),
+            json!({"remote_mcp":true})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let setup =
+        json!({"enabled":true, "hostname":"box.example.test","connector_token":"test-connector"});
+    assert_eq!(
+        json_request(
+            f.mobile(),
+            Method::PUT,
+            "/api/remote-access/config",
+            Some(owner),
+            setup
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for enabled in [false, true, false] {
+        let (status, response) = json_request(
+            f.mobile(),
+            Method::PUT,
+            path,
+            Some(owner),
+            json!({"remote_mcp":enabled}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response,
+            json!({"remote_mcp":enabled,"bulb_profile_updates":false})
+        );
+        let reloaded = load(&f.root);
+        assert_eq!(reloaded.lock().unwrap().pro_settings.remote_mcp, enabled);
+        assert_eq!(
+            remote(Method::POST, mcp, agent, list.clone())
+                .await
+                .unwrap()
+                .status(),
+            if enabled {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+        assert_eq!(
+            json_request(f.mobile(), Method::POST, mcp, Some(agent), list.clone())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            remote(Method::GET, "/api/light-breaker", owner, json!({}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        if enabled {
+            for linked in [false, true] {
+                assert_eq!(
+                    json_request(
+                        f.admin(),
+                        Method::PUT,
+                        "/api/addon/tunnel",
+                        Some(ADMIN),
+                        json!({"enabled":linked})
+                    )
+                    .await
+                    .0,
+                    StatusCode::OK
+                );
+                assert_eq!(
+                    remote(Method::POST, mcp, agent, list.clone())
+                        .await
+                        .unwrap()
+                        .status(),
+                    if linked {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::FORBIDDEN
+                    }
+                );
+            }
+        }
+    }
+    let (status, response) = json_request(
+        f.admin(),
+        Method::PUT,
+        path,
+        Some(ADMIN),
+        json!({"bulb_profile_updates":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response,
+        json!({"remote_mcp":false,"bulb_profile_updates":true})
+    );
+    assert_eq!(
+        load(&f.root)
+            .lock()
+            .unwrap()
+            .pro_settings
+            .bulb_profile_updates,
+        true
+    );
+}
+
+#[tokio::test]
+async fn linked_tunnel_pause_retains_credentials_and_prevents_background_reactivation() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let owner = phone["token"].as_str();
+    let control = "/api/addon/tunnel";
+    let config = "/api/remote-access/config";
+    assert_eq!(
+        json_request(
+            f.admin(),
+            Method::PUT,
+            control,
+            Some(ADMIN),
+            json!({"enabled":true})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let mut setup =
+        json!({"hostname":"box.example.test","connector_token":"test-connector","enabled":true});
+    assert_eq!(
+        json_request(f.mobile(), Method::PUT, config, owner, setup.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    for enabled in [false, true, false] {
+        let (status, body) = json_request(
+            f.admin(),
+            Method::PUT,
+            control,
+            Some(ADMIN),
+            json!({"enabled":enabled}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["configured"], true);
+        assert_eq!(body["enabled"], enabled);
+        assert!(!body.to_string().contains("test-connector"));
+        let stored = FileStorage::new(f.root.to_str().unwrap())
+            .unwrap()
+            .load_remote_access_config()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.enabled, enabled);
+        assert_eq!(stored.connector_token, "test-connector");
+        if !enabled {
+            assert_eq!(
+                json_request(f.mobile(), Method::PUT, config, owner, setup.clone())
+                    .await
+                    .0,
+                StatusCode::CONFLICT
+            );
+        }
+    }
+    setup["resume_paused"] = json!(true);
+    assert_eq!(
+        json_request(f.mobile(), Method::PUT, config, owner, setup)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
