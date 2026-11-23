@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 import '../backend/backend.dart';
 import 'customer_assistant_service.dart';
 
@@ -87,6 +88,9 @@ class HomeAgentClient {
                 .invoke('lighting-agent-access', body: {'action': 'discover'}))
             .data;
         configured = data is Map ? data['endpoint'] as String? : null;
+      } on FunctionException catch (e) {
+        if (e.status == 401 || e.status == 403) rethrow;
+        return null;
       } catch (_) {
         return null;
       }
@@ -107,9 +111,13 @@ class HomeAgentClient {
       return client;
     } on DioException catch (e) {
       client.close();
+      final body = e.response?.data;
+      final legacyCohort = e.response?.statusCode == 403 &&
+          body is Map &&
+          body['error'] == 'legacy_chat';
       if (e.response == null ||
           (e.response?.statusCode ?? 0) >= 500 ||
-          e.response?.statusCode == 403 ||
+          legacyCohort ||
           e.response?.statusCode == 404) {
         return null;
       }

@@ -33,6 +33,6 @@
   ],
   "vars": {
     "ACCEPT_NEW_TURNS": "true",
-    "PILOT_PERCENT": "0",
+    "PILOT_PERCENT": "100",
   },
 }

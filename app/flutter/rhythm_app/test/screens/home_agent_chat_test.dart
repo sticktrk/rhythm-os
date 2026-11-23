@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as image;
 import 'package:image_picker/image_picker.dart';
 import 'package:rhythm_app/screens/hubs/home_agent_chat.dart';
+import 'package:rhythm_app/screens/hubs/lighting_chat_screen.dart';
 import 'package:rhythm_app/services/customer_assistant_service.dart';
 import 'package:rhythm_app/services/home_agent_catalog.dart';
 import 'package:rhythm_app/services/home_agent_client.dart';
@@ -96,6 +97,28 @@ void main() {
     await t.pumpAndSettle();
   }
 
+  testWidgets(
+      'the app opens the home agent and sends the first turn through it',
+      (t) async {
+    final changes = ValueNotifier<bool>(true);
+    addTearDown(changes.dispose);
+    await t.pumpWidget(MaterialApp(
+        home: LightingChatScreen(
+      openHub: ({bool reconnect = false}) async => hub,
+      openAgent: () async => client,
+      account: CustomerAssistantService(
+          (_) async => throw StateError('Unexpected legacy request'),
+          () => true),
+      current: () => true,
+      changes: changes,
+      local: true,
+      guided: () {},
+    )));
+    await t.pumpAndSettle();
+    expect(find.byTooltip('Add a photo'), findsOneWidget);
+    await send(t, 'Why are my lights different?');
+    expect(client.calls.where((call) => call.$1 == 'turn'), hasLength(1));
+  });
   testWidgets(
       'voluntary still can be discarded or sent alone; camera denial and skipping a suggestion keep chat usable',
       (t) async {
