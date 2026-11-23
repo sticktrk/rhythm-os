@@ -187,6 +187,22 @@ further investigation in the authorized Logs view. In the console,
 open the home's **Open assistant** link and choose **Check support access**.
 The existing Logs view shows authorized staff the underlying diagnostic text.
 
+Use `account_email_only: true` with `staff_find_homes` for an exact account
+lookup. For an exact room name, pass `exact: true` to `staff_find_hub_nodes`.
+When advertised, `staff_read_log` accepts `include_timings: true` with both
+time bounds for timestamped controls snapshot durations. The response reports
+whether the available tail reaches the start of the window.
+
+Use `staff_plan_profile_tuning` for a numeric shared-profile adjustment.
+It samples both curves on the selected hub and verifies the hub's reviewed
+before/after definitions. The model receives the changed values, affected room
+count and calculated samples. The administrator sees the complete native review
+in the console. Read your plan's bounded outcome with `staff_read_plan_outcome`
+within ten minutes of approval. A verified readback reflects the stored state
+at approval. Read the same profile again for its present state. A successful
+`staff_probe_hub` includes an audit reference. Staff with access to the
+service audit can use that reference to identify the hub for a fresh review.
+
 Use `staff_select_hub` to discover the selected appliance's operations in the
 same conversation. Use `staff_find_hub_nodes` to match the person's room,
 sensor or light name inside the service and pass the returned reference to the

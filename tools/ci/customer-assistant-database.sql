@@ -29,3 +29,5 @@ CREATE FUNCTION storage.foldername(text) RETURNS text[] LANGUAGE sql AS $$ SELEC
 \ir ../app/supabase/migrations/20261119000000_protect_assistant_relay_routes.sql
 \ir ../app/supabase/migrations/20261119010000_customer_assistant_reviews.sql
 \ir ../app/supabase/tests/customer_assistant_reviews.sql
+\ir ../app/supabase/migrations/20261122000000_lighting_chat_usage.sql
+\ir ../app/supabase/tests/lighting_chat_usage.sql

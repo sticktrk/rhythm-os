@@ -17,8 +17,23 @@ function fixture(
   reviewResponse?: (step: string, args: Record<string, unknown>) => unknown,
 ) {
   let authCalls = 0;
+  let modelCalls = 0;
   const seen: string[] = [];
   const backend = {
+    chatModel: {
+      key: "model-fixture",
+      model: "test",
+      request: async () => {
+        modelCalls++;
+        return Response.json({
+          status: "completed",
+          output: [{
+            type: "message",
+            content: [{ type: "output_text", text: "Target is 50%." }],
+          }],
+        });
+      },
+    },
     url: "https://fixture.invalid",
     publicKey: "fixture-public",
     serviceKey: "fixture-service",
@@ -35,15 +50,23 @@ function fixture(
             status: 500,
           });
         }
-        if (bearer !== "Bearer fixture-resident") {
+        if (
+          bearer !== "Bearer fixture-resident" &&
+          bearer !== "Bearer fixture-guest"
+        ) {
           return Response.json({ message: "expired" }, { status: 401 });
         }
         return Response.json({
           id: actor,
           aud: "authenticated",
           role: "authenticated",
-          is_anonymous: false,
+          is_anonymous: bearer === "Bearer fixture-guest",
         });
+      }
+      if (path === "/rest/v1/rpc/reserve_lighting_chat_turn") {
+        equal(bearer, "Bearer fixture-service");
+        equal(await req.json(), { p_actor: actor });
+        return Response.json(true);
       }
       if (path === "/rest/v1/rpc/customer_assistant_review") {
         equal(bearer, "Bearer fixture-service");
@@ -121,7 +144,12 @@ function fixture(
       }),
       backend,
     );
-  return { invoke, seen, authCalls: () => authCalls };
+  return {
+    invoke,
+    seen,
+    authCalls: () => authCalls,
+    modelCalls: () => modelCalls,
+  };
 }
 
 Deno.test("resident HTTP scopes reads to membership and preserves the device handoff for a saved hub", async () => {
@@ -287,4 +315,25 @@ Deno.test("membership removal explains device access and hands off each hub to t
     receipt.next_step.instructions.includes("Authorized credentials"),
     true,
   );
+});
+
+Deno.test("chat verifies the resident and charges only their quota before inference", async () => {
+  const { invoke, seen, modelCalls } = fixture();
+  const turn = {
+    lighting_chat: {
+      messages: [{ role: "user", text: "How bright?" }],
+      room: { canonical_brightness: 50 },
+      tools: [],
+    },
+  };
+  for (const token of ["expired", "fixture-guest"]) {
+    equal((await invoke(turn, token)).status, 401);
+  }
+  equal(modelCalls(), 0);
+  const reply = await invoke({ ...turn, user_id: "untrusted" });
+  equal([reply.status, await reply.json()], [200, { text: "Target is 50%." }]);
+  equal(seen.filter((p) => p.includes("/rpc/")), [
+    "/rest/v1/rpc/reserve_lighting_chat_turn",
+  ]);
+  equal(modelCalls(), 1);
 });

@@ -52,7 +52,11 @@ with linked pull requests and a full comparison link.
 Add `--device http://HOST:54448 --token-file FILE --scenario smoke|state|onboarding|ota`
 to verify the exact package on a bench device and write a local receipt under
 `.release-evidence/`. Device evidence is optional so routine iteration remains
-fast. An emergency bypass must be explicit:
+fast. Supply a bearer issued under Assistant access for that hub. The verifier
+discovers the hub MCP tools, checks the installed package and OTA stage, and
+reads lighting state for the state and onboarding scenarios. Onboarding also
+records an owner handoff and exits incomplete because enrollment and remote
+access require verification in the selected home. An emergency bypass must be explicit:
 
 ```bash
 ./tools/os/scripts/promote-stable.sh \

@@ -387,6 +387,67 @@ void _staffAssistantScenarios() {
       expect(deletePreview.containsKey('apply_arguments'), false);
     });
 
+    test(
+        'numeric profile review samples on the selected hub and waits for the console',
+        () async {
+      final home = await service.call('staff_find_homes',
+          {'query': 'ada@example.com', 'account_email_only': true});
+      final ref = home['homes'].single['hubs'].single['hub_ref'];
+      expect(
+          (await service.call('staff_find_homes',
+              {'query': 'Ada Home', 'account_email_only': true}))['homes'],
+          isEmpty);
+      final probe = await service.call('staff_probe_hub', {'hub_ref': ref});
+      expect(service.audit.last['audit_ref'], probe['audit_ref']);
+      expect(service.audit.last['hub_id'], 'hub-1');
+      service.duplicateInstallation = true;
+      await service.call('staff_probe_hub', {'hub_ref': ref}, failure: true);
+      service.duplicateInstallation = false;
+      final partial = await service.call('staff_find_hub_nodes',
+          {'hub_ref': ref, 'query': 'Ada', 'exact': true});
+      expect(partial['nodes'], isEmpty);
+      final input = {
+        'hub_ref': ref,
+        'profile_id': 'rhythm',
+        'overrides': {'max_brightness': 60}
+      };
+      final review = await service.call('staff_plan_profile_tuning', input);
+      expect(review['scope']['changes']['max_brightness'],
+          {'before': 80, 'after': 60});
+      expect(review['scope']['current_curve']['brightness'], [80]);
+      expect(review['scope']['candidate_curve']['brightness'], [60]);
+      final approved = await service.call('staff_apply_plan',
+          {'plan_id': review['plan_id'], 'confirmed': true});
+      expect(approved['status'], 'awaiting_console_approval');
+      expect(service.writes, 0);
+      expect((await service.approve(review['plan_id']))['status'], 'applied');
+      final outcome = await service
+          .call('staff_read_plan_outcome', {'plan_id': review['plan_id']});
+      expect(outcome['canonical_readback_verified'], true);
+      expect(outcome['status'], 'applied');
+      service.actor = 'other';
+      await service.call(
+          'staff_read_plan_outcome', {'plan_id': review['plan_id']},
+          failure: true);
+      service.actor = 'staff-user';
+      expect(service.writes, 1);
+      await service.call(
+          'staff_plan_profile_tuning',
+          {
+            ...input,
+            'overrides': {'name': 'private_canary'}
+          },
+          failure: true);
+      service.extraReview = {'new_effect': 'private_canary'};
+      final handoff = await service.call('staff_plan_profile_tuning', input);
+      expect(handoff['status'], 'handoff');
+      expect(handoff.containsKey('plan_id'), false);
+      service.extraReview = {};
+      service.rowChanged = true;
+      await service.call('staff_plan_profile_tuning', input, failure: true);
+      expect(service.writes, 1);
+    });
+
     test('submits a reviewed fleet report once with a private bundle transfer',
         () async {
       final hub =
@@ -452,7 +513,7 @@ class _StaffFixture {
   late final Map<String, dynamic> envelope;
   String role = 'admin', actor = 'staff-user', liveHub = 'srv-test';
   final audit = <Map<String, dynamic>>[];
-  bool granted = true, rowChanged = false;
+  bool granted = true, rowChanged = false, duplicateInstallation = false;
   Map<String, dynamic> extraReview = {};
   int deviceCalls = 0, writes = 0, deleted = 0, legacyRequests = 0, uploads = 0;
 
@@ -579,6 +640,9 @@ class _StaffFixture {
     if (path == '/rest/v1/hubs' && request.method == 'GET') {
       final rows = jsonDecode(_supabaseResponse(request).body) as List;
       rows.first['remote_endpoint']['host'] = 'hub-1.relay.test';
+      if (duplicateInstallation) {
+        rows.add({...rows.first as Map, 'id': 'other-record'});
+      }
       return _jsonResponse(rows);
     }
     if (path == '/rest/v1/support_debug_bundle_submissions') {
@@ -653,6 +717,9 @@ class _StaffFixture {
       return _jsonResponse({
         'operations': [
           for (final op in operations.where((op) => [
+                'read_profile_curve',
+                'plan_profile_edit',
+                'apply_profile_edit',
                 'plan_hub_update',
                 'apply_device_plan',
                 'get_handoff',
@@ -684,6 +751,50 @@ class _StaffFixture {
                 }
             }
         ]
+      });
+    }
+    final config = {
+      'id': 'rhythm',
+      'name': 'private_canary',
+      'max_brightness': 80
+    };
+    if (path == '/api/config') return _jsonResponse(config);
+    if (path.endsWith('/read_profile_curve')) {
+      final args = jsonDecode((request as http.Request).body);
+      return _jsonResponse({
+        'config': config,
+        'curve': {
+          'hours': [8],
+          'brightness': [args['profile']['max_brightness']],
+          'kelvin': [3000]
+        }
+      });
+    }
+    if (path.endsWith('/plan_profile_edit')) {
+      final args = jsonDecode((request as http.Request).body);
+      return _jsonResponse({
+        'server_instance_id': liveHub,
+        'plan_id': 'native-plan',
+        ...extraReview,
+        'operation': 'apply_profile_edit',
+        'potentially_affected_rooms': [
+          {'name': 'private_canary'}
+        ],
+        'review': {
+          'before': {...config, if (rowChanged) 'max_brightness': 70},
+          'after': args['profile']
+        },
+        'apply_arguments': {
+          'plan_id': 'native-plan',
+          'server_instance_id': liveHub
+        }
+      });
+    }
+    if (path.endsWith('/apply_profile_edit')) {
+      writes++;
+      return _jsonResponse({
+        'status': 'applied',
+        'canonical_readback': {...config, 'max_brightness': 60}
       });
     }
     if (path.endsWith('/plan_hub_update')) {
