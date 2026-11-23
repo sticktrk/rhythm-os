@@ -13,6 +13,22 @@ Deno.serve(async (req) => {
     console.log(`Deleting user: ${userId}`)
 
     try {
+      // Queue erasure while the resident's bearer can still be authenticated.
+      // If the Worker is offline, revoking the account removes access immediately
+      // and each conversation's independent inactivity alarm purges its state.
+      const agent = Deno.env.get('RHYTHM_LIGHTING_AGENT_URL')
+      if (agent) {
+        try {
+          const result = await fetch(new URL('/v1/forget', agent), {
+            method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(5000),
+            headers: { Authorization: req.headers.get('Authorization')! },
+          })
+          if (!result.ok) console.warn('Agent erasure deferred to retention')
+        } catch {
+          console.warn('Agent erasure deferred to retention')
+        }
+      }
+
       // Delete user data from tables.
       // Order matters if there are no ON DELETE CASCADE constraints.
 

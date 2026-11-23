@@ -81,8 +81,10 @@ class LightingProposal {
 
 class LightingChatHub {
   LightingChatHub(this.rooms, this.tools, this.call, this.close,
-      {this.canUndo = false});
+      {this.canUndo = false, this.catalog = const {}, this.nodes = const []});
   final bool canUndo;
+  final Set<String> catalog;
+  final List<RhythmTopologyNode> nodes;
   final List<RhythmTopologyNode> rooms;
   final Set<String> tools;
   final Future<CustomerAction> Function(String, CustomerAction) call;
@@ -234,7 +236,10 @@ class LightingChatConnection {
         final result = await mcp.call(op, args);
         _check();
         return result;
-      }, mcp.close, canUndo: tools.contains('undo_room_trial'));
+      }, mcp.close,
+          canUndo: tools.contains('undo_room_trial'),
+          catalog: tools,
+          nodes: topology.nodes);
     } catch (_) {
       mcp.close();
       rethrow;

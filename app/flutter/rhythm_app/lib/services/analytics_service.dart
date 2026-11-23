@@ -96,6 +96,20 @@ class AnalyticsService {
   Future<void> logLightingChatTurn(LightingChatOutcome outcome) =>
       logEvent('lighting_chat_turn', {'outcome': outcome.name});
 
+  Future<void> logHomeAgentProgress(String journey, String outcome,
+      {int? latencyMs, int? steps}) async {
+    if (!RegExp(r'^[0-9a-f-]{36}$').hasMatch(journey) ||
+        !const {'answered', 'approved', 'cancelled', 'walk_started', 'verified', 'acknowledged',
+          'observed', 'uncertain', 'awaiting_owner', 'queued', 'partial', 'rejected'}.contains(outcome)) {
+      return;
+    }
+    await logEvent('home_agent_progress', {
+      'journey_id': journey, 'outcome': outcome,
+      if (latencyMs != null) 'latency_ms': latencyMs.clamp(0, 120000),
+      if (steps != null) 'steps': steps.clamp(0, 8),
+    });
+  }
+
   /// Set a user property for segmentation.
   Future<void> setUserProperty(String name, String? value) async {
     if (!_initialized || _analytics == null) return;

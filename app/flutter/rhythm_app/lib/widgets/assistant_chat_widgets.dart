@@ -122,6 +122,8 @@ class AssistantComposer extends StatelessWidget {
     super.key,
     required this.controller,
     required this.onSend,
+    this.canSendEmpty = false,
+    this.leading,
     this.hint = 'Message',
     this.sendLabel = 'Send',
     this.maxLength,
@@ -129,6 +131,8 @@ class AssistantComposer extends StatelessWidget {
   final TextEditingController controller;
   final ValueChanged<String>? onSend;
   final String hint, sendLabel;
+  final bool canSendEmpty;
+  final Widget? leading;
   final int? maxLength;
 
   @override
@@ -150,6 +154,7 @@ class AssistantComposer extends StatelessWidget {
         onSubmitted: onSend,
         style: const TextStyle(color: CelestialColors.textPrimary),
         decoration: InputDecoration(
+          prefixIcon: leading,
           hintText: hint,
           counterText: '',
           hintStyle: const TextStyle(color: CelestialColors.textSecondary),
@@ -167,9 +172,10 @@ class AssistantComposer extends StatelessWidget {
               color: CelestialColors.accentBlue,
               disabledColor: CelestialColors.textSecondary,
               icon: const Icon(Icons.arrow_circle_up_rounded, size: 30),
-              onPressed: onSend == null || value.text.trim().isEmpty
-                  ? null
-                  : () => onSend!(value.text),
+              onPressed:
+                  onSend == null || (!canSendEmpty && value.text.trim().isEmpty)
+                      ? null
+                      : () => onSend!(value.text),
             ),
           ),
         ),
