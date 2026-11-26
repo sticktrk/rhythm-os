@@ -37,7 +37,7 @@ export function readLightUsageBatch(
   for (const value of segmentsValue) {
     if (!isObject(value)) return { error: 'usage_segments must contain objects' }
     const normalized = normalizeSegment(value)
-    if ('error' in normalized) return normalized
+    if (!('segment_id' in normalized)) return normalized
     const segmentId = String(normalized.segment_id)
     if (segmentIds.has(segmentId)) {
       return { error: 'usage_segments contains duplicate segment_id' }
@@ -48,7 +48,7 @@ export function readLightUsageBatch(
   return { schemaVersion: schemaValue, batchId, segments }
 }
 
-function normalizeSegment(value: JsonObject): JsonObject | LightUsageContractError {
+function normalizeSegment(value: JsonObject): (JsonObject & { segment_id: string }) | LightUsageContractError {
   const segmentId = readOpaqueId(value.segment_id)
   const subjectId = readBoundedToken(value.subject_id, 160)
   const subjectKind = value.subject_kind

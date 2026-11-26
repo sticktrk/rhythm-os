@@ -1,24 +1,14 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from 'npm:@supabase/supabase-js@2.118.0'
 import {
   JsonObject,
   rowForDeviceLifecycle,
 } from './device_lifecycle_contract.ts'
 import { readLightUsageBatch } from './light_usage_contract.ts'
+import { serverActivityTokenNeedsActivation } from '../_shared/server_activity_token.ts'
 import {
-  serverActivityTokenCanAuthenticate,
-  serverActivityTokenNeedsActivation,
-} from '../_shared/server_activity_token.ts'
-
-type DeviceTokenRow = {
-  id: string
-  user_id: string
-  home_id: string
-  hub_id: string
-  server_instance_id?: string | null
-  activated_at?: string | null
-  activation_expires_at?: string | null
-  revoked_at?: string | null
-}
+  authenticateActivityDevice,
+  readBearerToken,
+} from '../_shared/activity_device_auth.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -50,26 +40,12 @@ Deno.serve(async (req) => {
       requireEnv('SUPABASE_URL'),
       readSupabaseSecretKey(),
     )
-    const tokenRow = await lookupDeviceToken(adminClient, token)
-    if (!tokenRow || !serverActivityTokenCanAuthenticate(tokenRow)) {
-      return jsonResponse({ error: 'Invalid device token' }, 401)
-    }
-    if (tokenRow.hub_id !== hubId || tokenRow.home_id !== homeId) {
-      return jsonResponse({ error: 'Device token scope mismatch' }, 403)
-    }
-    const stillAuthorized = await tokenStillAuthorized(adminClient, tokenRow)
-    if (!stillAuthorized) {
-      await revokeDeviceToken(adminClient, tokenRow.id)
-      return jsonResponse({ error: 'Device token no longer authorized' }, 403)
-    }
-
     const serverInstanceId = readString(body, 'server_instance_id')
-    if (
-      tokenRow.server_instance_id &&
-      tokenRow.server_instance_id !== serverInstanceId
-    ) {
-      return jsonResponse({ error: 'Server identity mismatch' }, 403)
-    }
+    const auth = await authenticateActivityDevice(adminClient, token, {
+      homeId, hubId, serverInstanceId,
+    })
+    if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+    const tokenRow = auth.tokenRow
 
     const events = readEvents(body)
     if (events instanceof Response) return events
@@ -181,23 +157,6 @@ Deno.serve(async (req) => {
   }
 })
 
-async function lookupDeviceToken(
-  adminClient: any,
-  token: string,
-): Promise<DeviceTokenRow | null> {
-  const tokenHash = await sha256Hex(token)
-  const { data, error } = await adminClient
-    .from('server_light_activity_device_tokens')
-    .select(
-      'id,user_id,home_id,hub_id,server_instance_id,activated_at,activation_expires_at,revoked_at',
-    )
-    .eq('token_hash', tokenHash)
-    .is('revoked_at', null)
-    .maybeSingle()
-  if (error) throw new Error(error.message)
-  return data ?? null
-}
-
 async function activateDeviceToken(
   adminClient: any,
   tokenId: string,
@@ -208,50 +167,6 @@ async function activateDeviceToken(
   )
   if (error) throw new Error(error.message)
   return data === true
-}
-
-async function tokenStillAuthorized(
-  adminClient: any,
-  tokenRow: DeviceTokenRow,
-): Promise<boolean> {
-  const { data: home, error: homeError } = await adminClient
-    .from('homes')
-    .select('id,member_ids')
-    .eq('id', tokenRow.home_id)
-    .maybeSingle()
-  if (homeError) throw new Error(homeError.message)
-  if (!home || !Array.isArray(home.member_ids)) return false
-  if (!home.member_ids.includes(tokenRow.user_id)) return false
-
-  const { data: hub, error: hubError } = await adminClient
-    .from('hubs')
-    .select('id,home_id,type,server_instance_id')
-    .eq('id', tokenRow.hub_id)
-    .maybeSingle()
-  if (hubError) throw new Error(hubError.message)
-  if (!hub || hub.home_id !== tokenRow.home_id || hub.type !== 'server') {
-    return false
-  }
-  if (
-    tokenRow.server_instance_id &&
-    hub.server_instance_id &&
-    hub.server_instance_id !== tokenRow.server_instance_id
-  ) {
-    return false
-  }
-  return true
-}
-
-async function revokeDeviceToken(
-  adminClient: any,
-  tokenId: string,
-): Promise<void> {
-  const { error } = await adminClient
-    .from('server_light_activity_device_tokens')
-    .update({ revoked_at: new Date().toISOString() })
-    .eq('id', tokenId)
-    .is('revoked_at', null)
-  if (error) throw new Error(error.message)
 }
 
 function rowForActivity({
@@ -418,22 +333,6 @@ function clampInt(
 ): number | null {
   if (value == null) return null
   return Math.min(max, Math.max(min, value))
-}
-
-function readBearerToken(authHeader: string | null): string | null {
-  if (!authHeader) return null
-  const [scheme, token] = authHeader.split(' ')
-  if (scheme !== 'Bearer' || !token) return null
-  const trimmed = token.trim()
-  return trimmed.length > 0 ? trimmed : null
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const data = new TextEncoder().encode(value)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
