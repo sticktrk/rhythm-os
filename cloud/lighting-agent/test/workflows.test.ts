@@ -37,6 +37,136 @@ const palette = {
   brightness_percent: 55,
 };
 
+type ModelRequest = {
+  input: { role: string; content: unknown }[];
+};
+function modelReply(
+  decision: unknown,
+  receive?: (body: ModelRequest) => void,
+): typeof fetch {
+  return async (_url, init) => {
+    receive?.(JSON.parse(String(init?.body)));
+    return Response.json({
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: JSON.stringify(decision) }],
+        },
+      ],
+    });
+  };
+}
+const plan = (provider: typeof fetch, turn: Turn, photo?: string) =>
+  infer({ OPENAI_API_KEY: "test-only" }, turn, photo, provider);
+
+test("the OpenAI planner sends bounded context and reads the final answer after reasoning", async () => {
+  const request: Turn = {
+    ...turn,
+    messages: [
+      { role: "user", text: "Help me choose a warmer color." },
+      { role: "assistant", text: "What color is the wall?" },
+      { role: "user", text: "" },
+    ],
+  };
+  const answer = { text: "Amber would complement that wall.", steps: [] };
+  const message = (text: string, phase: string) => ({
+    type: "message",
+    role: "assistant",
+    phase,
+    content: [{ type: "output_text", text }],
+  });
+  const provider: typeof fetch = async (url, init) => {
+    assert.equal(url, "https://api.openai.com/v1/responses");
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.redirect, "manual");
+    assert.equal(
+      new Headers(init?.headers).get("authorization"),
+      "Bearer test-only",
+    );
+    assert.ok(init?.signal);
+    const body = JSON.parse(String(init.body));
+    assert.equal(body.model, "gpt-6.2-sol");
+    assert.deepEqual(body.reasoning, { effort: "low" });
+    assert.equal(body.store, false);
+    assert.deepEqual(body.text.format, { type: "json_object" });
+    assert.ok(body.max_output_tokens > 0);
+    assert.equal(body.input[0].role, "developer");
+    assert.match(body.input[0].content, /JSON/);
+    assert.deepEqual(body.input.slice(1), [
+      { role: "user", content: request.messages[0].text },
+      { role: "assistant", content: request.messages[1].text },
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "Here is the photo for our conversation.",
+          },
+          {
+            type: "input_image",
+            image_url: "data:image/jpeg;base64,fixture",
+            detail: "auto",
+          },
+        ],
+      },
+    ]);
+    assert.doesNotMatch(String(init.body), /test-only|previous_response_id/);
+    return Response.json({
+      status: "completed",
+      output: [
+        { type: "reasoning", summary: [] },
+        message("Looking at the wall.", "commentary"),
+        message(JSON.stringify(answer), "final_answer"),
+      ],
+    });
+  };
+  assert.deepEqual(await plan(provider, request, "fixture"), answer);
+});
+
+test("an incomplete, refused, or malformed provider response cannot yield a decision", async () => {
+  const complete = {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: '{"text":"Review","steps":[]}' }],
+  };
+  for (const envelope of [
+    { status: "incomplete", output: [complete] },
+    { status: "completed", output: [{ ...complete, status: "incomplete" }] },
+    { status: "completed", output: [{ type: "reasoning" }] },
+    { status: "completed", output: [complete, complete] },
+    {
+      status: "completed",
+      output: [{ ...complete, content: [{ type: "refusal" }] }],
+    },
+    {
+      status: "completed",
+      output: [
+        { ...complete, content: [{ type: "output_text", text: "not json" }] },
+      ],
+    },
+  ]) {
+    await assert.rejects(
+      plan(async () => Response.json(envelope), turn),
+      /invalid_proposal/,
+    );
+  }
+  let calls = 0;
+  const unavailable: typeof fetch = async () => {
+    calls++;
+    return new Response("sensitive provider details", { status: 429 });
+  };
+  await assert.rejects(infer({}, turn, undefined, unavailable), {
+    message: "inference_unavailable",
+  });
+  assert.equal(calls, 0);
+  await assert.rejects(plan(unavailable, turn), {
+    message: "inference_unavailable",
+  });
+  assert.equal(calls, 1);
+});
+
 test("a phone can resolve an inferred room before a lighting proposal", async () => {
   const otherRoom = "r_" + "9".repeat(24);
   const query = "Dim the lights where I cook";
@@ -54,17 +184,11 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
   });
   let systemText = "";
   const answer = (response: unknown) =>
-    ({
-      run: async (
-        _model: string,
-        input: { messages: { content: string }[] },
-      ) => {
-        systemText = input.messages[0].content;
-        return { response };
-      },
-    }) as unknown as Ai;
+    modelReply(response, ({ input }) => {
+      systemText = String(input[0].content);
+    });
   for (const room_query of ["kitchen", ""]) {
-    const decision = await infer(
+    const decision = await plan(
       answer({ text: "", steps: [], room_query }),
       request,
     );
@@ -78,7 +202,7 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
     ...request,
     messages: [{ role: "user" as const, text: "Dim the room where I relax." }],
   };
-  assert.deepEqual(await infer(clarify, uncertain), {
+  assert.deepEqual(await plan(clarify, uncertain), {
     text: "Which room?",
     steps: [],
     room_query: "",
@@ -92,12 +216,12 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
     targets: [previous],
   };
   for (const candidate of [unscoped, { ...request, sole_room: true }]) {
-    await infer(clarify, candidate);
+    await plan(clarify, candidate);
     assert.doesNotMatch(systemText, /home's only room/);
   }
   assert.deepEqual(
     (
-      await infer(
+      await plan(
         answer({ text: "Review this change.", steps: [dim] }),
         turnSchema.parse({ ...unscoped, sole_room: true }),
       )
@@ -107,7 +231,7 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
   assert.match(systemText, /phone confirmed selected is the home's only room/);
   assert.match(systemText, /Still look up any new location/);
   await assert.rejects(
-    infer(answer({ text: "Review.", steps: [dim] }), {
+    plan(answer({ text: "Review.", steps: [dim] }), {
       ...unscoped,
       targets: [{ ...previous, included: false }],
     }),
@@ -116,7 +240,7 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
   const grounded = { ...request, room_lookup: false };
   assert.deepEqual(
     (
-      await infer(
+      await plan(
         answer({ text: "Review this change.", steps: [dim] }),
         grounded,
       )
@@ -131,7 +255,7 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
     { text: "", steps: [], room_query: "x".repeat(81) },
     { text: "", steps: [], room_query: null },
   ]) {
-    await assert.rejects(infer(answer(invalid), request));
+    await assert.rejects(plan(answer(invalid), request));
   }
 
   for (const candidate of [
@@ -151,13 +275,13 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
       },
     },
   ]) {
-    assert.deepEqual(await infer(clarify, candidate), {
+    assert.deepEqual(await plan(clarify, candidate), {
       text: "Which room?",
       steps: [],
     });
     assert.doesNotMatch(systemText, /room_query/);
   }
-  assert.deepEqual(await infer(clarify, request, "photo"), {
+  assert.deepEqual(await plan(clarify, request, "photo"), {
     text: "Which room?",
     steps: [],
   });
@@ -165,54 +289,41 @@ test("a phone can resolve an inferred room before a lighting proposal", async ()
 
 test("a whole-home scene design needs only a palette from the model", async () => {
   const proposal = step(draft, creation, palette);
-  const ai = {
-    run: async (_model: string, input: { messages: { content: string }[] }) => {
-      assert.match(input.messages[0].content, /Make a scene/);
-      assert.match(input.messages[0].content, /color_1/);
+  const ai = modelReply(
+    { text: "Emerald and violet at a soft brightness.", palette },
+    ({ input }) => {
+      const instructions = String(input[0].content);
+      assert.match(instructions, /Make a scene/);
+      assert.match(instructions, /color_1/);
       assert.doesNotMatch(
-        input.messages[0].content,
+        instructions,
         /plan_generated_home_scene|plan_home_scene_edit|adjust_room_warmth|d_[a-f0-9]{24}/,
       );
-      assert.equal(input.messages.at(-1)?.content, draftTurn.messages[0].text);
-      return {
-        response: {
-          text: "Emerald and violet at a soft brightness.",
-          palette,
-        },
-      };
+      assert.equal(input.at(-1)?.content, draftTurn.messages[0].text);
     },
-  } as unknown as Ai;
-  assert.deepEqual((await infer(ai, turnSchema.parse(draftTurn))).steps, [
+  );
+  assert.deepEqual((await plan(ai, turnSchema.parse(draftTurn))).steps, [
     proposal,
   ]);
 
-  const clarify = {
-    run: async () => ({
-      response: { text: "Which colors do you have in mind?", palette: null },
-    }),
-  } as unknown as Ai;
-  assert.deepEqual((await infer(clarify, draftTurn)).steps, []);
+  const clarify = modelReply({
+    text: "Which colors do you have in mind?",
+    palette: null,
+  });
+  assert.deepEqual((await plan(clarify, draftTurn)).steps, []);
   const uncaptioned = {
     ...draftTurn,
     messages: [{ role: "user" as const, text: "" }],
   };
-  const proposesDraft = {
-    run: async () => ({
-      response: { text: "I see colorful lights.", palette },
-    }),
-  } as unknown as Ai;
-  assert.deepEqual(
-    (await infer(proposesDraft, uncaptioned, "photo")).steps,
-    [],
-  );
-  await assert.rejects(infer(proposesDraft, uncaptioned), /message_required/);
+  const proposesDraft = modelReply({ text: "I see colorful lights.", palette });
+  assert.deepEqual((await plan(proposesDraft, uncaptioned, "photo")).steps, []);
+  await assert.rejects(plan(proposesDraft, uncaptioned), /message_required/);
   for (const response of [
     { text: "A palette", steps: [proposal] },
     { text: "A palette", palette, target: scene },
     { text: "A palette", palette: { ...palette, brightness_percent: 120 } },
   ]) {
-    const invalid = { run: async () => ({ response }) } as unknown as Ai;
-    await assert.rejects(infer(invalid, draftTurn));
+    await assert.rejects(plan(modelReply(response), draftTurn));
   }
 });
 
@@ -255,12 +366,9 @@ test("generated proposals contain only two to four consecutive hex colors and bo
 
 test("an explicitly chosen whole-home scene creates a review without inference", async () => {
   let calls = 0;
-  const ai = {
-    run: async () => {
-      calls++;
-      return { response: { text: "Lighting advice", steps: [] } };
-    },
-  } as unknown as Ai;
+  const ai = modelReply({ text: "Lighting advice", steps: [] }, () => {
+    calls++;
+  });
   const choice = {
     ref: scene,
     tools: ["plan_home_scene_edit"],
@@ -268,7 +376,7 @@ test("an explicitly chosen whole-home scene creates a review without inference",
   };
   const message = `Apply ${scene} to the whole home.`;
   const request = (text: string, targets: Turn["targets"], photo?: string) =>
-    infer(ai, { ...turn, messages: [{ role: "user", text }], targets }, photo);
+    plan(ai, { ...turn, messages: [{ role: "user", text }], targets }, photo);
 
   const review = await request(message, [{ ref: room, tools: [] }, choice]);
   assert.deepEqual(review.steps, [step(scene, "plan_home_scene_edit", {})]);

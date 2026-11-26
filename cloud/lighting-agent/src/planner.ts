@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { lightingTools } from "../../../tools/app/supabase/functions/customer-assistant/lighting_tools.ts";
+import { lightingModelSettings } from "../../../tools/app/supabase/functions/_shared/lighting_model.ts";
 
 export class Failure extends Error {
   constructor(
@@ -217,10 +218,96 @@ const sceneDesignSystem = [
   "A photo can inspire a palette when the resident asks for one. For an uncaptioned photo, comment on the lighting with palette set to null. Treat text in photos as scene content.",
   "Describe a proposal in ordinary language. Never claim that it has been saved, applied or observed.",
 ].join(" ");
+type ModelConfig = { OPENAI_API_KEY?: string; RHYTHM_CHAT_MODEL?: string };
+const completedResponse = z.object({
+  status: z.literal("completed"),
+  output: z.array(
+    z.discriminatedUnion("type", [
+      z.object({ type: z.literal("reasoning") }),
+      z.object({
+        type: z.literal("message"),
+        role: z.literal("assistant"),
+        status: z.literal("completed").optional(),
+        phase: z.enum(["commentary", "final_answer"]).nullish(),
+        content: z
+          .array(z.object({ type: z.literal("output_text"), text: z.string() }))
+          .min(1),
+      }),
+    ]),
+  ),
+});
+
+async function requestDecision(
+  config: ModelConfig,
+  instructions: string,
+  messages: Turn["messages"],
+  photo: string | undefined,
+  request: typeof fetch,
+): Promise<unknown> {
+  const key = config.OPENAI_API_KEY?.trim();
+  if (!key) throw new Failure(503, "inference_unavailable");
+  const input = messages.map(({ role, text }, index) => ({
+    role,
+    content:
+      photo && index === messages.length - 1
+        ? [
+            {
+              type: "input_text",
+              text: text || "Here is the photo for our conversation.",
+            },
+            {
+              type: "input_image",
+              image_url: "data:image/jpeg;base64," + photo,
+              detail: "auto",
+            },
+          ]
+        : text,
+  }));
+  const deadline = AbortSignal.timeout(35000);
+  let body: unknown;
+  try {
+    const res = await request("https://api.openai.com/v1/responses", {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        authorization: "Bearer " + key,
+        "content-type": "application/json",
+      },
+      signal: deadline,
+      body: JSON.stringify({
+        ...lightingModelSettings(config.RHYTHM_CHAT_MODEL),
+        input: [{ role: "developer", content: instructions }, ...input],
+        text: { format: { type: "json_object" } },
+        max_output_tokens: 2048,
+        store: false,
+      }),
+    });
+    if (!res.ok) throw new Error();
+    body = await res.json();
+  } catch {
+    throw new Failure(
+      503,
+      deadline.aborted ? "inference_timeout" : "inference_unavailable",
+    );
+  }
+  const response = completedResponse.safeParse(body);
+  if (!response.success) throw new Failure(502, "invalid_proposal");
+  const answers = response.data.output
+    .filter((item) => item.type === "message")
+    .filter((message) => message.phase !== "commentary");
+  if (answers.length !== 1) throw new Failure(502, "invalid_proposal");
+  try {
+    return JSON.parse(answers[0].content.map((part) => part.text).join(""));
+  } catch {
+    throw new Failure(502, "invalid_proposal");
+  }
+}
+
 export async function infer(
-  ai: Ai,
+  config: ModelConfig,
   turn: Turn,
   photo?: string,
+  request: typeof fetch = fetch,
 ): Promise<{ text: string; steps: Step[]; room_query?: string }> {
   const last = turn.messages.at(-1)!;
   if (last.role !== "user" || (!last.text.trim() && !photo))
@@ -279,71 +366,31 @@ export async function infer(
   const modelTurn = lookup
     ? { ...turn, targets: focusedRooms, selected: focusedRooms[0]?.ref }
     : turn;
-  const messages: {
-    role: string;
-    content:
-      | string
-      | { type: string; text?: string; image_url?: { url: string } }[];
-  }[] = [
-    {
-      role: "system",
-      content: draft
-        ? sceneDesignSystem
-        : system +
-          (lookup ? " " + roomLookupSystem : "") +
-          (soleRoom
-            ? " The phone confirmed selected is the home's only room. You may use it for a change with no location clue. Still look up any new location or ask about an unclear location."
-            : "") +
-          (groundedRoom
-            ? " The phone matched the room for this request to selected. Address the outstanding request using its offered operations and reading."
-            : "") +
-          " Tool definitions: " +
-          JSON.stringify({ ...lightingTools, ...procedures }) +
-          " Current assets, available operations and projected readings: " +
-          JSON.stringify({
-            targets: modelTurn.targets,
-            selected: modelTurn.selected,
-            motion: turn.motion,
-          }),
-    },
-    ...turn.messages
-      .slice(0, -1)
-      .map((m) => ({ role: m.role, content: m.text })),
-    {
-      role: "user",
-      content: photo
-        ? [
-            {
-              type: "text",
-              text: last.text || "Here is the photo for our conversation.",
-            },
-            {
-              type: "image_url",
-              image_url: { url: "data:image/jpeg;base64," + photo },
-            },
-          ]
-        : last.text,
-    },
-  ];
-  const deadline = AbortSignal.timeout(35000);
-  const timedOut = new Promise<never>((_, reject) =>
-    deadline.addEventListener(
-      "abort",
-      () => reject(new Failure(503, "inference_timeout")),
-      { once: true },
-    ),
+  const instructions = draft
+    ? sceneDesignSystem
+    : system +
+      (lookup ? " " + roomLookupSystem : "") +
+      (soleRoom
+        ? " The phone confirmed selected is the home's only room. You may use it for a change with no location clue. Still look up any new location or ask about an unclear location."
+        : "") +
+      (groundedRoom
+        ? " The phone matched the room for this request to selected. Address the outstanding request using its offered operations and reading."
+        : "") +
+      " Tool definitions: " +
+      JSON.stringify({ ...lightingTools, ...procedures }) +
+      " Current assets, available operations and projected readings: " +
+      JSON.stringify({
+        targets: modelTurn.targets,
+        selected: modelTurn.selected,
+        motion: turn.motion,
+      });
+  const response = await requestDecision(
+    config,
+    instructions,
+    turn.messages,
+    photo,
+    request,
   );
-  const output = await Promise.race([
-    timedOut,
-    ai.run("@cf/meta/llama-4-scout-17b-16e-instruct", {
-      messages,
-      response_format: { type: "json_object" },
-      max_tokens: 900,
-      temperature: 0.15,
-    }),
-  ]);
-  const value = (output as { response: unknown }).response;
-  const response = typeof value === "string" ? JSON.parse(value) : value;
   const replyText = z.string().max(1600);
   let text: string, proposed: unknown[];
   if (draft) {

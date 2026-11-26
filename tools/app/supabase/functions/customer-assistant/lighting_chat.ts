@@ -1,3 +1,4 @@
+import { lightingModelSettings } from "../_shared/lighting_model.ts";
 import { type Fields, object, Rejection } from "./contract.ts";
 
 // These are the room-scoped MCP tools the mobile preview can render and
@@ -17,7 +18,7 @@ function tool(value: unknown): value is Tool {
 export async function lightingChat(
   input: unknown,
   reserve: () => Promise<boolean>,
-  config: { key?: string; model: string },
+  config: { key?: string; model?: string },
   request: typeof fetch = fetch,
 ) {
   const invalid = () => new Rejection(400, "invalid_chat_turn");
@@ -115,21 +116,23 @@ export async function lightingChat(
   try {
     const res = await request("https://api.openai.com/v1/responses", {
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: "Bearer " + config.key,
         "content-type": "application/json",
       },
       signal: AbortSignal.timeout(30000),
       body: JSON.stringify({
-        model: config.model,
-        instructions: instructions + " " + context,
+        ...lightingModelSettings(config.model),
         input: [{
           role: "developer",
-          content: "Current selected room reading: " + JSON.stringify(reading),
+          content: instructions + " " + context +
+            "\nCurrent room reading: " + JSON.stringify(reading),
         }, ...messages],
         tools,
         parallel_tool_calls: false,
-        max_output_tokens: 400,
+        // The Responses API counts reasoning and visible output in this limit.
+        max_output_tokens: 2048,
         store: false,
       }),
     });
@@ -142,13 +145,23 @@ export async function lightingChat(
   if (
     !object(data) || data.status !== "completed" || !Array.isArray(data.output)
   ) throw invalidReply();
+  if (
+    data.output.some((item) =>
+      object(item) && item.type === "message" && Array.isArray(item.content) &&
+      item.content.some((part: unknown) =>
+        object(part) && part.type === "refusal"
+      )
+    )
+  ) throw invalidReply();
   const calls = data.output.filter((x) =>
     object(x) && x.type === "function_call"
   );
   if (calls.length) {
     const { name, arguments: raw } = calls[0];
     if (
-      calls.length !== 1 || !tools.some((t) => t.name === name) ||
+      calls.length !== 1 ||
+      (calls[0].status !== undefined && calls[0].status !== "completed") ||
+      !tools.some((t) => t.name === name) ||
       typeof raw !== "string"
     ) throw invalidReply();
     let args;
@@ -180,9 +193,16 @@ export async function lightingChat(
     }
     return { operation: name, arguments: args };
   }
-  const text = data.output.filter((x) =>
-    object(x) && x.type === "message" && Array.isArray(x.content)
-  )
+  const answers = data.output.filter((item) =>
+    object(item) && item.type === "message" && Array.isArray(item.content) &&
+    (item.phase == null || item.phase === "final_answer")
+  );
+  if (
+    answers.some((item) =>
+      item.status !== undefined && item.status !== "completed"
+    )
+  ) throw invalidReply();
+  const text = answers
     .flatMap((x) => x.content).filter((x) =>
       object(x) && x.type === "output_text" && typeof x.text === "string"
     )

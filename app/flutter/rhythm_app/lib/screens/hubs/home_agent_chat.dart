@@ -120,7 +120,13 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
     }
   }
 
-  Future<void> _open() async {
+  Future<void> _open({bool renewSession = false}) async {
+    if ((renewSession || widget.client.session == null) &&
+        !await widget.client.openSession()) {
+      _add('Reopen lighting chat to reconnect to the assistant.');
+      return;
+    }
+    if (!_live) return;
     final catalog = await HomeAgentCatalog.load(widget.hub, widget.client);
     if (!_live) return;
     setState(() {
@@ -719,6 +725,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         await widget.client.call('clear');
         if (!_live) return;
         setState(() {
+          _catalog = null;
           _messages.clear();
           _history = [];
           _motion = null;
@@ -732,10 +739,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           _plan = null;
           _input.clear();
         });
-        final reply = await widget.client.call('open');
-        if (!_live) return;
-        widget.client.useSession(reply);
-        await _open();
+        await _open(renewSession: true);
       });
   String _status(String status) => switch (status) {
         'review' => 'Awaiting review',
@@ -753,7 +757,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         _ => status
       };
   static const _disclosure =
-      'Ask about your lights, or share a photo. Messages, readings and photos you send are processed by Cloudflare Workers AI.';
+      'OpenAI processes the messages, lighting readings and photos you send. You review each lighting change.';
   static const _checkable = {
     'walk_started',
     'awaiting_owner',
@@ -987,8 +991,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                               height: 44, width: 44, fit: BoxFit.cover)),
                       const SizedBox(width: 12),
                       const Expanded(
-                          child: AssistantNote(
-                              'Photo ready to send to Cloudflare Workers AI')),
+                          child:
+                              AssistantNote('Photo ready to send to OpenAI')),
                       IconButton(
                           tooltip: 'Remove photo',
                           color: CelestialColors.textSecondary,

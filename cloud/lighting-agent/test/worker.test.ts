@@ -29,9 +29,10 @@ const roomSteps = refs.slice(0, 2).map((target) => ({
 
 test("resident turns, image evidence, two-phone claims, lost replies and erasure use the Workers runtime", async () => {
   let allowed = true,
-    reservations = 0;
+    reservations = 0,
+    modelCalls = 0;
   const directory = mkdtempSync(join(tmpdir(), "lighting-agent-test-"));
-  const create = () =>
+  const create = (withKey = true) =>
     new Miniflare(
       convertV4MiniflareOptions({
         resourcePersistencePath: directory,
@@ -46,6 +47,8 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
             bindings: {
               SUPABASE_URL: "https://fixture.invalid",
               SUPABASE_PUBLISHABLE_KEY: "public",
+              ...(withKey ? { OPENAI_API_KEY: "fixture-model-key" } : {}),
+              RHYTHM_CHAT_MODEL: "fixture-vision-model",
               ACCEPT_NEW_TURNS: "true",
               PILOT_PERCENT: "100",
             },
@@ -59,9 +62,67 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
                 useSQLite: true,
               },
             },
-            serviceBindings: { AI: "fixture-ai" },
             outboundService: async (req: Request) => {
-              assert.equal(new URL(req.url).hostname, "fixture.invalid");
+              if (req.url === "https://api.openai.com/v1/responses") {
+                modelCalls++;
+                assert.equal(req.method, "POST");
+                assert.equal(
+                  req.headers.get("authorization"),
+                  "Bearer fixture-model-key",
+                );
+                assert.equal(req.headers.get("apikey"), null);
+                const body = (await req.json()) as {
+                  model: string;
+                  store: boolean;
+                  input: {
+                    role: string;
+                    content: string | { type: string; image_url?: string }[];
+                  }[];
+                };
+                assert.equal(body.model, "fixture-vision-model");
+                assert.equal(body.store, false);
+                const message = body.input.at(-1)!;
+                assert.equal(message.role, "user");
+                let decision;
+                if (Array.isArray(message.content)) {
+                  assert.match(
+                    message.content.find((x) => x.type === "input_image")
+                      ?.image_url ?? "",
+                    /^data:image\/jpeg;base64,/,
+                  );
+                  decision = { text: "Lighting advice", steps: [] };
+                } else if (message.content === roomRequest) {
+                  decision = {
+                    text: "",
+                    room_query: "potting room",
+                    steps: [],
+                  };
+                } else if (message.content === themeRequest) {
+                  decision = {
+                    text: "Blue-green light",
+                    palette: draftStep.arguments,
+                  };
+                } else {
+                  decision = { text: "Lighting advice", steps: roomSteps };
+                }
+                return Response.json({
+                  status: "completed",
+                  output: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      status: "completed",
+                      content: [
+                        { type: "output_text", text: JSON.stringify(decision) },
+                      ],
+                    },
+                  ],
+                });
+              }
+              assert.equal(
+                req.url,
+                "https://fixture.invalid/functions/v1/lighting-agent-access",
+              );
               if (req.headers.get("authorization") !== "Bearer resident")
                 return Response.json({}, { status: 401 });
               const body = (await req.json()) as {
@@ -76,34 +137,19 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
               return Response.json({ actor, hub });
             },
           },
-          {
-            name: "fixture-ai",
-            modules: true,
-            compatibilityDate: "2026-10-01",
-            script: `
-              import { WorkerEntrypoint } from "cloudflare:workers";
-              export default class extends WorkerEntrypoint {
-                async run(model, input) {
-                  const text = input.messages.at(-1).content;
-                  if (text === ${JSON.stringify(roomRequest)}) {
-                    return { response: { text: "", room_query: "potting room", steps: [] } };
-                  }
-                  if (text === ${JSON.stringify(themeRequest)}) {
-                    return { response: { text: "Blue-green light", palette: ${JSON.stringify(draftStep.arguments)} } };
-                  }
-                  const steps = typeof text === "string" ? ${JSON.stringify(roomSteps)} : [];
-                  return { response: { text: "Lighting advice", steps } };
-                }
-              }`,
-          },
         ],
       }),
     );
-  let mf = create();
+  let mf = create(false);
   let session = "";
-  const post = async (op: string, data: unknown = {}, auth = "resident") => {
+  const post = async (
+    op: string,
+    data: unknown = {},
+    auth = "resident",
+    version = ["open", "turn", "photo"].includes(op) ? 2 : 1,
+  ) => {
     const form = data instanceof FormData ? new Response(data) : null;
-    return mf.dispatchFetch("https://worker.test/v1/" + op, {
+    return mf.dispatchFetch(`https://worker.test/v${version}/${op}`, {
       method: "POST",
       headers: {
         authorization: "Bearer " + auth,
@@ -120,10 +166,24 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
   try {
     const bad = await post("open", {}, "other");
     assert.equal(bad.status, 401, await bad.text());
+    assert.equal((await post("open")).status, 503);
+    assert.equal(modelCalls, 0);
+    assert.equal(reservations, 0);
+    await mf.dispose();
+    mf = create();
+    for (const op of ["open", "turn", "photo"]) {
+      const legacy = await post(op, {}, "resident", 1);
+      assert.equal(legacy.status, 403);
+      assert.deepEqual(await legacy.json(), { error: "legacy_chat" });
+    }
+    assert.equal((await post("status", {}, "resident", 2)).status, 404);
+    assert.equal(modelCalls, 0);
+    assert.equal(reservations, 0);
     let res = await post("open");
     assert.equal(res.status, 200, await res.clone().text());
     const opened = (await res.json()) as any;
     session = opened.session;
+    assert.equal(opened.inference_provider, "openai");
     assert.equal(opened.scene_drafts, true);
     assert.equal(opened.room_lookup, true);
     const turn = {
@@ -143,6 +203,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     );
     assert.equal((await post("turn", turn)).status, 409);
     assert.equal(reservations, 1);
+    assert.equal(modelCalls, 1);
     const body = { plan: plan.id, index: 0, digest: "f".repeat(64) };
     assert.equal((await post("claim", body)).status, 409);
     assert.equal((await post("prepare", body)).status, 200);
@@ -209,6 +270,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     assert.equal(((await res.json()) as any).proposed, false);
     assert.equal((await post("photo", photo())).status, 409);
     assert.equal(reservations, 2);
+    assert.equal(modelCalls, 2);
     assert.equal(
       ((await (await post("status")).json()) as any).lastResult,
       "photo_advice",
@@ -346,6 +408,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     const progress = await (await post("status")).text();
     assert.doesNotMatch(progress, /room_query|room_lookup|potting room/);
     assert.ok(!progress.includes(roomRequest));
+    assert.equal(modelCalls, 4); // One inference each for the room plan, photo, scene draft, and room lookup.
     assert.equal((await post("forget")).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal((await post("status")).status, 410);

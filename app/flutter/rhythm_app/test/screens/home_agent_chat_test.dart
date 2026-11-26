@@ -144,6 +144,7 @@ void main() {
     )));
     await t.pumpAndSettle();
     expect(find.byTooltip('Add a photo'), findsOneWidget);
+    expect(find.textContaining('OpenAI processes'), findsOneWidget);
     await send(t, 'Why are my lights different?');
     expect(client.calls.where((call) => call.$1 == 'turn'), hasLength(1));
   });
@@ -195,6 +196,7 @@ void main() {
     await send(t, 'Why do these lamps look different?');
     await send(t, 'I would rather describe them.');
     await pick(t, 'Choose photo');
+    expect(find.text('Photo ready to send to OpenAI'), findsOneWidget);
     await t.tap(find.byTooltip('Remove photo'));
     await t.pumpAndSettle();
     expect(client.calls.where((c) => c.$1 == 'photo'), isEmpty);
@@ -257,7 +259,7 @@ void main() {
         ];
 
     void enableLookup({String? query}) {
-      client.useSession({'session': 'session', 'room_lookup': true});
+      client.supportsRoomLookup = true;
       client.roomQuery = query;
     }
 
@@ -773,8 +775,7 @@ void main() {
         'a whole-home clarification creates a scene for the original mood',
         (t) async {
       sceneHub();
-      client.useSession(
-          {'session': 'session', 'room_lookup': true, 'scene_drafts': true});
+      client.supportsRoomLookup = true;
       client.roomQuery = '';
       agentPalette(holidayColors);
       await open(t);

@@ -4,7 +4,7 @@ Flutter discovers this Worker through the authenticated `lighting-agent-access` 
 
 The Cloudflare Agents SDK stores bounded progress in a SQLite Durable Object for each resident and installation. Clearing the conversation rotates its session and opaque target references. Concurrent phones share the same reviewed plan. Each step has one execution claim. A lost acknowledgement can be inspected from either phone. Read progress using `POST /v1/status` after reconnecting. Account deletion queues erasure through a resident-owned object index. Inactivity expires progress after seven days.
 
-Optional JPEGs use multipart `POST /v1/photo`. Workers AI processes the re-encoded image and returns advice or proposed steps. The phone holds the chat transcript, and the conversation object stores structured outcomes. Provider settings and terms apply to inference. [Cloudflare model details](https://developers.cloudflare.com/workers-ai/models/llama-4-scout-17b-16e-instruct/)
+OpenAI GPT-6.2 Sol powers lighting conversations, room lookup, scene palettes and photo interpretation through the Responses API. The Worker sends recent messages and relevant lighting readings with `store: false`. For optional JPEGs sent to `POST /v2/photo`, it decodes and re-encodes the image before including it in the same request. The phone holds the transcript, and the conversation object stores structured outcomes. [OpenAI model details](https://developers.openai.com/api/docs/models/gpt-6.2-sol)
 
 ## Finding a room in conversation
 
@@ -33,6 +33,10 @@ The Worker tests exercise real SQLite-backed objects in workerd, including a run
 
 ## Deployment
 
-Deploy the named account bridge using the repository's Supabase deployment wrapper. Set Worker secrets `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to that project's URL and publishable key. Deploy using the local Wrangler dependency and the checked-in Durable Object migration. Set `RHYTHM_LIGHTING_AGENT_URL` in the same Supabase project to `https://api-cf.rhythm.lighting` for Rhythm. The account deletion function uses that setting for erasure.
+Set `OPENAI_API_KEY` as a server secret on the Worker and in the Supabase project for room-only chat. Both runtimes default to `gpt-6.2-sol` with low reasoning effort. To override the model, set `RHYTHM_CHAT_MODEL` in both runtimes to an OpenAI Responses API model that supports image input, JSON output and function calling.
+
+Deploy the named account bridge and customer assistant using the repository's Supabase deployment wrapper. Set Worker secrets `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to that project's URL and publishable key. Deploy using the local Wrangler dependency and the checked-in Durable Object migration. Set `RHYTHM_LIGHTING_AGENT_URL` in the same Supabase project to `https://api-cf.rhythm.lighting` for Rhythm. The account deletion function uses that setting for erasure.
+
+The app opens `/v2/open` and verifies `inference_provider: openai` before enabling text or photo turns. An older app or Worker uses the room-only OpenAI chat when opening a conversation. Progress, approvals and receipts continue to use the existing `/v1` routes. If the Worker rolls back mid-conversation, the app can still reconcile a reviewed change, and the older Worker rejects incoming v2 inference requests.
 
 Cloudflare handles lighting chat for all eligible signed-in residents by default. The mobile release build can set `RHYTHM_LIGHTING_AGENT_URL` to the same HTTPS origin to connect directly. Other installations discover their configured origin through the account bridge. `PILOT_RESIDENTS` accepts comma-separated authenticated resident UUIDs. `PILOT_PERCENT` enables a stable percentage of residents. Set `ACCEPT_NEW_TURNS=false` to pause inference and execution claims while existing sessions can reconcile receipts or clear their progress. Removing a resident from the cohort restores the previous mobile chat on the next open. Health checks use `GET /health`. Inspect the UTC quota and aggregate model usage when comparing pilot cost, and use bounded app outcome and latency events for completion and unresolved outcomes.
