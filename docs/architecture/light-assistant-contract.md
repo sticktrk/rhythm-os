@@ -208,8 +208,8 @@ selected app connection. Staff use the selected hub's audited support proxy.
 
 In Home Assistant, open **Settings → Devices & services → Add integration →
 Model Context Protocol Client** and enter the hub URL ending in
-`/api/assistant/mcp`. In Application Credentials, type `rhythm` for both
-the client ID and client secret. The hub accepts a client-chosen ID and
+`/api/assistant/mcp`. In Application Credentials, give the entry a display
+name such as “Rhythm” and type `rhythm` for both the client ID and client secret. The hub accepts a client-chosen ID and
 binds its secret on the first successful exchange. The authorization page
 shows two digits. A local owner opens the request in Rhythm, checks the
 destination, enters those digits and approves or declines. Three incorrect
