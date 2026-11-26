@@ -1091,6 +1091,8 @@ class DeviceAdminProxyRequestDto {
         path == 'api/auth/agent-tokens' ||
         path.startsWith('api/auth/agent-tokens/') ||
         path == 'api/auth/assistant-clients' ||
+        path == 'api/assistant/connections' ||
+        path.startsWith('api/assistant/connections/') ||
         path == 'api/assistant/approvals' ||
         path.startsWith('api/assistant/approvals/') ||
         path == 'api/assistant/mcp' ||
