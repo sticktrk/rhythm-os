@@ -206,28 +206,37 @@ local authenticated owner. The same URL works on the authorized HTTPS tunnel
 and on the HA add-on's mobile listener. The SDK discovers the contract on the
 selected app connection. Staff use the selected hub's audited support proxy.
 
-Home Assistant's MCP Client accepts Streamable HTTP and exposes tools to an
-Assist conversation agent. Its 2026.11 setup accepts an OAuth client ID and
-secret. A plain bearer-header input is absent in this release. Use a scoped
-agent credential for integrations with static bearer support. Keep every
-credential in the transport layer, outside transcripts and tool arguments.
+In Home Assistant, open **Settings → Devices & services → Add integration →
+Model Context Protocol Client** and enter the hub URL ending in
+`/api/assistant/mcp`. In Application Credentials, type `rhythm` for both
+the client ID and client secret. The hub accepts a client-chosen ID and
+binds its secret on the first successful exchange. The authorization page
+shows two digits. A local owner opens the request in Rhythm, checks the
+destination, enters those digits and approves or declines. Three incorrect
+entries cancel a request. The browser continues when the owner approves.
+Enable the Rhythm tools on the selected Assist conversation agent.
+
+Other OAuth clients can use the advertised dynamic registration endpoint
+and an S256 challenge. Each approval creates an independent registration,
+even when clients choose the same ID. Access lasts one hour, refresh rotates
+the credential, and revoking the registration invalidates both. An owner
+can opt into unattended changes while connecting. Operations that require
+an owner review continue to require one.
+
+The activation-code flow remains available to older apps and hubs through
+`POST /api/auth/assistant-clients` and the built-in My Home Assistant
+redirect. Clients that use a static bearer can still obtain one through
+`POST /api/auth/agent-tokens`. Local owners can list registrations with
+`GET /api/auth/agent-tokens` and revoke one with
+`DELETE /api/auth/agent-tokens/{id}`.
+
+An `assistant_attention` event tells the app to reload pending requests.
+For a new request the hub can also ring registered iPhones. The notification
+contains fixed text, the kind of request and opaque home, hub and request IDs.
+The match code stays on the browser page and the plan is read directly from
+the hub. Owners approve a new connection locally and can review plans through
+their existing owner connection.
 
 [Home Assistant MCP Client](https://www.home-assistant.io/integrations/mcp/) ·
-[2026.11 client setup](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/mcp/config_flow.py) ·
+[Home Assistant client setup](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/mcp/config_flow.py) ·
 [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
-
-A local owner creates a bearer with `POST /api/auth/agent-tokens`, lists
-registrations with `GET /api/auth/agent-tokens`, and revokes one by sending
-`DELETE /api/auth/agent-tokens/{id}`. Revocation applies to the next request,
-including on installations that ordinarily allow local control without a key.
-
-For Home Assistant, create a registration with `POST /api/auth/assistant-clients`.
-In **Settings → Devices & services → Add integration → Model Context Protocol
-Client**, enter the add-on mobile URL ending in `/api/assistant/mcp`. Use the
-HTTPS tunnel when connecting across networks. Enter the issued client ID and
-secret, then paste the activation code on Rhythm's consent screen within ten
-minutes. This flow uses Home Assistant's built-in My Home Assistant redirect.
-Enable the Rhythm tools on the selected conversation agent. Home Assistant Assist uses the MCP tools and their descriptions. Its MCP client does not read the contract resource. The access token
-lasts one hour. Refresh rotates the token, and deleting the registration revokes
-both access and refresh. Agent grants occupy separate fields in the existing
-auth store so an older installation can still read its owner credentials.
