@@ -388,6 +388,86 @@ void _staffAssistantScenarios() {
     });
 
     test(
+        'light audition and room undo receipts preserve typed restoration evidence',
+        () async {
+      final listed =
+          await service.call('staff_list_fleet', {'hub_id': 'hub-1'});
+      Future<Map<String, dynamic>> control(
+              String operation, Map<String, dynamic> arguments) =>
+          service.call('staff_control_hub', {
+            'hub_ref': listed['hubs'].single['hub_ref'],
+            'operation_id': operation,
+            'arguments': arguments
+          });
+
+      service.trialReceipt = {
+        'status': 'trial',
+        'trial_id': 'private_canary_trial',
+        'light_id': 'private_canary_light',
+        'server_acknowledged': true,
+        'physical_verification': 'see_per_light_readback',
+        'light_readback': [
+          {'verification': 'no_fresh_readback'}
+        ]
+      };
+      final trial = await control('audition_light', {
+        'light_id': 'private_canary_light',
+        'output': {'power': 'off', 'brightness': 1}
+      });
+      expect(trial['status'], 'trial');
+      expect(trial['trial_id'], startsWith('ref_'));
+      expect(
+          trial['light_readback'].single['verification'], 'no_fresh_readback');
+      expect(trial.containsKey('restored'), false);
+      final undo = {
+        'light_id': trial['light_id'],
+        'trial_id': trial['trial_id']
+      };
+      for (final reason in [
+        'restore_requested',
+        'skipped_changed_ownership',
+        'skipped_missing_target',
+        'skipped_paused_target'
+      ]) {
+        final restored = reason == 'restore_requested';
+        service.trialReceipt = {
+          'status': reason,
+          'restoration': reason,
+          'restored': restored,
+          'server_acknowledged': restored,
+          'physical_verification': 'see_per_light_readback'
+        };
+        final receipt = await control('audition_light', undo);
+        expect(receipt['status'], reason);
+        expect(receipt['restoration'], reason);
+        expect(receipt['restored'], restored);
+        expect(receipt['physical_verification'], 'see_per_light_readback');
+      }
+
+      service.trialReceipt.remove('status');
+      final room = await control(
+          'undo_room_trial', {'room_id': 'room-1', 'trial_id': 'room-trial'});
+      expect(room.containsKey('status'), false);
+      expect(room['restoration'], 'skipped_paused_target');
+      expect(room['restored'], false);
+
+      service.trialReceipt = {'status': 'acknowledged'};
+      expect((await control('audition_light', undo))['status'], 'acknowledged');
+
+      service.trialReceipt = {
+        'status': {
+          'hours': [23]
+        },
+        'restoration': 'private_canary',
+        'restored': 'true'
+      };
+      final malformed = await control('audition_light', undo);
+      expect(malformed['status'], isNull);
+      expect(malformed.containsKey('restoration'), false);
+      expect(malformed.containsKey('restored'), false);
+    });
+
+    test(
         'numeric profile review samples on the selected hub and waits for the console',
         () async {
       final home = await service.call('staff_find_homes',
@@ -515,6 +595,7 @@ class _StaffFixture {
   final audit = <Map<String, dynamic>>[];
   bool granted = true, rowChanged = false, duplicateInstallation = false;
   Map<String, dynamic> extraReview = {};
+  Map<String, dynamic> trialReceipt = {};
   int deviceCalls = 0, writes = 0, deleted = 0, legacyRequests = 0, uploads = 0;
 
   static Future<_StaffFixture> create() async {
@@ -731,6 +812,8 @@ class _StaffFixture {
                 'inspect_motion_walk',
                 'plan_home_scene_edit',
                 'apply_home_scene_edit',
+                'audition_light',
+                'undo_room_trial',
                 'adjust_room_brightness',
                 'explain_room_output'
               ].contains(op['id'])))
@@ -856,6 +939,14 @@ class _StaffFixture {
           }
         ]
       });
+    }
+    if (path.endsWith('/audition_light') || path.endsWith('/undo_room_trial')) {
+      final args = jsonDecode((request as http.Request).body);
+      if (path.endsWith('/audition_light') && args.containsKey('trial_id')) {
+        expect(args['trial_id'], 'private_canary_trial');
+        expect(args['light_id'], 'private_canary_light');
+      }
+      return _jsonResponse(trialReceipt);
     }
     if (path.endsWith('/adjust_room_brightness')) {
       return http.Response(
