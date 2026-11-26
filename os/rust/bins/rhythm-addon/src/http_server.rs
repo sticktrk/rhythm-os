@@ -249,10 +249,11 @@ async fn mobile_auth(
         )
             .into_response();
     }
-    if rhythm_os::auth::assistant_oauth::public_route(request.method(), path)
-        || path == "/api/addon/enrollment/exchange"
-        || path == "/api/addon/status"
-    {
+    if rhythm_os::auth::assistant_oauth::public_route(request.method(), path) {
+        // The shared handler needs trusted tunnel provenance even on public OAuth pages.
+        return rhythm_os::auth::require_api_auth_middleware(State(state), request, next).await;
+    }
+    if path == "/api/addon/enrollment/exchange" || path == "/api/addon/status" {
         return next.run(request).await;
     }
     let role =

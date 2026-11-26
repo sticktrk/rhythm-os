@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::handlers::ApiResponse;
-use crate::state::{current_epoch_ms, SharedState};
+use crate::state::{current_epoch_ms, AppState, SharedState};
 
 const TOKEN_RANDOM_BYTES: usize = 32;
 const AGENT_PREFIX: &str = "rhythm_agent_";
@@ -198,7 +198,7 @@ pub fn install_ephemeral_owner_token(state: &SharedState, raw_token: &str) -> an
     );
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     anyhow::ensure!(s.api_auth.tokens.iter().all(|token| token.id == "local-supervisor"), "Cannot replace durable credentials with an ephemeral owner; use listener-local authentication");
-    s.api_auth = StoredApiAuth::default();
+    clear_in_memory_auth(&mut s);
     s.api_auth.require_api_auth = Some(true);
     s.api_auth.tokens.push(StoredApiToken {
         support_principal: None,
@@ -476,13 +476,19 @@ pub fn set_api_auth_required(
     Ok(update)
 }
 
+/// An approved browser may still be waiting to mint its first grant. It
+/// belongs to the same credential lifetime as an already-issued grant.
+pub(crate) fn clear_in_memory_auth(s: &mut AppState) {
+    s.api_auth = StoredApiAuth::default();
+    s.assistant_connections = Default::default();
+}
+
 pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let auth = StoredApiAuth::default();
     if let Some(storage) = &s.storage {
-        storage.save_api_auth(&auth)?;
+        storage.save_api_auth(&StoredApiAuth::default())?;
     }
-    s.api_auth = auth;
+    clear_in_memory_auth(&mut s);
 
     Ok(())
 }

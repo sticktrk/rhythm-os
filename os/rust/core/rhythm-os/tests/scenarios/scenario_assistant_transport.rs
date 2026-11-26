@@ -720,3 +720,197 @@ async fn legacy_and_operation_move_routes_share_credential_bound_reviews() {
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert_eq!(receipt["current_parent_id"], kitchen);
 }
+
+#[tokio::test]
+async fn phone_connection_routes_and_plan_doorbell_use_the_shipped_middleware() {
+    use axum::{
+        extract::{Json, State},
+        http::HeaderMap,
+        routing::post,
+    };
+    use rhythm_os::storage::{FileStorage, Storage};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    let (sender, mut rings) = mpsc::channel::<(String, Value)>(8);
+    async fn ring(
+        State(sender): State<mpsc::Sender<(String, Value)>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) {
+        sender
+            .send((headers["authorization"].to_str().unwrap().to_owned(), body))
+            .await
+            .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let cloud = Router::new()
+        .route("/v1/hub-attention", post(ring))
+        .with_state(sender);
+    let task = tokio::spawn(async move { axum::serve(listener, cloud).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let disk = Arc::new(FileStorage::new(dir.path().to_str().unwrap()).unwrap());
+    disk.save_activity_cloud_config(&serde_json::from_value(json!({
+        "ingest_url": format!("http://{address}/v1/server-activity-ingest"),
+        "upload_token":"fixture", "home_id":"home", "hub_id":"hub", "server_instance_id":"instance",
+        "updated_at_epoch_ms":0
+    })).unwrap()).unwrap();
+    let (events, mut rx) = tokio::sync::broadcast::channel(64);
+    let state = Arc::new(Mutex::new(AppState {
+        storage: Some(disk),
+        event_tx: Some(events),
+        ..Default::default()
+    }));
+    let (r, owner) = router_for(state);
+    let token = agent(&r, &owner, false).await;
+    let agent_token = token["token"].as_str().unwrap();
+
+    let registration = json!({"redirect_uris":["https://client.example/callback"]});
+    assert_eq!(
+        request(
+            &r,
+            Method::POST,
+            "/api/assistant/oauth/register",
+            None,
+            registration
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        request(
+            &r,
+            Method::GET,
+            "/api/assistant/oauth/authorize/wait?request=unknown",
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let authorize = "/api/assistant/oauth/authorize?response_type=code&client_id=rhythm&redirect_uri=https%3A%2F%2Fmy.home-assistant.io%2Fredirect%2Foauth";
+    assert_eq!(
+        request(&r, Method::GET, authorize, None, Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let connections = "/api/assistant/connections";
+    let (_, list) = request(&r, Method::GET, connections, Some(&owner), Value::Null).await;
+    let pending = &list["connections"][0];
+    let connection_id = pending["id"].as_str().unwrap();
+    let path = format!("{connections}/{connection_id}");
+    for (method, endpoint, data) in [
+        (Method::GET, connections, Value::Null),
+        (Method::POST, &path, json!({"decision":"decline"})),
+    ] {
+        assert_eq!(
+            request(&r, method, endpoint, Some(agent_token), data)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let mut expected = vec![(
+        "connection",
+        connection_id.to_owned(),
+        pending["expires_at_epoch_ms"].clone(),
+    )];
+    let mut plan_ids = vec![];
+    for name in ["First room", "Second room"] {
+        let plan = preview(&r, agent_token, "plan_create_room", json!({"name":name})).await;
+        let (status, review) =
+            operation(&r, agent_token, "apply_device_plan", confirmed(&plan)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(review["status"], "awaiting_owner_approval");
+        let id = review["plan_id"].as_str().unwrap().to_owned();
+        if plan_ids.is_empty() {
+            expected.push(("plan", id.clone(), review["expires_at_epoch_ms"].clone()));
+            // Replaying an already-waiting plan must also leave SSE quiet.
+            assert_eq!(
+                operation(&r, agent_token, "apply_device_plan", confirmed(&plan))
+                    .await
+                    .1,
+                review
+            );
+        }
+        plan_ids.push(id);
+    }
+    let mut delivered = vec![];
+    for _ in 0..2 {
+        let (bearer, payload) = tokio::time::timeout(Duration::from_secs(5), rings.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bearer, "Bearer fixture");
+        delivered.push(payload);
+    }
+    for (kind, id, expiry) in expected {
+        assert!(delivered.contains(
+            &json!({"home_id":"home","hub_id":"hub","server_instance_id":"instance",
+            "kind":kind,"request_id":id,"expires_at_epoch_ms":expiry})
+        ));
+    }
+    assert_eq!(
+        request(
+            &r,
+            Method::POST,
+            &path,
+            Some(&owner),
+            json!({"decision":"decline"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for id in &plan_ids {
+        assert_eq!(
+            request(
+                &r,
+                Method::POST,
+                &format!("/api/assistant/approvals/{id}"),
+                Some(&owner),
+                json!({"decision":"decline"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    let mut attention = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let rhythm_os::server_event::ServerEvent::AssistantAttention {
+            kind,
+            request_id,
+            state,
+            ..
+        } = event
+        {
+            attention.push((kind, request_id, state));
+        }
+    }
+    for (kind, id) in [
+        ("connection", connection_id),
+        ("plan", &plan_ids[0]),
+        ("plan", &plan_ids[1]),
+    ] {
+        for transition in ["requested", "resolved"] {
+            assert_eq!(
+                attention
+                    .iter()
+                    .filter(|(k, i, s)| *k == kind && i == id && *s == transition)
+                    .count(),
+                1
+            );
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), rings.recv())
+            .await
+            .is_err()
+    );
+    task.abort();
+}

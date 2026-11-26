@@ -83,7 +83,7 @@ impl StoredActivityCloudConfig {
         self
     }
 
-    fn is_usable(&self) -> bool {
+    pub(crate) fn is_usable(&self) -> bool {
         self.enabled
             && !self.ingest_url.trim().is_empty()
             && !self.upload_token.trim().is_empty()
@@ -881,7 +881,7 @@ fn upload_status(config: &StoredActivityCloudConfig) -> &'static str {
     }
 }
 
-fn load_config(state: &SharedState) -> anyhow::Result<Option<StoredActivityCloudConfig>> {
+pub(crate) fn load_config(state: &SharedState) -> anyhow::Result<Option<StoredActivityCloudConfig>> {
     let storage = storage_handle(state)?;
     Ok(storage
         .load_activity_cloud_config()?

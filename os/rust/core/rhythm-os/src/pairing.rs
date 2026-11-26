@@ -811,19 +811,21 @@ pub fn clear_persisted_state_for_factory_reset(
         .lock()
         .map_err(|_| anyhow::anyhow!("network change lock unavailable"))?;
     crate::wifi_change::ensure_idle_for_reset(state, &network_changes)?;
-    let storage = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("pairing state lock poisoned"))?
-        .storage
-        .clone();
-    let Some(storage) = storage else {
-        return Ok(());
-    };
     let _guard = PAIRING_DOCUMENT_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| anyhow::anyhow!("pairing document lock poisoned"))?;
-    storage.clear_factory_reset_state()
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pairing state lock poisoned"))?;
+    // OAuth grant redemption writes auth while holding this same mutex.
+    // Clear memory and disk together so a concurrent browser poll cannot
+    // persist a pre-reset registration between those two operations.
+    if let Some(storage) = &state.storage {
+        storage.clear_factory_reset_state()?;
+    }
+    crate::auth::clear_in_memory_auth(&mut state);
+    Ok(())
 }
 
 fn load_pairing_document(storage: &dyn crate::storage::Storage) -> anyhow::Result<PairingHistory> {
