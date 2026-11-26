@@ -30,6 +30,7 @@ import 'services/auth_service.dart';
 import 'services/hue/hue_service_locator.dart';
 import 'services/virtual_experience_service.dart';
 import 'utils/room_visibility.dart';
+import 'widgets/assistant_attention_host.dart';
 import 'widgets/connect_hub_screen.dart';
 import 'widgets/disabled_mode_banner.dart';
 import 'widgets/hardware_gate_screen.dart';
@@ -627,7 +628,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       });
     }
 
-    return PopScope(
+    final shell = PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) => _handlePopInvoked(didPop),
       child: ListenableBuilder(
@@ -749,6 +750,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         },
       ),
     );
+    return AssistantAttentionHost(child: shell);
   }
 
   /// Top-level destination visibility. Destinations whose dependencies aren't

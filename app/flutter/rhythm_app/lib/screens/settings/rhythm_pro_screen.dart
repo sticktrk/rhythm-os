@@ -256,6 +256,7 @@ class _RhythmProHubControlsState extends State<RhythmProHubControls> {
     Navigator.of(context).push(MaterialPageRoute(
         builder: (_) => AssistantAccessScreen(
             api: local.authApi(),
+            attentionEvents: sync.connection.assistantAttentionEvents,
             endpoint:
                 Uri.parse('$url/').resolve('api/assistant/mcp').toString(),
             isCurrentTarget: sameTarget,
