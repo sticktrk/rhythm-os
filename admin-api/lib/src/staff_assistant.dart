@@ -912,6 +912,20 @@ class StaffAssistant {
             }
           };
         }
+        if (tool == 'audition_light' || tool == 'undo_room_trial') {
+          final result = _project(s, h.id, body) as _Json;
+          final status = body['status'];
+          if (status == 'trial' || _trialRestorations.contains(status)) {
+            result['status'] = status;
+          } else if (status != null && status is! String) {
+            result['status'] = null;
+          }
+          if (_trialRestorations.contains(body['restoration'])) {
+            result['restoration'] = body['restoration'];
+          }
+          if (body['restored'] is bool) result['restored'] = body['restored'];
+          return result;
+        }
         if (tool == 'inspect_motion_walk') {
           final result = _project(s, h.id, body) as _Json;
           result['next_check'] = _walkGuidance[result['stage']] ??
@@ -1285,6 +1299,13 @@ class StaffAssistant {
     return null;
   }
 }
+
+const _trialRestorations = {
+  'restore_requested',
+  'skipped_changed_ownership',
+  'skipped_missing_target',
+  'skipped_paused_target',
+};
 
 // Staff-authored guidance is independent of free-form strings on the customer's hub.
 const _walkGuidance = {
