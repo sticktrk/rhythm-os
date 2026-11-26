@@ -19,6 +19,7 @@ const proposal = {
   name: "adjust_room_warmth",
   arguments: '{"kelvin":3000}',
 };
+const reasoning = { type: "reasoning", summary: [] };
 async function reject(p: Promise<unknown>, expected: number) {
   try {
     await p;
@@ -32,18 +33,25 @@ Deno.test("sends only selected capabilities and projected readings and returns a
   const reply = await lightingChat(
     input,
     reserve,
-    config,
+    { key: config.key },
     async (url, init) => {
       const req = new Request(url, init);
       const text = await req.text(), body = JSON.parse(text);
       if (
         req.url !== "https://api.openai.com/v1/responses" ||
+        req.redirect !== "error" ||
         req.headers.get("authorization") !== "Bearer fixture-key" ||
-        body.store !== false || /PRIVATE|fixture-key|room_id/.test(text) ||
+        body.model !== "gpt-6.2-sol" || body.reasoning?.effort !== "low" ||
+        body.max_output_tokens !== 2048 || body.store !== false ||
+        body.parallel_tool_calls !== false ||
+        /PRIVATE|fixture-key|room_id/.test(text) ||
         !text.includes("3300") || body.tools.length !== 1 ||
         body.tools[0].name !== proposal.name
       ) throw Error();
-      return Response.json({ status: "completed", output: [proposal] });
+      return Response.json({
+        status: "completed",
+        output: [reasoning, proposal],
+      });
     },
   );
   if (
@@ -86,6 +94,11 @@ Deno.test("rejects unoffered operations, mixed targets, bad values and duplicate
       [{ ...proposal, arguments: '{"kelvin":3000,"room_id":"other"}' }],
       [{ ...proposal, arguments: '{"kelvin":0}' }],
       [proposal, proposal],
+      [{ ...proposal, status: "incomplete" }],
+      [{
+        type: "message",
+        content: [{ type: "refusal", refusal: "Declined" }],
+      }, proposal],
     ]
   ) {
     await reject(
@@ -99,24 +112,69 @@ Deno.test("rejects unoffered operations, mixed targets, bad values and duplicate
     );
   }
 });
-Deno.test("returns an ordinary conversational follow-up with no mutation", async () => {
+Deno.test("preserves model overrides and returns an ordinary conversational follow-up", async () => {
   const reply = await lightingChat(
     input,
     reserve,
     config,
-    () =>
-      Promise.resolve(Response.json({
+    async (url, init) => {
+      const body = await new Request(url, init).json();
+      if (body.model !== config.model || "reasoning" in body) throw Error();
+      return Response.json({
         status: "completed",
-        output: [{
+        output: [reasoning, {
           type: "message",
           content: [{
             type: "output_text",
             text: "Would you like it warmer or dimmer?",
           }],
         }],
-      })),
+      });
+    },
   );
   if (reply.text !== "Would you like it warmer or dimmer?") throw Error();
+});
+
+Deno.test("an incomplete response cannot propose a lighting change", async () => {
+  await reject(
+    lightingChat(input, reserve, config, () =>
+      Promise.resolve(Response.json({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [reasoning, proposal],
+      }))),
+    502,
+  );
+});
+
+Deno.test("returns only completed final answers and accepts earlier model responses without phase", async () => {
+  const message = (
+    text: string,
+    phase?: string | null,
+    status = "completed",
+  ) => ({
+    type: "message",
+    phase,
+    status,
+    content: [{ type: "output_text", text }],
+  });
+  const invoke = (output: unknown[]) =>
+    lightingChat(
+      input,
+      reserve,
+      config,
+      () => Promise.resolve(Response.json({ status: "completed", output })),
+    );
+  const commentary = message("Looking up the room.", "commentary");
+  for (const phase of ["final_answer", null, undefined]) {
+    const reply = await invoke([commentary, message("Target is 50%.", phase)]);
+    if (reply.text !== "Target is 50%.") throw Error();
+  }
+  await reject(invoke([commentary]), 502);
+  await reject(
+    invoke([message("The lights", "final_answer", "incomplete")]),
+    502,
+  );
 });
 
 Deno.test("a conversation can start without room data or mutation tools", async () => {

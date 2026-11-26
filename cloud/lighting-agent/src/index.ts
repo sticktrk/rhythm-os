@@ -9,7 +9,8 @@ export { ConversationIndex, LightingConversation };
 export interface Env {
   CONVERSATIONS: DurableObjectNamespace<LightingConversation>;
   RESIDENT_INDEX: DurableObjectNamespace<ConversationIndex>;
-  AI: Ai;
+  OPENAI_API_KEY?: string;
+  RHYTHM_CHAT_MODEL?: string;
   SUPABASE_URL: string;
   SUPABASE_PUBLISHABLE_KEY: string;
   ACCEPT_NEW_TURNS: string;
@@ -99,11 +100,13 @@ export function normalizedPhoto(raw: Uint8Array): string {
 async function route(req: Request, env: Env) {
   const path = new URL(req.url).pathname;
   if (path === "/health" && req.method === "GET")
-    return json({ service: "lighting-agent", protocol: 1 });
+    return json({ service: "lighting-agent", protocol: 2 });
   const op = path.match(
-    /^\/v1\/(open|status|turn|photo|prepare|claim|receipt|cancel|clear|forget)$/,
+    /^\/v[12]\/(open|status|turn|photo|prepare|claim|receipt|cancel|clear|forget)$/,
   )?.[1];
-  if (!op) return json({}, 404);
+  const v2 = path.startsWith("/v2/");
+  const inference = op === "open" || op === "turn" || op === "photo";
+  if (!op || (v2 && !inference)) return json({}, 404);
   if (req.method !== "POST") return json({}, 405);
   const bearer = req.headers.get("authorization") ?? "";
   if (!/^Bearer [^\s]+$/i.test(bearer)) return json({}, 401);
@@ -133,6 +136,13 @@ async function route(req: Request, env: Env) {
       Number(env.PILOT_PERCENT ?? 0);
   if (!enabled && !["clear", "status", "receipt", "cancel"].includes(op))
     return json({ error: "legacy_chat" }, 403);
+  // Older phones disclose Workers AI and already route this response to the
+  // OpenAI room chat. Existing sessions can still reconcile hub receipts.
+  if (inference) {
+    if (!v2) return json({ error: "legacy_chat" }, 403);
+    if (!env.OPENAI_API_KEY?.trim())
+      return json({ error: "inference_unavailable" }, 503);
+  }
   if (
     env.ACCEPT_NEW_TURNS !== "true" &&
     ["turn", "photo", "claim"].includes(op)
@@ -150,7 +160,17 @@ async function route(req: Request, env: Env) {
   const agent = await getAgentByName(env.CONVERSATIONS, name);
   if (op === "open") {
     const reply = await agent.open();
-    return json(reply.data, reply.code);
+    return json(
+      reply.code === 200
+        ? {
+            ...reply.data,
+            inference_provider: "openai",
+            scene_drafts: true,
+            room_lookup: true,
+          }
+        : reply.data,
+      reply.code,
+    );
   }
   const session = req.headers.get("x-rhythm-session") ?? "";
   if (!id.safeParse(session).success) return json({}, 400);
@@ -194,7 +214,7 @@ async function route(req: Request, env: Env) {
   if (admission.code !== 200) return json(admission.data, admission.code);
   try {
     await access(env, bearer, home, instance, "reserve");
-    const decision = await infer(env.AI, turn, photo);
+    const decision = await infer(env, turn, photo);
     await access(env, bearer, home, instance, "check");
     const reply = await agent.finish(
       session,
@@ -206,7 +226,11 @@ async function route(req: Request, env: Env) {
       {
         ...reply.data,
         ...(reply.code === 200
-          ? { text: decision.text, proposed: decision.steps.length > 0 }
+          ? {
+              text: decision.text,
+              proposed: decision.steps.length > 0,
+              room_query: decision.room_query,
+            }
           : {}),
       },
       reply.code,

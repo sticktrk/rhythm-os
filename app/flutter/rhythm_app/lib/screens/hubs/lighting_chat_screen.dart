@@ -8,7 +8,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 
 import '../../providers/home_provider.dart';
-import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/auth_service.dart';
@@ -85,7 +84,6 @@ class LightingChatScreen extends StatefulWidget {
         sync.connectedServerInstanceId == instance &&
         sync.activeConnectionEndpoint == endpoint;
     final local = endpoint == hub.endpoint;
-    final initialRoomId = context.read<RoomProvider>().currentRoom?.id;
     await Navigator.push<void>(
         context,
         MaterialPageRoute(
@@ -100,7 +98,6 @@ class LightingChatScreen extends StatefulWidget {
                   ).open(reconnect: reconnect),
                   openAgent: () => HomeAgentClient.discover(
                       hub.homeId, instance, () => ctx.mounted && current()),
-                  initialRoomId: initialRoomId,
                   pairPhone: () => ConnectHubScreen.show(ctx),
                   current: current,
                   local: local,
@@ -234,47 +231,64 @@ class _LightingChatState extends State<LightingChatScreen> {
     });
   }
 
-  String _label(RhythmTopologyNode room) {
-    if (room.name.isEmpty) return room.id;
-    final duplicate =
-        _hub!.rooms.any((r) => r.id != room.id && r.name == room.name);
-    return duplicate ? '${room.name} (${room.id})' : room.name;
-  }
-
   void _askRoom(List<RhythmTopologyNode> rooms) {
-    _choices = rooms;
+    _choices = rooms.toList()..sort(LightingChatHub.roomOrder);
+    final names = [
+      for (final (i, room) in _choices.indexed)
+        '${i + 1}. ${_hub!.roomLabel(room)}'
+    ];
     _append(
-        rooms.isEmpty
+        names.isEmpty
             ? 'Your hub has no rooms yet. Add a room to control its lights.'
-            : 'Which room should I use for that?',
+            : 'Which room should I use? Reply with a name or number.\n${names.join('\n')}',
         share: false);
   }
 
-  Future<void> _send(String message, {RhythmTopologyNode? choice}) async {
+  Future<void> _send(String message) async {
     final hub = _hub, prompt = message.trim();
     if (!_active ||
         _busy ||
         hub == null ||
         prompt.isEmpty ||
-        (choice == null && prompt.length > 1000) ||
+        prompt.length > 1000 ||
         _proposal != null) {
       return;
     }
     final matches = hub.mentionedRooms(prompt);
-    // A typed room answer resumes the outstanding request just like a tap.
-    if (choice == null && _choices.isNotEmpty && matches.length == 1) {
-      final answer = LightingChatHub.words(prompt)
-          .replaceFirst(RegExp(r'^the '), '')
-          .replaceFirst(RegExp(r' please$'), '');
-      if (_choices.contains(matches.single) &&
-          (answer == LightingChatHub.words(matches.single.name) ||
-              LightingChatHub.words(prompt) ==
-                  LightingChatHub.words(matches.single.name))) {
-        choice = matches.single;
+    final choice = hub.roomAnswer(prompt, _choices);
+    if (_choices.isNotEmpty && choice == null) {
+      final repeated = _choices
+          .where((room) => hub.roomAnswer(prompt, [room]) != null)
+          .toList();
+      if (repeated.length > 1 ||
+          LightingChatHub.roomAnswerNumber(prompt) != null) {
+        setState(() {
+          _input.clear();
+          _append(prompt, resident: true, share: false);
+          _askRoom(repeated.isEmpty ? _choices : repeated);
+        });
+        return;
       }
     }
-    final room =
-        choice ?? (matches.length > 1 ? null : matches.firstOrNull ?? _room);
+    if (choice == null &&
+        LightingChatHub.requestsSceneDesign(prompt,
+            mentionsRoom: matches.isNotEmpty)) {
+      setState(() {
+        _input.clear();
+        _choices = [];
+        _append(prompt, resident: true, share: false);
+        _append(
+            'Creating a scene requires the whole-home lighting assistant. You can still adjust an individual room here.',
+            share: false);
+      });
+      unawaited(
+          AnalyticsService().logLightingChatTurn(LightingChatOutcome.reply));
+      return;
+    }
+    final room = choice ??
+        (matches.length > 1
+            ? null
+            : matches.firstOrNull ?? (_choices.isEmpty ? _room : null));
     final scope = choice != null
         ? 'clarified'
         : matches.length == 1
@@ -320,7 +334,7 @@ class _LightingChatState extends State<LightingChatScreen> {
         setState(() => _append(
             hub.rooms.isEmpty
                 ? 'Your hub has no rooms yet.'
-                : 'Your rooms are ${hub.rooms.map(_label).join(', ')}.',
+                : 'Your rooms are ${hub.rooms.map(hub.roomLabel).join(', ')}.',
             share: false));
         outcome = LightingChatOutcome.reply;
       } else if (result['operation'] != null) {
@@ -542,15 +556,6 @@ class _LightingChatState extends State<LightingChatScreen> {
                       for (final m in _messages)
                         AssistantMessageBubble(
                             resident: m.resident, text: m.text),
-                      if (_choices.isNotEmpty)
-                        Wrap(spacing: 8, runSpacing: 4, children: [
-                          for (final r in _choices)
-                            ActionChip(
-                                label: Text(_label(r)),
-                                onPressed: enabled
-                                    ? () => _send(_label(r), choice: r)
-                                    : null),
-                        ]),
                       if (_busy)
                         AssistantWorking(
                             label: hub == null
@@ -559,7 +564,7 @@ class _LightingChatState extends State<LightingChatScreen> {
                       if (proposal != null)
                         _LightingReview(
                             proposal: proposal,
-                            roomName: _label(room!),
+                            roomName: hub!.roomLabel(room!),
                             reading: _reading,
                             apply: enabled ? () => _apply() : null,
                             skip: enabled

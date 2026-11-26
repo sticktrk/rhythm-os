@@ -10,8 +10,8 @@
   "observability": {
     "enabled": false,
   },
-  "ai": {
-    "binding": "AI",
+  "secrets": {
+    "required": ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY"],
   },
   "durable_objects": {
     "bindings": [

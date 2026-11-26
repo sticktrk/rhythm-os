@@ -45,7 +45,7 @@ interface Backend {
   publicKey: string;
   serviceKey: string;
   fetch?: typeof fetch;
-  chatModel?: { key?: string; model: string; request: typeof fetch };
+  chatModel?: { key?: string; model?: string; request: typeof fetch };
 }
 
 function configuredBackend(): Backend {
@@ -307,7 +307,7 @@ export async function handleRequest(req: Request, backend?: Backend) {
     if ("lighting_chat" in b) {
       const config = backend?.chatModel ?? {
         key: Deno.env.get("OPENAI_API_KEY"),
-        model: Deno.env.get("RHYTHM_CHAT_MODEL") || "gpt-4.1-mini",
+        model: Deno.env.get("RHYTHM_CHAT_MODEL"),
         request: fetch,
       };
       const reserve = async () =>

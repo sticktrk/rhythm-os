@@ -75,6 +75,34 @@ class HomeAgentClient {
   final bool Function() current;
   final Dio _http;
   String? session;
+  bool supportsSceneDrafts = false;
+  bool supportsRoomLookup = false;
+
+  Future<bool> openSession() async {
+    session = null;
+    supportsSceneDrafts = false;
+    supportsRoomLookup = false;
+    try {
+      final state = await call('open');
+      if (state['inference_provider'] != 'openai') return false;
+      session = state['session'] as String;
+      supportsSceneDrafts = state['scene_drafts'] == true;
+      supportsRoomLookup = state['room_lookup'] == true;
+      return true;
+    } on DioException catch (e) {
+      final body = e.response?.data;
+      final legacyCohort = e.response?.statusCode == 403 &&
+          body is Map &&
+          body['error'] == 'legacy_chat';
+      if (e.response == null ||
+          (e.response?.statusCode ?? 0) >= 500 ||
+          legacyCohort ||
+          e.response?.statusCode == 404) {
+        return false;
+      }
+      rethrow;
+    }
+  }
 
   static Future<HomeAgentClient?> discover(
       String home, String instance, bool Function() current) async {
@@ -106,22 +134,9 @@ class HomeAgentClient {
     final client = HomeAgentClient(uri, home, instance,
         () => auth.client.auth.currentSession?.accessToken, current);
     try {
-      final state = await client.call('open');
-      client.session = state['session'] as String;
-      return client;
-    } on DioException catch (e) {
+      if (await client.openSession()) return client;
       client.close();
-      final body = e.response?.data;
-      final legacyCohort = e.response?.statusCode == 403 &&
-          body is Map &&
-          body['error'] == 'legacy_chat';
-      if (e.response == null ||
-          (e.response?.statusCode ?? 0) >= 500 ||
-          legacyCohort ||
-          e.response?.statusCode == 404) {
-        return null;
-      }
-      rethrow;
+      return null;
     } catch (_) {
       client.close();
       rethrow;
@@ -140,6 +155,10 @@ class HomeAgentClient {
     if (!current() || bearer == null) {
       throw StateError('Account or installation changed');
     }
+    final inference = method == 'turn' || method == 'photo';
+    if (inference && session == null) {
+      throw StateError('Open the lighting assistant before sending a message');
+    }
     final data = photo == null
         ? body
         : FormData.fromMap({
@@ -148,7 +167,9 @@ class HomeAgentClient {
                 filename: 'lighting.jpg',
                 contentType: DioMediaType('image', 'jpeg'))
           });
-    final reply = await _http.postUri(endpoint.resolve('/v1/$method'),
+    // A Worker rolled back during chat cannot process an OpenAI-bound turn.
+    final version = inference || method == 'open' ? 'v2' : 'v1';
+    final reply = await _http.postUri(endpoint.resolve('/$version/$method'),
         data: data,
         options: Options(headers: {
           'authorization': 'Bearer $bearer',

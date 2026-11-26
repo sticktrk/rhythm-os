@@ -194,11 +194,24 @@ export class LightingConversation extends Agent<Env, Snapshot | null> {
     }
     if (action === "receipt") {
       const parsed = outcomes.safeParse(body.outcome);
-      if (
-        !parsed.success ||
-        typeof body.claim !== "string" ||
-        step.nonce !== body.claim
-      )
+      if (!parsed.success) return result(409);
+      if (body.claim === undefined) {
+        // A phone can read the hub owner's decision after the original claim.
+        if (typeof step.receipt !== "string" || body.receipt !== step.receipt)
+          return result(409);
+        const allowed =
+          step.operation === "plan_home_scene_edit"
+            ? ["verified", "rejected", "queued", "partial"]
+            : step.operation === "plan_generated_home_scene"
+              ? ["verified", "rejected"]
+              : [];
+        if (!allowed.includes(parsed.data)) return result(409);
+        if (step.status === parsed.data) return result(200, this.snapshot(s));
+        if (step.status !== "awaiting_owner") return result(409);
+        step.status = parsed.data;
+        return this.commit(s);
+      }
+      if (typeof body.claim !== "string" || step.nonce !== body.claim)
         return result(409);
       if (step.status !== "claimed") return result(200, this.snapshot(s));
       if (body.receipt !== undefined && !opaque.safeParse(body.receipt).success)

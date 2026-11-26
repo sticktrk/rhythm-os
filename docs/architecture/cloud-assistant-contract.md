@@ -73,13 +73,16 @@ the local network. Away from home the hub also requires an enabled tunnel and
 Remote MCP. Guided tools remain available for older hubs and account or motion tasks.
 
 A conversation starts with a message. The phone resolves room names against
-live hub topology. A named room takes priority over the current conversation
-room or the room open in the app. If a lighting change needs clarification, the
-assistant offers room choices inside the conversation and resumes the original
-request. Each proposed adjustment targets one room. General questions can be
-answered without a room.
+live hub topology. A named room takes priority over the room just discussed.
+Opening chat in a home with several rooms leaves the target open. When a
+request needs clarification, the resident can reply with a room name or
+number in the conversation and continue the original request. General
+questions can be answered without a room. The lighting agent hosted on
+Cloudflare Workers uses OpenAI for room descriptions, whole-home scene
+design and optional photo interpretation.
+[Resident lighting agent](../../cloud/lighting-agent/README.md)
 
-The phone reads a resolved room before sending its numerical and enumerated
+In the room-only chat, the phone reads a resolved room before sending its numerical and enumerated
 lighting values and supported adjustment types to the authenticated customer
 assistant function. An unresolved turn offers only conversation and local room
 discovery. Up to eight recent messages go to OpenAI with response storage
@@ -91,9 +94,10 @@ phone validates the arguments, shows the exact target and calls the selected
 hub only after a tap. Its receipt distinguishes the hub's target from lamp
 readback. The app can undo a preview using the hub-issued trial ID.
 
-The Edge Function uses the server secret `OPENAI_API_KEY` and defaults to
-`gpt-4.1-mini`. `RHYTHM_CHAT_MODEL` can select a Responses API model that
-supports strict function calling. Apply the lighting chat usage migration
+Both the Worker and room-only Edge Function use the server secret
+`OPENAI_API_KEY` and default to `gpt-6.2-sol`. A deployment can set
+`RHYTHM_CHAT_MODEL` in both runtimes to use another OpenAI Responses API model
+with image input, JSON output and strict function calling. Apply the lighting chat usage migration
 before deployment. The free preview allows 60 model requests per resident per
 UTC day. The database keeps one counter per account and deletes it with the
 account. Closing chat discards its transcript.

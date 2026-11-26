@@ -14,12 +14,25 @@ const refs = [
   "r_" + "b".repeat(24),
   "r_" + "c".repeat(24),
 ];
+const roomRequest = "Dim the lights where I keep the fern trays.";
+const themeRequest = "Create a whole-home underwater grotto scene";
+const draftStep = {
+  target: "d_" + "e".repeat(24),
+  operation: "plan_generated_home_scene",
+  arguments: { color_1: "#146ba1", color_2: "#40e0b0", brightness_percent: 57 },
+};
+const roomSteps = refs.slice(0, 2).map((target) => ({
+  target,
+  operation: "adjust_room_brightness",
+  arguments: { delta_percent: -10 },
+}));
 
 test("resident turns, image evidence, two-phone claims, lost replies and erasure use the Workers runtime", async () => {
   let allowed = true,
-    reservations = 0;
+    reservations = 0,
+    modelCalls = 0;
   const directory = mkdtempSync(join(tmpdir(), "lighting-agent-test-"));
-  const create = () =>
+  const create = (withKey = true) =>
     new Miniflare(
       convertV4MiniflareOptions({
         resourcePersistencePath: directory,
@@ -34,6 +47,8 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
             bindings: {
               SUPABASE_URL: "https://fixture.invalid",
               SUPABASE_PUBLISHABLE_KEY: "public",
+              ...(withKey ? { OPENAI_API_KEY: "fixture-model-key" } : {}),
+              RHYTHM_CHAT_MODEL: "fixture-vision-model",
               ACCEPT_NEW_TURNS: "true",
               PILOT_PERCENT: "100",
             },
@@ -47,9 +62,67 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
                 useSQLite: true,
               },
             },
-            serviceBindings: { AI: "fixture-ai" },
             outboundService: async (req: Request) => {
-              assert.equal(new URL(req.url).hostname, "fixture.invalid");
+              if (req.url === "https://api.openai.com/v1/responses") {
+                modelCalls++;
+                assert.equal(req.method, "POST");
+                assert.equal(
+                  req.headers.get("authorization"),
+                  "Bearer fixture-model-key",
+                );
+                assert.equal(req.headers.get("apikey"), null);
+                const body = (await req.json()) as {
+                  model: string;
+                  store: boolean;
+                  input: {
+                    role: string;
+                    content: string | { type: string; image_url?: string }[];
+                  }[];
+                };
+                assert.equal(body.model, "fixture-vision-model");
+                assert.equal(body.store, false);
+                const message = body.input.at(-1)!;
+                assert.equal(message.role, "user");
+                let decision;
+                if (Array.isArray(message.content)) {
+                  assert.match(
+                    message.content.find((x) => x.type === "input_image")
+                      ?.image_url ?? "",
+                    /^data:image\/jpeg;base64,/,
+                  );
+                  decision = { text: "Lighting advice", steps: [] };
+                } else if (message.content === roomRequest) {
+                  decision = {
+                    text: "",
+                    room_query: "potting room",
+                    steps: [],
+                  };
+                } else if (message.content === themeRequest) {
+                  decision = {
+                    text: "Blue-green light",
+                    palette: draftStep.arguments,
+                  };
+                } else {
+                  decision = { text: "Lighting advice", steps: roomSteps };
+                }
+                return Response.json({
+                  status: "completed",
+                  output: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      status: "completed",
+                      content: [
+                        { type: "output_text", text: JSON.stringify(decision) },
+                      ],
+                    },
+                  ],
+                });
+              }
+              assert.equal(
+                req.url,
+                "https://fixture.invalid/functions/v1/lighting-agent-access",
+              );
               if (req.headers.get("authorization") !== "Bearer resident")
                 return Response.json({}, { status: 401 });
               const body = (await req.json()) as {
@@ -64,29 +137,19 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
               return Response.json({ actor, hub });
             },
           },
-          {
-            name: "fixture-ai",
-            modules: true,
-            compatibilityDate: "2026-10-01",
-            script:
-              'import {WorkerEntrypoint} from "cloudflare:workers"; export default class extends WorkerEntrypoint {async run(model,input){const last=input.messages.at(-1).content;return {response:{text:"Lighting advice",steps:typeof last==="string"?' +
-              JSON.stringify(
-                refs.slice(0, 2).map((target) => ({
-                  target,
-                  operation: "adjust_room_brightness",
-                  arguments: { delta_percent: -10 },
-                })),
-              ) +
-              ":[]}};}}",
-          },
         ],
       }),
     );
-  let mf = create();
+  let mf = create(false);
   let session = "";
-  const post = async (op: string, data: unknown = {}, auth = "resident") => {
+  const post = async (
+    op: string,
+    data: unknown = {},
+    auth = "resident",
+    version = ["open", "turn", "photo"].includes(op) ? 2 : 1,
+  ) => {
     const form = data instanceof FormData ? new Response(data) : null;
-    return mf.dispatchFetch("https://worker.test/v1/" + op, {
+    return mf.dispatchFetch(`https://worker.test/v${version}/${op}`, {
       method: "POST",
       headers: {
         authorization: "Bearer " + auth,
@@ -103,9 +166,26 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
   try {
     const bad = await post("open", {}, "other");
     assert.equal(bad.status, 401, await bad.text());
+    assert.equal((await post("open")).status, 503);
+    assert.equal(modelCalls, 0);
+    assert.equal(reservations, 0);
+    await mf.dispose();
+    mf = create();
+    for (const op of ["open", "turn", "photo"]) {
+      const legacy = await post(op, {}, "resident", 1);
+      assert.equal(legacy.status, 403);
+      assert.deepEqual(await legacy.json(), { error: "legacy_chat" });
+    }
+    assert.equal((await post("status", {}, "resident", 2)).status, 404);
+    assert.equal(modelCalls, 0);
+    assert.equal(reservations, 0);
     let res = await post("open");
     assert.equal(res.status, 200, await res.clone().text());
-    session = ((await res.json()) as any).session;
+    const opened = (await res.json()) as any;
+    session = opened.session;
+    assert.equal(opened.inference_provider, "openai");
+    assert.equal(opened.scene_drafts, true);
+    assert.equal(opened.room_lookup, true);
     const turn = {
       turn: crypto.randomUUID(),
       messages: [{ role: "user", text: "Dim both rooms except the hall" }],
@@ -123,6 +203,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     );
     assert.equal((await post("turn", turn)).status, 409);
     assert.equal(reservations, 1);
+    assert.equal(modelCalls, 1);
     const body = { plan: plan.id, index: 0, digest: "f".repeat(64) };
     assert.equal((await post("claim", body)).status, 409);
     assert.equal((await post("prepare", body)).status, 200);
@@ -189,6 +270,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     assert.equal(((await res.json()) as any).proposed, false);
     assert.equal((await post("photo", photo())).status, 409);
     assert.equal(reservations, 2);
+    assert.equal(modelCalls, 2);
     assert.equal(
       ((await (await post("status")).json()) as any).lastResult,
       "photo_advice",
@@ -203,6 +285,130 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     assert.equal(reopened.plan, null);
     assert.deepEqual(reopened.history, []);
     session = reopened.session;
+    res = await post("turn", {
+      turn: crypto.randomUUID(),
+      messages: [{ role: "user", text: themeRequest }],
+      targets: [
+        { ref: draftStep.target, included: true, tools: [draftStep.operation] },
+      ],
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const draftReview = (await res.json()) as any;
+    assert.deepEqual(draftReview.plan.steps, [
+      { ...draftStep, status: "review" },
+    ]);
+    const draftState = (await (await post("status")).json()) as any;
+    assert.equal(draftState.scene_drafts, undefined);
+    assert.equal(JSON.stringify(draftState).includes(themeRequest), false);
+    const save = {
+      plan: draftReview.plan.id,
+      index: 0,
+      digest: "a".repeat(64),
+    };
+    const ownerSave = {
+      plan: save.plan,
+      index: 0,
+      receipt: "hub-save",
+      outcome: "verified",
+    };
+    assert.equal((await post("receipt", ownerSave)).status, 409);
+    assert.equal((await post("prepare", save)).status, 200);
+    const saveClaim = (await (await post("claim", save)).json()) as any;
+    assert.equal((await post("receipt", ownerSave)).status, 409);
+    assert.equal(
+      (
+        await post("receipt", {
+          ...save,
+          claim: saveClaim.claim,
+          outcome: "awaiting_owner",
+          receipt: ownerSave.receipt,
+        })
+      ).status,
+      200,
+    );
+    const scene = "c_" + "d".repeat(24);
+    const sceneTurn = {
+      turn: crypto.randomUUID(),
+      messages: [{ role: "user", text: `Apply ${scene} to the whole home.` }],
+      targets: [
+        { ref: scene, included: true, tools: ["plan_home_scene_edit"] },
+      ],
+    };
+    allowed = false;
+    assert.equal((await post("turn", sceneTurn)).status, 403);
+    assert.equal(reservations, 3);
+    allowed = true;
+    res = await post("turn", sceneTurn);
+    assert.equal(res.status, 200, await res.clone().text());
+    const sceneReview = (await res.json()) as any;
+    assert.equal(reservations, 4);
+    assert.deepEqual(sceneReview.plan.steps, [
+      {
+        target: scene,
+        operation: "plan_home_scene_edit",
+        arguments: {},
+        status: "review",
+      },
+    ]);
+    assert.equal((await post("turn", sceneTurn)).status, 409);
+    assert.equal(reservations, 4);
+    // The draft has moved into history while the resident reviews another plan.
+    assert.equal(
+      (await post("receipt", { ...ownerSave, receipt: "wrong-handle" })).status,
+      409,
+    );
+    assert.equal(
+      (await post("receipt", { ...ownerSave, outcome: "queued" })).status,
+      409,
+    );
+    res = await post("receipt", ownerSave);
+    assert.equal(res.status, 200, await res.clone().text());
+    const reconciled = (await res.json()) as any;
+    assert.equal(
+      reconciled.history.find((p: any) => p.id === save.plan).steps[0].status,
+      "verified",
+    );
+    assert.equal(reconciled.plan.steps[0].status, "review");
+    res = await post("receipt", ownerSave);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).revision, reconciled.revision);
+    assert.equal(
+      (await post("receipt", { ...ownerSave, outcome: "rejected" })).status,
+      409,
+    );
+
+    const apply = { ...save, plan: sceneReview.plan.id };
+    assert.equal((await post("prepare", apply)).status, 200);
+    const applyClaim = (await (await post("claim", apply)).json()) as any;
+    const ownerApply = { plan: apply.plan, index: 0, receipt: "hub-apply" };
+    assert.equal(
+      (
+        await post("receipt", {
+          ...ownerApply,
+          claim: applyClaim.claim,
+          outcome: "awaiting_owner",
+        })
+      ).status,
+      200,
+    );
+    res = await post("receipt", { ...ownerApply, outcome: "partial" });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).plan.steps[0].status, "partial");
+    res = await post("turn", {
+      turn: crypto.randomUUID(),
+      room_lookup: true,
+      messages: [{ role: "user", text: roomRequest }],
+      targets: [],
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const clarification = (await res.json()) as any;
+    assert.equal(clarification.room_query, "potting room");
+    assert.equal(clarification.proposed, false);
+    assert.equal(clarification.plan.id, apply.plan);
+    const progress = await (await post("status")).text();
+    assert.doesNotMatch(progress, /room_query|room_lookup|potting room/);
+    assert.ok(!progress.includes(roomRequest));
+    assert.equal(modelCalls, 4); // One inference each for the room plan, photo, scene draft, and room lookup.
     assert.equal((await post("forget")).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal((await post("status")).status, 410);
