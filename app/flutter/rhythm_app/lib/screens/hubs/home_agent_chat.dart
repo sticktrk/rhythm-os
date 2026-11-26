@@ -42,10 +42,12 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
   CustomerAction? _plan, _motion;
   List<CustomerAction> _history = [];
   String? _lastResult;
+  String? _checkedSavedPlan;
   Uint8List? _photo;
   String? _focus;
   final _reviewErrors = <int, String>{};
   bool _busy = false;
+  bool _designingScene = false;
   bool get _live => mounted && widget.current();
   List<CustomerAction> get _steps => (_plan?['steps'] as List? ?? [])
       .whereType<Map>()
@@ -90,6 +92,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           _messages.clear();
           _history = [];
           _motion = null;
+          _designingScene = false;
+          _checkedSavedPlan = null;
           _lastResult = null;
           _photo = null;
           _reviews.clear();
@@ -165,6 +169,11 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
     }
   }
 
+  Future<void> _reloadCatalog() async {
+    final catalog = await HomeAgentCatalog.load(widget.hub, widget.client);
+    if (_live) setState(() => _catalog = catalog);
+  }
+
   Future<void> _send(String text) => _run(() async {
         final catalog = _catalog;
         final prompt = text.trim(), photo = _photo;
@@ -175,59 +184,160 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
               'That name matches more than one item. Pick the intended room before sending.');
           return;
         }
-        final context = await catalog.context(redacted, _focus, _motion);
-        if (!_live) return;
         final mentioned = catalog.targets.values
-            .where((t) => t.kind == 'r' && redacted.contains(t.ref))
+            .where((t) => redacted.contains(t.ref))
             .toList();
-        if (mentioned.length == 1) _focus = mentioned.single.ref;
-        final history = _messages.where((m) => m.share).toList();
-        final clock = Stopwatch()..start();
-        final turn = {
-          'turn': const Uuid().v4(),
-          'messages': [
-            for (final m
-                in history.skip(history.length > 7 ? history.length - 7 : 0))
-              {
-                'role': m.resident ? 'user' : 'assistant',
-                'text': catalog.redact(m.text, _focus)
-              },
-            {'role': 'user', 'text': redacted}
-          ],
-          'targets': context,
-          if (_motion != null) 'motion': _motion,
-          'selected': _focus
-        };
-        _input.clear();
-        setState(() => _photo = null);
-        _add(prompt.isEmpty ? 'Shared a photo' : prompt,
-            resident: true, share: prompt.isNotEmpty);
-        try {
-          final reply = await widget.client
-              .call(photo == null ? 'turn' : 'photo', turn, photo);
-          if (!_live) return;
-          final answer = reply['text'];
-          if (answer is String && answer.isNotEmpty) {
-            var visible = answer;
-            for (final t in catalog.targets.values) {
-              visible = visible.replaceAll(t.ref, t.name);
-            }
-            _add(visible, share: true);
-          }
-          unawaited(AnalyticsService().logHomeAgentProgress(
-              turn['turn'] as String, 'answered',
-              latencyMs: clock.elapsedMilliseconds,
-              steps: (reply['plan']?['steps'] as List?)?.length ?? 0));
-          await _showState(reply, prepare: true);
-          unawaited(AnalyticsService().logLightingChatTurn(
-              reply['proposed'] == true
-                  ? LightingChatOutcome.proposal
-                  : LightingChatOutcome.reply));
-        } catch (_) {
-          if (_live) await _refresh();
-          rethrow;
+        final mentionsRoom = mentioned.any((t) => t.kind == 'r');
+        final design = (_designingScene && !mentionsRoom) ||
+            LightingChatHub.requestsSceneDesign(redacted,
+                mentionsRoom: mentionsRoom,
+                mentionsSavedScene: mentioned.any((t) => t.kind == 'c'));
+        if (design &&
+            (!widget.client.supportsSceneDrafts ||
+                !catalog.canCreateHomeScene)) {
+          _input.clear();
+          _add(prompt, resident: true);
+          _add(
+              'Scene creation is unavailable in chat with this hub and assistant version.');
+          return;
         }
+        final draft = design ? catalog.generatedSceneTarget : null;
+        final context = draft == null
+            ? await catalog.context(redacted, _focus, _motion)
+            : [_sceneContext(draft, 'plan_generated_home_scene')];
+        if (!_live) return;
+        if (_designingScene != design) setState(() => _designingScene = design);
+        if (!design) {
+          final rooms = mentioned.where((t) => t.kind == 'r');
+          if (rooms.length == 1) _focus = rooms.single.ref;
+        }
+        await _postTurn(prompt, redacted, context, photo: photo, scene: design);
       });
+
+  CustomerAction _sceneContext(AgentTarget target, String operation) => {
+        'ref': target.ref,
+        'included': true,
+        'tools': [operation]
+      };
+
+  Future<void> _postTurn(
+      String prompt, String redacted, List<CustomerAction> context,
+      {Uint8List? photo,
+      bool scene = false,
+      bool includeHistory = true}) async {
+    final catalog = _catalog!;
+    final history = _messages.where((m) => includeHistory && m.share).toList();
+    final clock = Stopwatch()..start();
+    final turn = {
+      'turn': const Uuid().v4(),
+      'messages': [
+        for (final m
+            in history.skip(history.length > 7 ? history.length - 7 : 0))
+          {
+            'role': m.resident ? 'user' : 'assistant',
+            'text': catalog.redact(m.text, _focus)
+          },
+        {'role': 'user', 'text': redacted}
+      ],
+      'targets': context,
+      if (!scene && _motion != null) 'motion': _motion,
+      'selected': scene ? null : _focus
+    };
+    _input.clear();
+    setState(() {
+      _photo = null;
+      _checkedSavedPlan = null;
+    });
+    _add(prompt.isEmpty ? 'Shared a photo' : prompt,
+        resident: true, share: prompt.isNotEmpty);
+    try {
+      final reply = await widget.client
+          .call(photo == null ? 'turn' : 'photo', turn, photo);
+      if (!_live) return;
+      final answer = reply['text'];
+      if (answer is String && answer.isNotEmpty) {
+        var visible = answer;
+        for (final t in catalog.targets.values) {
+          visible = visible.replaceAll(t.ref, t.name);
+        }
+        _add(visible, share: true);
+      }
+      unawaited(AnalyticsService().logHomeAgentProgress(
+          turn['turn'] as String, 'answered',
+          latencyMs: clock.elapsedMilliseconds,
+          steps: (reply['plan']?['steps'] as List?)?.length ?? 0));
+      await _showState(reply, prepare: true);
+      if (_live && scene) {
+        setState(() => _designingScene =
+            !_pending && reply['proposed'] != true && includeHistory);
+      }
+      unawaited(AnalyticsService().logLightingChatTurn(reply['proposed'] == true
+          ? LightingChatOutcome.proposal
+          : LightingChatOutcome.reply));
+    } on DioException catch (e) {
+      if (!_live) return;
+      await _refresh();
+      final code = e.response?.data;
+      if (_live &&
+          scene &&
+          includeHistory &&
+          !_pending &&
+          code is Map &&
+          const {
+            'invalid_scene_draft',
+            'invalid_proposal',
+            'inference_unavailable',
+            'inference_timeout'
+          }.contains(code['error'])) {
+        setState(() => _designingScene = true);
+        _add(
+            'I couldn’t prepare that palette. Try describing the colors or mood again.');
+        return;
+      }
+      rethrow;
+    } catch (_) {
+      if (_live) await _refresh();
+      rethrow;
+    }
+  }
+
+  AgentTarget? _savedScene(String planId, CustomerAction step) {
+    if (step['operation'] != 'plan_generated_home_scene' ||
+        !const {'verified', 'awaiting_owner', 'uncertain', 'claimed'}
+            .contains(step['status'])) {
+      return null;
+    }
+    return _catalog?.savedGeneratedScene(
+        planId, CustomerAction.from(step['arguments']));
+  }
+
+  Future<void> _useScene(String planId, int index, CustomerAction step) =>
+      _run(() async {
+        await _reloadCatalog();
+        if (!_live) return;
+        final saved = _savedScene(planId, step);
+        if (saved == null) {
+          _add('The saved scene changed or was removed. Request a new review.');
+          return;
+        }
+        if (step['status'] == 'awaiting_owner' && step['receipt'] is String) {
+          // The exact saved scene also settles a save whose owner receipt expired.
+          await widget.client.call('receipt', {
+            'plan': planId,
+            'index': index,
+            'receipt': step['receipt'],
+            'outcome': 'verified'
+          });
+          if (!_live) return;
+        }
+        await _postTurn(
+            'Use ${saved.name} across the home.',
+            'Apply ${saved.ref} to the whole home.',
+            [_sceneContext(saved, 'plan_home_scene_edit')],
+            scene: true,
+            includeHistory: false);
+      });
+
   Future<void> _apply() => _run(() async {
         final planId = _plan!['id'];
         unawaited(AnalyticsService()
@@ -268,9 +378,24 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
               outcome = 'walk_started';
               receipt = res['walk_id'];
             } else if (res['status'] == 'awaiting_owner_approval' &&
-                res['plan_id'] is String) {
+                res['plan_id'] is String &&
+                res['plan_id'] == preview.arguments['plan_id']) {
               outcome = 'awaiting_owner';
               receipt = res['plan_id'];
+            } else if (step['operation'] == 'plan_generated_home_scene') {
+              if (res['server_instance_id'] == widget.client.instance &&
+                  res['operation'] == 'apply_scene_edit' &&
+                  res['status'] == 'applied' &&
+                  res['after']?['id'] ==
+                      HomeAgentCatalog.generatedSceneId(planId)) {
+                await _reloadCatalog();
+                if (!_live) return;
+                if (_catalog!.savedGeneratedScene(
+                        planId, CustomerAction.from(step['arguments'])) !=
+                    null) {
+                  outcome = 'verified';
+                }
+              }
             } else if (res['server_instance_id'] == widget.client.instance &&
                 (res['canonical_readback_verified'] == true ||
                     (res['status'] == 'applied' && res.containsKey('after')))) {
@@ -313,7 +438,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           await _showState(reply);
         }
       });
-  Future<void> _inspect(CustomerAction step) => _run(() async {
+  Future<void> _inspect(String planId, int index, CustomerAction step) =>
+      _run(() async {
         if (step['status'] == 'walk_started') {
           try {
             final data = await widget.hub
@@ -361,9 +487,64 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                 'This walk is unavailable or expired. Ask to start a fresh walk.');
           }
         } else if (step['status'] == 'awaiting_owner') {
-          final res = await widget.hub
-              .call('read_plan_outcome', {'plan_id': step['receipt']});
+          final receipt = step['receipt'];
+          final res =
+              await widget.hub.call('read_plan_outcome', {'plan_id': receipt});
+          if (!_live) return;
+          final isDraft = step['operation'] == 'plan_generated_home_scene';
+          final isHomeApply = step['operation'] == 'plan_home_scene_edit';
+          if ((isDraft || isHomeApply) &&
+              widget.client.supportsSceneDrafts &&
+              res['plan_id'] == receipt) {
+            if (isDraft) await _reloadCatalog();
+            if (!_live) return;
+            String? outcome;
+            if (res['status'] == 'declined') {
+              outcome = 'rejected';
+            } else if (res['server_instance_id'] == widget.client.instance) {
+              if (isDraft &&
+                  res['operation'] == 'apply_scene_edit' &&
+                  res['status'] == 'applied' &&
+                  res['after']?['id'] ==
+                      HomeAgentCatalog.generatedSceneId(planId) &&
+                  _savedScene(planId, step) != null) {
+                outcome = 'verified';
+              } else if (isHomeApply &&
+                  res['operation'] == 'apply_home_scene_edit') {
+                outcome = switch (res['status']) {
+                  'queued' => 'queued',
+                  'partially_applied' => 'partial',
+                  'applied' when res['after'] is Map => 'verified',
+                  _ => null
+                };
+              }
+            }
+            if (outcome != null) {
+              final state = await widget.client.call('receipt', {
+                'plan': planId,
+                'index': index,
+                'receipt': receipt,
+                'outcome': outcome
+              });
+              if (!_live) return;
+              if (isDraft && outcome == 'verified') _checkedSavedPlan = planId;
+              await _showState(state);
+              if (planId != _plan?['id']) {
+                _add(isDraft && outcome == 'verified'
+                    ? 'Your scene is saved on the hub.'
+                    : _status(outcome));
+              }
+              return;
+            }
+          }
           _add('Owner review: ${res['status'] ?? 'unknown'}.');
+        } else if (step['operation'] == 'plan_generated_home_scene') {
+          await _reloadCatalog();
+          if (!_live) return;
+          final saved = _savedScene(planId, step);
+          _add(saved == null
+              ? 'The hub has no matching saved scene.'
+              : '${saved.name} is saved on the hub.');
         } else {
           final target = _catalog?.targets[step['target']];
           if (target?.kind == 'r') {
@@ -390,6 +571,11 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
               'That image could not be attached. You can choose a smaller still or keep chatting.');
         }
       });
+  void _startScene() {
+    setState(() => _designingScene = true);
+    _add('What colors or mood would you like for the scene?');
+  }
+
   Future<void> _clear() => _run(() async {
         await widget.client.call('clear');
         if (!_live) return;
@@ -397,6 +583,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           _messages.clear();
           _history = [];
           _motion = null;
+          _designingScene = false;
+          _checkedSavedPlan = null;
           _lastResult = null;
           _photo = null;
           _reviews.clear();
@@ -405,7 +593,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         });
         final reply = await widget.client.call('open');
         if (!_live) return;
-        widget.client.session = reply['session'];
+        widget.client.useSession(reply);
         await _open();
       });
   String _status(String status) => switch (status) {
@@ -459,10 +647,15 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
             const <AgentTarget>[];
     final earlier = [
       for (final old in _history.reversed)
-        for (final row in (old['steps'] as List).whereType<Map>())
-          if (_checkable.contains(row['status'])) CustomerAction.from(row)
+        for (final (i, row) in (old['steps'] as List).whereType<Map>().indexed)
+          if (_checkable.contains(row['status']) ||
+              (row['status'] == 'verified' && old['id'] == _checkedSavedPlan))
+            {...CustomerAction.from(row), 'planId': old['id'], 'index': i}
     ];
     final canAsk = !_busy && catalog != null && !_pending;
+    final canDesign = canAsk &&
+        widget.client.supportsSceneDrafts &&
+        catalog.canCreateHomeScene;
     return PostHogMaskWidget(
         child: RhythmAssistantPage(
             title: 'Lighting assistant',
@@ -471,7 +664,9 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                   tooltip: 'More options',
                   icon: const Icon(Icons.more_horiz),
                   onSelected: (v) {
-                    if (v == 'guided') {
+                    if (v == 'scene') {
+                      _startScene();
+                    } else if (v == 'guided') {
                       widget.guided();
                     } else if (v == 'refresh') {
                       _run(_catalog == null ? _open : _refresh);
@@ -479,12 +674,15 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                       _clear();
                     }
                   },
-                  itemBuilder: (_) => const [
-                        PopupMenuItem(
+                  itemBuilder: (_) => [
+                        if (canDesign && !_designingScene)
+                          const PopupMenuItem(
+                              value: 'scene', child: Text('Make a scene')),
+                        const PopupMenuItem(
                             value: 'guided', child: Text('Guided tools')),
-                        PopupMenuItem(
+                        const PopupMenuItem(
                             value: 'refresh', child: Text('Refresh progress')),
-                        PopupMenuItem(
+                        const PopupMenuItem(
                             value: 'clear', child: Text('Clear conversation'))
                       ])
             ],
@@ -497,6 +695,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                     if (_messages.isEmpty && plan == null && earlier.isEmpty)
                       LightingChatWelcome(
                           tools: widget.hub.tools,
+                          onDesignScene: canDesign ? _startScene : null,
                           onPrompt: canAsk ? _send : null,
                           disclosure: _disclosure)
                     else if (_messages.isEmpty)
@@ -520,9 +719,20 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                       status: _status(row['status']),
                                       color: _statusColor(row['status']))),
                               TextButton(
-                                  onPressed: _busy ? null : () => _inspect(row),
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _inspect(
+                                          row['planId'], row['index'], row),
                                   child: const Text('Check progress')),
                             ]),
+                            if (!_pending &&
+                                _savedScene(row['planId'], row) != null)
+                              TextButton(
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _useScene(
+                                          row['planId'], row['index'], row),
+                                  child: const Text('Use across the home')),
                           ])),
                     for (final m in _messages)
                       AssistantMessageBubble(
@@ -539,6 +749,10 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                     color: CelestialColors.orbitRing),
                               _AgentStep(
                                   target: _reviews[i]?.target.name ??
+                                      (s['operation'] ==
+                                              'plan_generated_home_scene'
+                                          ? 'New whole-home scene'
+                                          : null) ??
                                       catalog?.targets[s['target']]?.name ??
                                       'Target',
                                   title: _reviews[i]?.title ??
@@ -548,8 +762,10 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                   arguments: s['arguments'] is Map
                                       ? CustomerAction.from(s['arguments'])
                                       : const {},
-                                  status:
-                                      _reviewErrors[i] ?? _status(s['status']),
+                                  status: _reviewErrors[i] ??
+                                      (_savedScene(plan['id'], s) != null
+                                          ? 'Saved on the hub'
+                                          : _status(s['status'])),
                                   statusColor: _reviewErrors[i] != null
                                       ? CelestialColors.warning
                                       : _statusColor(s['status']),
@@ -566,7 +782,15 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                       : s['status'] == 'walk_started'
                                           ? 'Check walk'
                                           : 'Check outcome',
-                                  onCheck: _busy ? null : () => _inspect(s)),
+                                  onCheck: _busy
+                                      ? null
+                                      : () => _inspect(plan['id'], i, s)),
+                              if (_savedScene(plan['id'], s) != null)
+                                FilledButton.tonal(
+                                    onPressed: _busy
+                                        ? null
+                                        : () => _useScene(plan['id'], i, s),
+                                    child: const Text('Use across the home')),
                             ],
                             if (_pending) ...[
                               const SizedBox(height: 14),
@@ -581,7 +805,11 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                         : _apply,
                                     child: Text(expired
                                         ? 'Review expired'
-                                        : 'Apply reviewed steps')),
+                                        : steps.length == 1 &&
+                                                steps.single['operation'] ==
+                                                    'plan_generated_home_scene'
+                                            ? 'Save scene'
+                                            : 'Apply reviewed steps')),
                                 TextButton(
                                     onPressed: _busy
                                         ? null
@@ -598,7 +826,18 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                               ? 'Connecting to your hub…'
                               : 'Working…'),
                   ])),
-              if (rooms.isNotEmpty)
+              if (_designingScene)
+                Row(children: [
+                  const SizedBox(width: 20),
+                  const Expanded(
+                      child: AssistantNote('Designing a whole-home scene')),
+                  TextButton(
+                      onPressed: _busy
+                          ? null
+                          : () => setState(() => _designingScene = false),
+                      child: const Text('Cancel'))
+                ])
+              else if (rooms.isNotEmpty)
                 SizedBox(
                     height: 48,
                     child: Row(children: [
@@ -672,7 +911,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                 child: Text('Take photo')),
                             PopupMenuItem(
                                 value: ImageSource.gallery,
-                                child: Text('Choose photo'))
+                                child: Text('Choose photo')),
                           ])),
             ])));
   }
@@ -724,6 +963,26 @@ class _AgentStep extends StatelessWidget {
           operation: operation,
           arguments: arguments),
       const SizedBox(height: 12),
+      if (operation == 'plan_generated_home_scene')
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Wrap(spacing: 6, children: [
+            for (final key in const [
+              'color_1',
+              'color_2',
+              'color_3',
+              'color_4'
+            ])
+              if (arguments[key] case final String hex
+                  when RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(hex))
+                Semantics(
+                    label: hex,
+                    child: CircleAvatar(
+                        radius: 12,
+                        backgroundColor: Color(0xff000000 |
+                            int.parse(hex.substring(1), radix: 16)))),
+          ]),
+        ),
       if (detail != null) Text(detail!),
       Text(status,
           style: TextStyle(color: statusColor, fontSize: 13, height: 1.45)),

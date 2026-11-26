@@ -261,6 +261,21 @@ class _LightingChatState extends State<LightingChatScreen> {
       return;
     }
     final matches = hub.mentionedRooms(prompt);
+    if (choice == null &&
+        LightingChatHub.requestsSceneDesign(prompt,
+            mentionsRoom: matches.isNotEmpty)) {
+      setState(() {
+        _input.clear();
+        _choices = [];
+        _append(prompt, resident: true, share: false);
+        _append(
+            'Creating a scene requires the whole-home lighting assistant. You can still adjust an individual room here.',
+            share: false);
+      });
+      unawaited(
+          AnalyticsService().logLightingChatTurn(LightingChatOutcome.reply));
+      return;
+    }
     // A typed room answer resumes the outstanding request just like a tap.
     if (choice == null && _choices.isNotEmpty && matches.length == 1) {
       final answer = LightingChatHub.words(prompt)

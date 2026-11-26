@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/painting.dart' show Color, HSVColor;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/validation.dart';
 import 'customer_assistant_service.dart';
 import 'home_agent_client.dart';
 import 'lighting_chat_service.dart';
@@ -28,13 +30,18 @@ class AgentReview {
 }
 
 class HomeAgentCatalog {
-  HomeAgentCatalog(this.hub, this.targets);
+  HomeAgentCatalog._(
+      this.hub, this.targets, this.generatedSceneTarget, this._savedScenes);
   final LightingChatHub hub;
   final Map<String, AgentTarget> targets;
+  final AgentTarget? generatedSceneTarget;
+  final Map<String, CustomerAction> _savedScenes;
+  bool get canCreateHomeScene => generatedSceneTarget != null;
 
   static Future<HomeAgentCatalog> load(
       LightingChatHub hub, HomeAgentClient client) async {
     final targets = <String, AgentTarget>{};
+    final savedScenes = <String, CustomerAction>{};
     void add(String kind, String id, String name, Set<String> tools) {
       if (id.isEmpty) return;
       final ref = client.reference(kind, id);
@@ -65,11 +72,110 @@ class HomeAgentCatalog {
               row['name'] is String &&
               hub.catalog.contains(op)) {
             add(kind, row['id'], row['name'], {op});
+            if (kind == 'c') savedScenes[row['id']] = CustomerAction.from(row);
           }
         }
       }
     }
-    return HomeAgentCatalog(hub, targets);
+    const sceneTools = {
+      'read_automation_settings',
+      'plan_scene_edit',
+      'apply_scene_edit',
+      'plan_home_scene_edit',
+      'apply_home_scene_edit'
+    };
+    final draft = hub.catalog.containsAll(sceneTools)
+        ? AgentTarget(client.reference('d', 'new-scene'), 'new-scene',
+            'New whole-home scene', 'd', {'plan_generated_home_scene'})
+        : null;
+    return HomeAgentCatalog._(hub, targets, draft, savedScenes);
+  }
+
+  static String generatedSceneId(String planId) {
+    if (!UuidValidation.isValidUUID(fromString: planId)) {
+      throw const FormatException('A fresh scene review is required.');
+    }
+    return 'chat-${planId.toLowerCase()}';
+  }
+
+  /// Resolve the reviewed creation after refreshing the hub's saved settings.
+  /// An edited scene with the same ID requires a new resident decision.
+  AgentTarget? savedGeneratedScene(String planId, CustomerAction arguments) {
+    if (!canCreateHomeScene) return null;
+    final scene = _generatedScene(planId, arguments);
+    final stored = _savedScenes[scene['id']];
+    if (!_sameJson(scene, stored)) return null;
+    return targets.values
+        .where((t) => t.kind == 'c' && t.id == scene['id'])
+        .firstOrNull;
+  }
+
+  static bool _sameJson(Object? expected, Object? actual) {
+    if (expected is Map && actual is Map) {
+      return expected.length == actual.length &&
+          expected.keys.every((k) =>
+              actual.containsKey(k) && _sameJson(expected[k], actual[k]));
+    }
+    if (expected is List && actual is List) {
+      return expected.length == actual.length &&
+          expected.indexed
+              .every((entry) => _sameJson(entry.$2, actual[entry.$1]));
+    }
+    return expected == actual;
+  }
+
+  static CustomerAction _generatedScene(String planId, CustomerAction args) {
+    final id = generatedSceneId(planId);
+    final brightness = args['brightness_percent'];
+    final colorCount = args.length - 1;
+    if (brightness is! int ||
+        brightness < 1 ||
+        brightness > 100 ||
+        colorCount < 2 ||
+        colorCount > 4) {
+      throw const FormatException(
+          'Choose two to four colors and a brightness from 1 to 100%.');
+    }
+    final palette = <RhythmLightSceneOutput>[];
+    final names = <String>{};
+    for (var i = 1; i <= colorCount; i++) {
+      final hex = args['color_$i'];
+      if (hex is! String || !RegExp(r'^#[a-fA-F0-9]{6}$').hasMatch(hex)) {
+        throw const FormatException(
+            'Each scene color must be a six-digit hex color.');
+      }
+      final rgb = int.parse(hex.substring(1), radix: 16);
+      names.add(_colorName(HSVColor.fromColor(Color(0xff000000 | rgb))));
+      palette.add(RhythmLightSceneOutput.on(
+          brightness: brightness,
+          color: RhythmLightColor.rgb(RhythmSceneRgbColor(
+              r: rgb >> 16, g: rgb >> 8 & 255, b: rgb & 255))));
+    }
+    final scene = RhythmSceneDefinition(
+        id: id,
+        name: names.join(' & '),
+        light: RhythmLightScene(paletteMode: 'cycle', palette: palette),
+        extensions: const {'whole_home': true}).toJson();
+    // Match the hub's SceneDefinition and LightSceneLayer serialization for
+    // optional fields (the SDK emits null for description and default_output).
+    scene.removeWhere((_, value) => value == null);
+    (scene['light'] as Map).removeWhere((_, value) => value == null);
+    return scene;
+  }
+
+  static String _colorName(HSVColor color) {
+    if (color.value < 0.1) return 'Black';
+    if (color.saturation < 0.12) return color.value < 0.7 ? 'Gray' : 'White';
+    return switch (color.hue) {
+      < 16 || >= 345 => 'Red',
+      < 42 => 'Orange',
+      < 68 => 'Gold',
+      < 155 => 'Green',
+      < 195 => 'Teal',
+      < 255 => 'Blue',
+      < 300 => 'Purple',
+      _ => 'Pink'
+    };
   }
 
   /// Longest names first so "main bedroom" cannot also match "bedroom".
@@ -175,7 +281,10 @@ class HomeAgentCatalog {
 
   Future<AgentReview> review(
       CustomerAction step, String instance, String journey) async {
-    final target = targets[step['target']], op = step['operation'] as String;
+    final target = step['target'] == generatedSceneTarget?.ref
+        ? generatedSceneTarget
+        : targets[step['target']];
+    final op = step['operation'] as String;
     if (target == null || !target.tools.contains(op)) {
       throw StateError('Target or capability changed');
     }
@@ -219,7 +328,13 @@ class HomeAgentCatalog {
           'Start a 60-second walk past ${target.name} for ${room.name}.';
     } else {
       final params = <String, dynamic>{};
-      if (op == 'plan_home_scene_edit') {
+      final generated = op == 'plan_generated_home_scene';
+      final planOperation = generated ? 'plan_scene_edit' : op;
+      if (generated) {
+        final scene = _generatedScene(journey, args);
+        params.addAll({'scene_id': scene['id'], 'definition': scene});
+        title = scene['name'] as String;
+      } else if (op == 'plan_home_scene_edit') {
         params.addAll({'scene_id': target.id, 'target_mode': 'rooms'});
       } else if (op == 'plan_light_schedule_edit') {
         final live = await hub.call('read_automation_settings', {});
@@ -246,13 +361,38 @@ class HomeAgentCatalog {
       } else {
         throw StateError('Unsupported workflow');
       }
-      final preview = await hub.call(op, params);
+      final preview = await hub.call(planOperation, params);
       final plan = preview['plan_id'];
       if (plan is! String || preview['server_instance_id'] != instance) {
         throw StateError('Fresh preview required');
       }
-      operation = op.replaceFirst('plan_', 'apply_');
+      operation = planOperation.replaceFirst('plan_', 'apply_');
       if (!hub.catalog.contains(operation)) throw StateError('Update the hub');
+      final before = preview['before'];
+      if (generated) {
+        if (before is! Map ||
+            !before.containsKey('current') ||
+            before['current'] != null) {
+          throw const FormatException(
+              'This scene could already exist. Start a new scene review.');
+        }
+        if (!_sameJson(preview['proposal'], {
+          'scene': {
+            'id': params['scene_id'],
+            'definition': params['definition']
+          }
+        })) {
+          throw const FormatException(
+              'The hub returned a different scene. Start a new review.');
+        }
+      } else if (op == 'plan_home_scene_edit' &&
+          target.id.startsWith('chat-') &&
+          UuidValidation.isValidUUID(fromString: target.id.substring(5)) &&
+          (before is! Map ||
+              !_sameJson(_savedScenes[target.id], before['current']))) {
+        throw const FormatException(
+            'The saved palette changed. Request a fresh review.');
+      }
       dispatch = {
         'plan_id': plan,
         'confirmed': true,
@@ -275,6 +415,9 @@ class HomeAgentCatalog {
           .map(nameFor)
           .join(', ');
       description = switch (op) {
+        'plan_generated_home_scene' => 'Save ${[
+            for (var i = 1; i < args.length; i++) args['color_$i']
+          ].join(', ')} at ${args['brightness_percent']}% brightness. You can review applying it to your home after it is saved.',
         'plan_home_scene_edit' =>
           'Apply ${target.name} throughout this installation. Replaces saved Mood bindings. Affected rooms: $affected.',
         'plan_light_schedule_edit' =>

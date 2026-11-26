@@ -14,6 +14,17 @@ const refs = [
   "r_" + "b".repeat(24),
   "r_" + "c".repeat(24),
 ];
+const themeRequest = "Create a whole-home underwater grotto scene";
+const draftStep = {
+  target: "d_" + "e".repeat(24),
+  operation: "plan_generated_home_scene",
+  arguments: { color_1: "#146ba1", color_2: "#40e0b0", brightness_percent: 57 },
+};
+const roomSteps = refs.slice(0, 2).map((target) => ({
+  target,
+  operation: "adjust_room_brightness",
+  arguments: { delta_percent: -10 },
+}));
 
 test("resident turns, image evidence, two-phone claims, lost replies and erasure use the Workers runtime", async () => {
   let allowed = true,
@@ -68,16 +79,18 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
             name: "fixture-ai",
             modules: true,
             compatibilityDate: "2026-10-01",
-            script:
-              'import {WorkerEntrypoint} from "cloudflare:workers"; export default class extends WorkerEntrypoint {async run(model,input){const last=input.messages.at(-1).content;return {response:{text:"Lighting advice",steps:typeof last==="string"?' +
-              JSON.stringify(
-                refs.slice(0, 2).map((target) => ({
-                  target,
-                  operation: "adjust_room_brightness",
-                  arguments: { delta_percent: -10 },
-                })),
-              ) +
-              ":[]}};}}",
+            script: `
+              import { WorkerEntrypoint } from "cloudflare:workers";
+              export default class extends WorkerEntrypoint {
+                async run(model, input) {
+                  const text = input.messages.at(-1).content;
+                  if (text === ${JSON.stringify(themeRequest)}) {
+                    return { response: { text: "Blue-green light", palette: ${JSON.stringify(draftStep.arguments)} } };
+                  }
+                  const steps = typeof text === "string" ? ${JSON.stringify(roomSteps)} : [];
+                  return { response: { text: "Lighting advice", steps } };
+                }
+              }`,
           },
         ],
       }),
@@ -105,7 +118,9 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     assert.equal(bad.status, 401, await bad.text());
     let res = await post("open");
     assert.equal(res.status, 200, await res.clone().text());
-    session = ((await res.json()) as any).session;
+    const opened = (await res.json()) as any;
+    session = opened.session;
+    assert.equal(opened.scene_drafts, true);
     const turn = {
       turn: crypto.randomUUID(),
       messages: [{ role: "user", text: "Dim both rooms except the hall" }],
@@ -203,6 +218,115 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     assert.equal(reopened.plan, null);
     assert.deepEqual(reopened.history, []);
     session = reopened.session;
+    res = await post("turn", {
+      turn: crypto.randomUUID(),
+      messages: [{ role: "user", text: themeRequest }],
+      targets: [
+        { ref: draftStep.target, included: true, tools: [draftStep.operation] },
+      ],
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const draftReview = (await res.json()) as any;
+    assert.deepEqual(draftReview.plan.steps, [
+      { ...draftStep, status: "review" },
+    ]);
+    const draftState = (await (await post("status")).json()) as any;
+    assert.equal(draftState.scene_drafts, undefined);
+    assert.equal(JSON.stringify(draftState).includes(themeRequest), false);
+    const save = {
+      plan: draftReview.plan.id,
+      index: 0,
+      digest: "a".repeat(64),
+    };
+    const ownerSave = {
+      plan: save.plan,
+      index: 0,
+      receipt: "hub-save",
+      outcome: "verified",
+    };
+    assert.equal((await post("receipt", ownerSave)).status, 409);
+    assert.equal((await post("prepare", save)).status, 200);
+    const saveClaim = (await (await post("claim", save)).json()) as any;
+    assert.equal((await post("receipt", ownerSave)).status, 409);
+    assert.equal(
+      (
+        await post("receipt", {
+          ...save,
+          claim: saveClaim.claim,
+          outcome: "awaiting_owner",
+          receipt: ownerSave.receipt,
+        })
+      ).status,
+      200,
+    );
+    const scene = "c_" + "d".repeat(24);
+    const sceneTurn = {
+      turn: crypto.randomUUID(),
+      messages: [{ role: "user", text: `Apply ${scene} to the whole home.` }],
+      targets: [
+        { ref: scene, included: true, tools: ["plan_home_scene_edit"] },
+      ],
+    };
+    allowed = false;
+    assert.equal((await post("turn", sceneTurn)).status, 403);
+    assert.equal(reservations, 3);
+    allowed = true;
+    res = await post("turn", sceneTurn);
+    assert.equal(res.status, 200, await res.clone().text());
+    const sceneReview = (await res.json()) as any;
+    assert.equal(reservations, 4);
+    assert.deepEqual(sceneReview.plan.steps, [
+      {
+        target: scene,
+        operation: "plan_home_scene_edit",
+        arguments: {},
+        status: "review",
+      },
+    ]);
+    assert.equal((await post("turn", sceneTurn)).status, 409);
+    assert.equal(reservations, 4);
+    // The draft has moved into history while the resident reviews another plan.
+    assert.equal(
+      (await post("receipt", { ...ownerSave, receipt: "wrong-handle" })).status,
+      409,
+    );
+    assert.equal(
+      (await post("receipt", { ...ownerSave, outcome: "queued" })).status,
+      409,
+    );
+    res = await post("receipt", ownerSave);
+    assert.equal(res.status, 200, await res.clone().text());
+    const reconciled = (await res.json()) as any;
+    assert.equal(
+      reconciled.history.find((p: any) => p.id === save.plan).steps[0].status,
+      "verified",
+    );
+    assert.equal(reconciled.plan.steps[0].status, "review");
+    res = await post("receipt", ownerSave);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).revision, reconciled.revision);
+    assert.equal(
+      (await post("receipt", { ...ownerSave, outcome: "rejected" })).status,
+      409,
+    );
+
+    const apply = { ...save, plan: sceneReview.plan.id };
+    assert.equal((await post("prepare", apply)).status, 200);
+    const applyClaim = (await (await post("claim", apply)).json()) as any;
+    const ownerApply = { plan: apply.plan, index: 0, receipt: "hub-apply" };
+    assert.equal(
+      (
+        await post("receipt", {
+          ...ownerApply,
+          claim: applyClaim.claim,
+          outcome: "awaiting_owner",
+        })
+      ).status,
+      200,
+    );
+    res = await post("receipt", { ...ownerApply, outcome: "partial" });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).plan.steps[0].status, "partial");
     assert.equal((await post("forget")).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal((await post("status")).status, 410);

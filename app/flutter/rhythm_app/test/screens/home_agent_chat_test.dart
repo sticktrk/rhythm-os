@@ -20,7 +20,9 @@ class TestAgent extends HomeAgentClient {
     session = 'session';
   }
   final calls = <(String, CustomerAction, Uint8List?)>[];
+  final history = <CustomerAction>[];
   CustomerAction? plan;
+  CustomerAction Function(CustomerAction)? proposalForTurn;
   String answer =
       'The two lamps have different shades. A photo of both could help.';
   @override
@@ -28,16 +30,29 @@ class TestAgent extends HomeAgentClient {
       [CustomerAction body = const {}, Uint8List? photo]) async {
     calls.add((method, body, photo));
     if (method == 'turn' || method == 'photo') {
-      return {'text': answer, 'plan': plan};
+      if (proposalForTurn != null) {
+        if (plan != null) history.add(plan!);
+        plan = proposalForTurn!(body);
+      }
+      return {
+        'text': answer,
+        'plan': plan,
+        'history': history,
+        'proposed': plan != null
+      };
     }
     if (method == 'claim') {
       plan!['steps'][body['index']]['status'] = 'claimed';
-      return {'claim': 'once', 'plan': plan};
+      return {'claim': 'once', 'plan': plan, 'history': history};
     }
     if (method == 'receipt') {
-      plan!['steps'][body['index']]['status'] = body['outcome'];
+      final target = [if (plan != null) plan!, ...history]
+          .singleWhere((p) => p['id'] == body['plan']);
+      final step = target['steps'][body['index']];
+      step['status'] = body['outcome'];
+      if (body.containsKey('receipt')) step['receipt'] = body['receipt'];
     }
-    return {'plan': plan};
+    return {'plan': plan, 'history': history};
   }
 }
 
@@ -73,13 +88,15 @@ void main() {
     }, () {});
   });
   Future<void> open(WidgetTester t,
-      {Future<Uint8List?> Function(ImageSource)? picker}) async {
+      {String? initialRoomId,
+      Future<Uint8List?> Function(ImageSource)? picker}) async {
     await t.pumpWidget(MaterialApp(
         home: HomeAgentChat(
             client: client,
             hub: hub,
             current: () => true,
             guided: () {},
+            initialRoomId: initialRoomId,
             pickPhoto: picker ?? ((_) async => pixels))));
     await t.pumpAndSettle();
   }
@@ -151,8 +168,8 @@ void main() {
       'Awaiting review',
       'Apply reviewed steps'
     ]) {
-      expect(find.descendant(of: card, matching: find.text(text)),
-          findsOneWidget);
+      expect(
+          find.descendant(of: card, matching: find.text(text)), findsOneWidget);
     }
     expect(find.byType(ListTile), findsNothing);
   });
@@ -341,6 +358,368 @@ void main() {
     });
     expect(seen.any((entry) => entry.$1.startsWith('apply_')), isFalse);
   });
+  group('whole-home scene design', () {
+    const creation = 'plan_generated_home_scene';
+    const draftPlan = '1b9af27c-a109-4e92-94ed-bd6a7c6cc6b5';
+    const sceneId = 'chat-$draftPlan';
+    const applyPlan = '26028af8-83e4-42bf-b518-d76190e540cb';
+    const saveHandle = '1c809342-aaad-4f41-8623-9c3d0fdae01a';
+    const homeHandle = '7c2baa7f-16f1-4af2-b369-013e9f62c304';
+    const ops = {
+      'read_automation_settings',
+      'plan_scene_edit',
+      'apply_scene_edit',
+      'plan_home_scene_edit',
+      'apply_home_scene_edit',
+      'read_plan_outcome',
+    };
+    const xmas = 'Set a whole home Xmas scene!';
+    const holidayColors = ['#cf193a', '#11804c', '#f1b94e'];
+    const aurora = 'Create a whole-home Northern Lights scene.';
+    const auroraColors = ['#0b8457', '#5f4b8b'];
+    late CustomerAction draft;
+    CustomerAction? saved;
+    bool ownerApproved = false;
+
+    String? homeDecision;
+    void sceneHub(
+        {Set<String> catalog = ops,
+        bool loseReply = false,
+        bool reviewHome = false}) {
+      saved = null;
+      ownerApproved = false;
+      homeDecision = null;
+      hub =
+          LightingChatHub(rooms, {'adjust_room_brightness'}, (op, args) async {
+        calls.add((op, args));
+        switch (op) {
+          case 'explain_room_output':
+            return {'room_id': args['room_id'], 'canonical_brightness': 50};
+          case 'read_automation_settings':
+            return {
+              'scenes': [if (saved != null) saved],
+              'schedules': [],
+            };
+          case 'plan_scene_edit':
+            draft = CustomerAction.from(args['definition']);
+            return {
+              'plan_id': saveHandle,
+              'operation': 'apply_scene_edit',
+              'server_instance_id': 'fixture',
+              'before': {
+                'current': null,
+                'room_ids': ['a', 'b'],
+                'bound_nodes': {}
+              },
+              'proposal': {
+                'scene': {'id': sceneId, 'definition': draft}
+              },
+              'affected_rooms': ['a', 'b'],
+            };
+          case 'apply_scene_edit':
+            if (loseReply) {
+              saved = draft;
+              throw StateError('Connection lost after saving the scene');
+            }
+            return {'status': 'awaiting_owner_approval', 'plan_id': saveHandle};
+          case 'read_plan_outcome':
+            if (args['plan_id'] == homeHandle) {
+              if (homeDecision == null || homeDecision == 'declined') {
+                return {
+                  'plan_id': homeHandle,
+                  'status': homeDecision ?? 'awaiting_owner_approval'
+                };
+              }
+              return {
+                'plan_id': homeHandle,
+                'status': homeDecision,
+                'server_instance_id': 'fixture',
+                'operation': 'apply_home_scene_edit',
+                'after': saved,
+                'dispatch': {'queued': true},
+                'physical_verification': 'not_observed',
+              };
+            }
+            if (!ownerApproved) {
+              return {
+                'status': 'awaiting_owner_approval',
+                'plan_id': saveHandle
+              };
+            }
+            return {
+              'status': 'applied',
+              'operation': 'apply_scene_edit',
+              'plan_id': saveHandle,
+              'server_instance_id': 'fixture',
+              'after': draft,
+              'physical_verification': 'not_observed',
+            };
+          case 'plan_home_scene_edit':
+            return {
+              'plan_id': homeHandle,
+              'operation': 'apply_home_scene_edit',
+              'server_instance_id': 'fixture',
+              'before': {
+                'current': saved,
+                'room_ids': ['a', 'b'],
+                'bound_nodes': {}
+              },
+              'proposal': {
+                'home_scene': {'id': sceneId, 'target_mode': 'rooms'}
+              },
+              'affected_rooms': ['a', 'b'],
+            };
+          case 'apply_home_scene_edit':
+            if (reviewHome) {
+              return {
+                'status': 'awaiting_owner_approval',
+                'plan_id': homeHandle
+              };
+            }
+            return {
+              'status': 'queued',
+              'operation': 'apply_home_scene_edit',
+              'plan_id': homeHandle,
+              'server_instance_id': 'fixture',
+              'dispatch': {'queued': true},
+              'physical_verification': 'not_observed',
+            };
+          default:
+            throw StateError('Unexpected hub call: $op');
+        }
+      }, () {}, catalog: catalog);
+    }
+
+    void agentPalette(List<String> colors) {
+      client.supportsSceneDrafts = true;
+      client.answer = '';
+      client.proposalForTurn = (turn) {
+        final target = (turn['targets'] as List)
+            .singleWhere((t) => (t['tools'] as List).isNotEmpty);
+        final op = (target['tools'] as List).single;
+        return {
+          'id': op == creation ? draftPlan : applyPlan,
+          'expires': DateTime.now()
+              .add(const Duration(minutes: 5))
+              .millisecondsSinceEpoch,
+          'steps': [
+            {
+              'target': target['ref'],
+              'operation': op,
+              'arguments': op == creation
+                  ? {
+                      for (final (i, color) in colors.indexed)
+                        'color_${i + 1}': color,
+                      'brightness_percent': 65,
+                    }
+                  : {},
+              'status': 'review',
+            },
+          ],
+        };
+      };
+    }
+
+    Future<void> tap(WidgetTester t, String label) async {
+      final button = find.text(label);
+      expect(button, findsOneWidget);
+      await t.ensureVisible(button);
+      await t.tap(button);
+      await t.pumpAndSettle();
+    }
+
+    Future<void> requestAndSave(
+        WidgetTester t, String prompt, List<String> colors,
+        {bool loseReply = false,
+        bool reviewHome = false,
+        bool startFromChip = false}) async {
+      sceneHub(loseReply: loseReply, reviewHome: reviewHome);
+      agentPalette(colors);
+      await open(t, initialRoomId: 'a');
+      if (startFromChip) {
+        await tap(t, 'Make a scene');
+        expect(find.text('What colors or mood would you like for the scene?'),
+            findsOneWidget);
+      }
+      await send(t, prompt);
+      final turn = client.calls.singleWhere((c) => c.$1 == 'turn').$2;
+      expect(turn['messages'].last['text'], prompt);
+      expect(turn['selected'], isNull);
+      final offered = turn['targets'] as List;
+      expect(offered, hasLength(1));
+      expect(offered.single['ref'], client.reference('d', 'new-scene'));
+      expect(offered.single['tools'], [creation]);
+      expect(calls.where((c) => c.$1 == 'explain_room_output'), isEmpty);
+      expect(calls.where((c) => c.$1.startsWith('apply_')), isEmpty);
+      final proposal = calls.singleWhere((c) => c.$1 == 'plan_scene_edit').$2;
+      expect(proposal['scene_id'], sceneId);
+      expect(draft['id'], sceneId);
+      expect(draft['extensions']['whole_home'], true);
+      final palette = draft['light']['palette'] as List;
+      expect(palette, hasLength(colors.length));
+      for (final (i, color) in colors.indexed) {
+        final rgb = int.parse(color.substring(1), radix: 16);
+        expect(palette[i]['color'], {
+          'kind': 'rgb',
+          'rgb': {'r': rgb >> 16, 'g': (rgb >> 8) & 255, 'b': rgb & 255},
+        });
+        expect(palette[i]['brightness'], 65);
+      }
+      expect(find.textContaining('65% brightness'), findsOneWidget);
+      await tap(t, 'Save scene');
+      expect(calls.singleWhere((c) => c.$1 == 'apply_scene_edit').$2,
+          {'confirmed': true, 'plan_id': saveHandle});
+      expect(calls.where((c) => c.$1 == 'plan_home_scene_edit'), isEmpty);
+      expect(find.text('Use across the home'), findsNothing);
+    }
+
+    for (final (prompt, colors, decision, result, statusLabel) in [
+      (xmas, holidayColors, null, 'queued', 'Hub queued the change'),
+      (aurora, auroraColors, 'queued', 'queued', 'Hub queued the change'),
+      (
+        'Soft violet and teal at twilight',
+        auroraColors,
+        'partially_applied',
+        'partial',
+        'Configuration changed · some lights unresolved'
+      ),
+      (
+        'Use my firework palette',
+        holidayColors,
+        'declined',
+        'rejected',
+        'Hub rejected'
+      ),
+    ]) {
+      testWidgets(
+          '$prompt saves the generated palette before a separate home review ($result)',
+          (t) async {
+        await requestAndSave(t, prompt, colors,
+            reviewHome: decision != null,
+            startFromChip: prompt != xmas && prompt != aurora);
+        await tap(t, 'Check outcome');
+        expect(find.text('Use across the home'), findsNothing);
+        ownerApproved = true;
+        saved = draft;
+        await tap(t, 'Check outcome');
+        expect(calls.lastWhere((c) => c.$1 == 'read_plan_outcome').$2,
+            {'plan_id': saveHandle});
+        expect(client.calls.lastWhere((c) => c.$1 == 'receipt').$2, {
+          'plan': draftPlan,
+          'index': 0,
+          'receipt': saveHandle,
+          'outcome': 'verified',
+        });
+        await tap(t, 'Use across the home');
+        final turn = client.calls.lastWhere((c) => c.$1 == 'turn').$2;
+        final sceneRef = client.reference('c', sceneId);
+        expect(turn['messages'].last['text'],
+            'Apply $sceneRef to the whole home.');
+        expect(calls.singleWhere((c) => c.$1 == 'plan_home_scene_edit').$2,
+            {'scene_id': sceneId, 'target_mode': 'rooms'});
+        expect(calls.where((c) => c.$1 == 'apply_home_scene_edit'), isEmpty);
+        await tap(t, 'Apply reviewed steps');
+        expect(calls.singleWhere((c) => c.$1 == 'apply_home_scene_edit').$2,
+            {'plan_id': homeHandle, 'confirmed': true});
+        if (decision != null) {
+          expect(find.text('Awaiting hub owner'), findsOneWidget);
+          await tap(t, 'Check outcome');
+          expect(find.text('Awaiting hub owner'), findsOneWidget);
+          homeDecision = decision;
+          await tap(t, 'Check outcome');
+          expect(calls.lastWhere((c) => c.$1 == 'read_plan_outcome').$2,
+              {'plan_id': homeHandle});
+          expect(client.calls.lastWhere((c) => c.$1 == 'receipt').$2, {
+            'plan': applyPlan,
+            'index': 0,
+            'receipt': homeHandle,
+            'outcome': result,
+          });
+          expect(calls.where((c) => c.$1 == 'apply_home_scene_edit'),
+              hasLength(1));
+        }
+        expect(
+            client.calls
+                .where((c) => c.$1 == 'receipt')
+                .map((c) => c.$2['outcome']),
+            [
+              'awaiting_owner',
+              'verified',
+              if (decision != null) 'awaiting_owner',
+              result
+            ]);
+        expect(
+            find.descendant(
+                of: find.byType(AssistantReviewCard),
+                matching: find.text(statusLabel)),
+            findsOneWidget);
+        expect(calls.where((c) => c.$1 == 'adjust_room_brightness'), isEmpty);
+      });
+    }
+
+    testWidgets(
+        'a scene request naming a room keeps the room as its only target',
+        (t) async {
+      sceneHub();
+      client.supportsSceneDrafts = true;
+      await open(t, initialRoomId: 'a');
+      await send(t, 'Make a sunset scene in Dining');
+      final turn = client.calls.singleWhere((c) => c.$1 == 'turn').$2;
+      final offered = (turn['targets'] as List)
+          .where((t) => (t['tools'] as List).isNotEmpty);
+      final dining = client.reference('r', 'b');
+      expect(turn['selected'], dining);
+      expect(offered.single['ref'], dining);
+      expect(offered.single['tools'], ['adjust_room_brightness']);
+      expect(calls.where((c) => c.$1 == 'plan_scene_edit'), isEmpty);
+    });
+
+    testWidgets(
+        'an owner save receipt cannot apply a palette subsequently edited on the hub',
+        (t) async {
+      await requestAndSave(t, aurora, auroraColors);
+      ownerApproved = true;
+      saved = {
+        ...draft,
+        'light': {'palette': []}
+      };
+      await tap(t, 'Check outcome');
+      expect(find.text('Use across the home'), findsNothing);
+      expect(calls.where((c) => c.$1 == 'plan_home_scene_edit'), isEmpty);
+    });
+
+    testWidgets(
+        'a lost save reply recovers the saved scene without repeating the write',
+        (t) async {
+      await requestAndSave(t, aurora, auroraColors, loseReply: true);
+      expect(client.calls.singleWhere((c) => c.$1 == 'receipt').$2['outcome'],
+          'uncertain');
+      await tap(t, 'Check outcome');
+      expect(find.text('Use across the home'), findsOneWidget);
+      expect(calls.where((c) => c.$1 == 'apply_scene_edit'), hasLength(1));
+      expect(calls.where((c) => c.$1 == 'apply_home_scene_edit'), isEmpty);
+    });
+
+    for (final oldHub in [true, false]) {
+      testWidgets(
+          'a whole-home theme with an older ${oldHub ? 'hub' : 'agent'} keeps the selected room untouched',
+          (t) async {
+        sceneHub(catalog: oldHub ? ops.difference({'apply_scene_edit'}) : ops);
+        client.supportsSceneDrafts = oldHub;
+        await open(t, initialRoomId: 'a');
+        await send(t, xmas);
+        expect(client.calls.where((c) => c.$1 == 'turn'), isEmpty);
+        expect(find.textContaining('Scene creation is unavailable'),
+            findsOneWidget);
+        expect(find.text('Save scene'), findsNothing);
+        expect(
+            calls.where((c) =>
+                c.$1 == 'explain_room_output' || c.$1.startsWith('apply_')),
+            isEmpty);
+      });
+    }
+  });
+
   test(
       'the normalized JPEG contains pixels without source comments or GPS metadata',
       () {

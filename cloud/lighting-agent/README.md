@@ -6,6 +6,12 @@ The Cloudflare Agents SDK stores bounded progress in a SQLite Durable Object for
 
 Optional JPEGs use multipart `POST /v1/photo`. Workers AI processes the re-encoded image and returns advice or proposed steps. The phone holds the chat transcript, and the conversation object stores structured outcomes. Provider settings and terms apply to inference. [Cloudflare model details](https://developers.cloudflare.com/workers-ai/models/llama-4-scout-17b-16e-instruct/)
 
+## Creating a whole-home scene
+
+Residents can describe a theme in chat or select **Make a scene**. A Worker that supports scene drafts advertises `scene_drafts` when opening a conversation. For a draft the phone sends the theme with one opaque design target. The model proposes two to four RGB colors and a brightness level. The phone shows swatches and prepares a hub review to save the palette as a new named scene.
+
+Saving leaves the lights as they are. Once the phone verifies the saved definition on the hub, **Use across the home** prepares a separate review for the eligible rooms and their saved Mood bindings. Both steps honor the hub's owner-approval settings. A queued or partial dispatch is reported at that stage. Check outcome can recover a lost save response from the hub catalog.
+
 ## Development
 
 Run these commands in this directory with Node 24 or newer.

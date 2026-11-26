@@ -75,6 +75,12 @@ class HomeAgentClient {
   final bool Function() current;
   final Dio _http;
   String? session;
+  bool supportsSceneDrafts = false;
+
+  void useSession(CustomerAction state) {
+    session = state['session'] as String;
+    supportsSceneDrafts = state['scene_drafts'] == true;
+  }
 
   static Future<HomeAgentClient?> discover(
       String home, String instance, bool Function() current) async {
@@ -107,7 +113,7 @@ class HomeAgentClient {
         () => auth.client.auth.currentSession?.accessToken, current);
     try {
       final state = await client.call('open');
-      client.session = state['session'] as String;
+      client.useSession(state);
       return client;
     } on DioException catch (e) {
       client.close();

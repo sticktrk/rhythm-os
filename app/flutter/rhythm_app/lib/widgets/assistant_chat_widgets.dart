@@ -190,17 +190,18 @@ class AssistantComposer extends StatelessWidget {
 /// The opening of a lighting conversation: one question, a few prompts to
 /// start from, and what leaves the phone.
 class LightingChatWelcome extends StatelessWidget {
-  const LightingChatWelcome({
-    super.key,
-    required this.tools,
-    required this.onPrompt,
-    required this.disclosure,
-  });
+  const LightingChatWelcome(
+      {super.key,
+      required this.tools,
+      required this.onPrompt,
+      required this.disclosure,
+      this.onDesignScene});
 
   /// Hub operations this conversation may propose. Prompts follow them.
   final Set<String> tools;
   final ValueChanged<String>? onPrompt;
   final String disclosure;
+  final VoidCallback? onDesignScene;
 
   @override
   Widget build(BuildContext context) {
@@ -242,6 +243,11 @@ class LightingChatWelcome extends StatelessWidget {
               color: CelestialColors.textPrimary)),
       const SizedBox(height: 14),
       Wrap(spacing: 8, runSpacing: 4, children: [
+        if (onDesignScene != null)
+          ActionChip(
+              avatar: const Icon(Icons.palette_outlined),
+              label: const Text('Make a scene'),
+              onPressed: onDesignScene),
         for (final p in prompts)
           ActionChip(
               avatar: Icon(p.$1),

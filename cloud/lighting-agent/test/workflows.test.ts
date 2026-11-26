@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateSteps, type Turn } from "../src/planner.ts";
+import { infer, turnSchema, validateSteps, type Turn } from "../src/planner.ts";
 
 const room = "r_" + "1".repeat(24),
   sensor = "m_" + "2".repeat(24),
@@ -21,6 +21,150 @@ const step = (
   operation: string,
   args: Record<string, number | string>,
 ) => ({ target, operation, arguments: args });
+
+const draft = "d_" + "5".repeat(24);
+const creation = "plan_generated_home_scene";
+const draftTurn: Turn = {
+  turn: crypto.randomUUID(),
+  messages: [
+    { role: "user", text: "Create a whole-home Northern Lights scene" },
+  ],
+  targets: [{ ref: draft, included: true, tools: [creation] }],
+};
+const palette = {
+  color_1: "#0b8457",
+  color_2: "#5F4B8B",
+  brightness_percent: 55,
+};
+
+test("a whole-home scene design needs only a palette from the model", async () => {
+  const proposal = step(draft, creation, palette);
+  const ai = {
+    run: async (_model: string, input: { messages: { content: string }[] }) => {
+      assert.match(input.messages[0].content, /Make a scene/);
+      assert.match(input.messages[0].content, /color_1/);
+      assert.doesNotMatch(
+        input.messages[0].content,
+        /plan_generated_home_scene|plan_home_scene_edit|adjust_room_warmth|d_[a-f0-9]{24}/,
+      );
+      assert.equal(input.messages.at(-1)?.content, draftTurn.messages[0].text);
+      return {
+        response: {
+          text: "Emerald and violet at a soft brightness.",
+          palette,
+        },
+      };
+    },
+  } as unknown as Ai;
+  assert.deepEqual((await infer(ai, turnSchema.parse(draftTurn))).steps, [
+    proposal,
+  ]);
+
+  const clarify = {
+    run: async () => ({
+      response: { text: "Which colors do you have in mind?", palette: null },
+    }),
+  } as unknown as Ai;
+  assert.deepEqual((await infer(clarify, draftTurn)).steps, []);
+  const uncaptioned = {
+    ...draftTurn,
+    messages: [{ role: "user" as const, text: "" }],
+  };
+  const proposesDraft = {
+    run: async () => ({
+      response: { text: "I see colorful lights.", palette },
+    }),
+  } as unknown as Ai;
+  assert.deepEqual(
+    (await infer(proposesDraft, uncaptioned, "photo")).steps,
+    [],
+  );
+  await assert.rejects(infer(proposesDraft, uncaptioned), /message_required/);
+  for (const response of [
+    { text: "A palette", steps: [proposal] },
+    { text: "A palette", palette, target: scene },
+    { text: "A palette", palette: { ...palette, brightness_percent: 120 } },
+  ]) {
+    const invalid = { run: async () => ({ response }) } as unknown as Ai;
+    await assert.rejects(infer(invalid, draftTurn));
+  }
+});
+
+test("generated proposals contain only two to four consecutive hex colors and bounded brightness", () => {
+  const validate = (args: Record<string, string | number>) =>
+    validateSteps([step(draft, creation, args)], draftTurn);
+  for (const args of [
+    { ...palette, brightness_percent: 1 },
+    { ...palette, color_3: "#00FF99", brightness_percent: 100 },
+    { ...palette, color_3: "#00FF99", color_4: "#7788ff" },
+  ])
+    assert.deepEqual(validate(args), [step(draft, creation, args)]);
+  for (const args of [
+    { color_1: "#112233", brightness_percent: 50 },
+    { ...palette, color_2: "#000" },
+    { ...palette, color_3: "orange" },
+    { ...palette, color_4: "#ABCDEF" },
+    { ...palette, name: "My theme" },
+    { ...palette, brightness_percent: 50.5 },
+    { ...palette, brightness_percent: 0 },
+    { ...palette, brightness_percent: 101 },
+  ])
+    assert.throws(() => validate(args));
+
+  const [target] = draftTurn.targets;
+  for (const targets of [
+    [{ ...target, included: false }],
+    [{ ...target, ref: scene }],
+    [{ ...target, tools: [] }],
+    [{ ...target, tools: [creation, "plan_home_scene_edit"] }],
+    [target, { ref: room, tools: ["control_room_power"] }],
+  ])
+    assert.throws(() =>
+      validateSteps([step(targets[0].ref, creation, palette)], {
+        ...draftTurn,
+        targets,
+      }),
+    );
+});
+
+test("an explicitly chosen whole-home scene creates a review without inference", async () => {
+  let calls = 0;
+  const ai = {
+    run: async () => {
+      calls++;
+      return { response: { text: "Lighting advice", steps: [] } };
+    },
+  } as unknown as Ai;
+  const choice = {
+    ref: scene,
+    tools: ["plan_home_scene_edit"],
+    included: true,
+  };
+  const message = `Apply ${scene} to the whole home.`;
+  const request = (text: string, targets: Turn["targets"], photo?: string) =>
+    infer(ai, { ...turn, messages: [{ role: "user", text }], targets }, photo);
+
+  const review = await request(message, [{ ref: room, tools: [] }, choice]);
+  assert.deepEqual(review.steps, [step(scene, "plan_home_scene_edit", {})]);
+  assert.equal(calls, 0);
+
+  for (const result of [
+    await request(message, [choice], "photo"),
+    await request(message + " Except the hall.", [choice]),
+    await request(message, [{ ...choice, ref: "c_" + "9".repeat(24) }]),
+    await request(message, [{ ...choice, included: false }]),
+    await request(message, [{ ...choice, tools: [] }]),
+    await request(message, [{ ...choice, tools: [...choice.tools, "other"] }]),
+    await request(message, [
+      choice,
+      { ref: room, tools: ["control_room_power"] },
+    ]),
+  ]) {
+    assert.equal(result.text, "Lighting advice");
+    assert.deepEqual(result.steps, []);
+  }
+  assert.equal(calls, 7);
+});
 
 test("motion repair requires a walk that identified the missing intended target", () => {
   const repair = step(sensor, "plan_motion_target", { room });

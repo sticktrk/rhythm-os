@@ -45,10 +45,12 @@ void main() {
     }, () {});
   });
   Future<void> open(WidgetTester tester,
-      {Future<LightingChatHub> Function({bool reconnect})? connect}) async {
+      {Future<LightingChatHub> Function({bool reconnect})? connect,
+      String? initialRoomId}) async {
     await tester.pumpWidget(MaterialApp(
         home: LightingChatScreen(
       openHub: connect ?? ({bool reconnect = false}) async => hub,
+      initialRoomId: initialRoomId,
       current: () => account.value,
       changes: account,
       local: true,
@@ -61,6 +63,37 @@ void main() {
     )));
     await tester.pumpAndSettle();
   }
+
+  testWidgets(
+      'room-only chat keeps a whole-home scene request out of the selected room',
+      (tester) async {
+    const office = RhythmTopologyNode(
+        id: 'office-id', name: 'Office', kind: RhythmNodeKind.room);
+    hub = LightingChatHub([room, office], tools, (op, args) async {
+      calls.add((op, args));
+      return {'room_id': args['room_id']};
+    }, () {});
+    await open(tester, initialRoomId: room.id);
+    Future<void> send(String prompt) async {
+      await tester.enterText(find.byType(TextField), prompt);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pumpAndSettle();
+    }
+
+    const scene = 'Create a whole-home scene inspired by the northern lights';
+    await send(scene);
+    expect(find.textContaining('requires the whole-home lighting assistant'),
+        findsOneWidget);
+    expect(find.text('Apply to room'), findsNothing);
+    expect(calls, isEmpty);
+    expect(turns, isEmpty);
+
+    await send('Make it warmer');
+    expect(calls.single.$1, 'explain_room_output');
+    expect(calls.single.$2, {'room_id': room.id});
+    expect((turns.single['messages'] as List).single['text'], 'Make it warmer');
+    expect(find.text('Apply to room'), findsOneWidget);
+  });
 
   testWidgets(
       'free-form prompt reads MCP and sends only safe room state; one confirmed write reports readback',

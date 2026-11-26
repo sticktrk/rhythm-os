@@ -95,6 +95,23 @@ class LightingChatHub {
       .replaceAll(RegExp(r'[^\p{L}\p{N}]+', unicode: true), ' ')
       .trim();
 
+  /// A scene can be designed without a current room. Explicit room targets
+  /// and exclusions stay on the scoped lighting path.
+  static bool requestsSceneDesign(String prompt,
+      {bool mentionsRoom = false, bool mentionsSavedScene = false}) {
+    final text = words(prompt);
+    if (mentionsRoom) return false;
+    final theme =
+        RegExp(r'\b(scene|vibe|theme|palette|look|mood)\b|\bfeel like\b');
+    if (!theme.hasMatch(text)) return false;
+    final create = RegExp(
+        r'\b(create|design|generate|build|compose|invent)\b|\bmake\b.*\bscene\b');
+    final home = RegExp(
+        r'\b(whole|entire) (home|house)\b|\b(all|every) rooms?\b|\bthroughout (the |my |our )?(house|home)\b');
+    return create.hasMatch(text) ||
+        (!mentionsSavedScene && home.hasMatch(text));
+  }
+
   /// Match whole room names on the device. Claim longer names first so that
   /// "main bedroom" does not also select a separate room called "bedroom".
   List<RhythmTopologyNode> mentionedRooms(String message) {

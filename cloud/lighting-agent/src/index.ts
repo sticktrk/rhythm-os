@@ -150,7 +150,10 @@ async function route(req: Request, env: Env) {
   const agent = await getAgentByName(env.CONVERSATIONS, name);
   if (op === "open") {
     const reply = await agent.open();
-    return json(reply.data, reply.code);
+    return json(
+      reply.code === 200 ? { ...reply.data, scene_drafts: true } : reply.data,
+      reply.code,
+    );
   }
   const session = req.headers.get("x-rhythm-session") ?? "";
   if (!id.safeParse(session).success) return json({}, 400);
