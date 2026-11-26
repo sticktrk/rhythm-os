@@ -34,5 +34,7 @@ GRANT SELECT, DELETE ON public.homes TO authenticated;
 \ir ../app/supabase/tests/customer_assistant_reviews.sql
 \ir ../app/supabase/migrations/20261122000000_lighting_chat_usage.sql
 \ir ../app/supabase/tests/lighting_chat_usage.sql
+\ir ../app/supabase/migrations/20261126000000_add_push_devices.sql
+\ir ../app/supabase/tests/push_devices.sql
 \ir ../app/supabase/migrations/20261127000000_index_light_usage_hub.sql
 \ir ../app/supabase/tests/home_usage_cascade.sql

@@ -46,6 +46,12 @@ pub enum OtaUpdateStage {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerEvent {
+    AssistantAttention {
+        kind: &'static str,
+        request_id: String,
+        state: &'static str,
+        expires_at_epoch_ms: u64,
+    },
     /// Addressable node state changed (after button, periodic tick, etc.).
     NodeState { nodes: Vec<NodeStateEvent> },
     /// Motion timer state changed.

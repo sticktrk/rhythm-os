@@ -60,6 +60,10 @@ verify_jwt = false
 [functions.server-activity-ingest]
 verify_jwt = false
 
+# Devices authenticate with a hashed upload token, not a Supabase JWT.
+[functions.hub-attention]
+verify_jwt = false
+
 # Performs user-token verification in _shared/auth; shared vendor account by default, optional owner scope.
 [functions.monster-device]
 verify_jwt = false

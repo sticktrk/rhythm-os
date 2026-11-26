@@ -111,6 +111,8 @@ class RhythmConnection {
   final _syncRequiredController =
       StreamController<RhythmSyncRequired>.broadcast();
   final _newNodesController = StreamController<void>.broadcast();
+  final _assistantAttentionController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final _triageChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
   final _connectionStateController =
@@ -262,6 +264,8 @@ class RhythmConnection {
       _syncRequiredController.stream;
   Stream<void> get newNodesDetected => _newNodesController.stream;
   Stream<void> get newRoomsDetected => newNodesDetected;
+  Stream<Map<String, dynamic>> get assistantAttentionEvents =>
+      _assistantAttentionController.stream;
   Stream<Map<String, dynamic>> get triageChangedEvents =>
       _triageChangedController.stream;
   Stream<RhythmConnectionState> get connectionStateStream =>
@@ -518,6 +522,7 @@ class RhythmConnection {
     _powerSchedulesChangedController.close();
     _syncRequiredController.close();
     _newNodesController.close();
+    _assistantAttentionController.close();
     _triageChangedController.close();
     _connectionStateController.close();
     _pairingProgressController.close();
@@ -1378,6 +1383,12 @@ class RhythmConnection {
           _syncRequiredController.add(RhythmSyncRequired.fromJson(payload));
           _reHelloSuppressedNodeIds.clear();
           _newNodesController.add(null);
+          break;
+
+        case 'assistant_attention':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _assistantAttentionController.add(payload);
           break;
 
         case 'triage_changed':

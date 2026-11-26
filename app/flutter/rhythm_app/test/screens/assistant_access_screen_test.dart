@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:dio/dio.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +21,37 @@ class _Auth extends RhythmAuthApi {
   @override
   Future<List<RhythmAgentCredential>> listAgentCredentials() async =>
       [if (issued && !revoked) const RhythmAgentCredential('1234', 'bearer')];
+  bool supportsConnections = true;
+  bool waiting = false;
+  bool registered = false;
+
+  @override
+  Future<RhythmAssistantClientRegistration> registerAssistantClient(
+      {bool unattendedChanges = false}) async {
+    registered = true;
+    return const RhythmAssistantClientRegistration(
+        'local-client', 'local-secret', 'legacy-code', Duration(minutes: 5));
+  }
+
+  @override
+  Future<List<RhythmAssistantConnection>> listAssistantConnections() async {
+    if (!supportsConnections) {
+      throw DioException(
+          requestOptions: RequestOptions(),
+          response:
+              Response(requestOptions: RequestOptions(), statusCode: 404));
+    }
+    return [
+      if (waiting)
+        RhythmAssistantConnection(
+            id: 'waiting-1',
+            destination: 'Home Assistant',
+            kind: 'home_assistant',
+            remote: false,
+            expiresAt: DateTime.now().add(const Duration(minutes: 5)))
+    ];
+  }
+
   bool pending = false;
   bool? approved;
   @override
@@ -49,6 +83,45 @@ class _Auth extends RhythmAuthApi {
 }
 
 void main() {
+  for (final supported in [true, false]) {
+    testWidgets(
+        'Home Assistant setup uses the advertised connection flow ($supported)',
+        (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(412, 1000);
+      addTearDown(tester.view.reset);
+      final auth = _Auth()..supportsConnections = supported;
+      final stream = StreamController<void>.broadcast();
+      addTearDown(stream.close);
+      await tester.pumpWidget(MaterialApp(
+          home: AssistantAccessScreen(
+              api: auth,
+              endpoint: 'https://hub.example/api/assistant/mcp',
+              isCurrentTarget: () => true,
+              targetChanges: ValueNotifier(true),
+              attentionEvents: stream.stream)));
+      await tester.pumpAndSettle();
+      auth.waiting = true;
+      stream.add(null);
+      await tester.pumpAndSettle();
+      expect(find.text('WAITING TO CONNECT'),
+          supported ? findsOneWidget : findsNothing);
+      final connect = find.text('Connect Home Assistant Assist');
+      await tester.ensureVisible(connect);
+      await tester.tap(connect);
+      await tester.pumpAndSettle();
+      expect(auth.registered, !supported);
+      expect(find.textContaining('type rhythm for both'),
+          supported ? findsOneWidget : findsNothing);
+      expect(find.text('Reveal'), supported ? findsNothing : findsOneWidget);
+      if (!supported) {
+        await tester.tap(find.text('Reveal'));
+        await tester.pumpAndSettle();
+        expect(find.text('legacy-code'), findsOneWidget);
+      }
+    });
+  }
+
   for (final approve in [true, false]) {
     testWidgets(
         'owner reviews and ${approve ? "approves" : "declines"} a pending change',

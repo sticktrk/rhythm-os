@@ -17,6 +17,15 @@ physical installation. Open the selected hub's assistant in the staff console
 for grant-backed diagnostics and hub operations. A missing grant, unsupported
 older hub, or unavailable connection is reported at the step that needs it.
 
+## Hub notifications
+
+A hub calls `hub-attention` with its scoped activity upload credential when a
+connection or lighting plan needs attention. The service checks the home, hub,
+installation and current membership before sending fixed text and opaque
+routing IDs to the home’s registered iPhones. It admits six rings per hub in
+ten minutes. The phone uses its hub owner credential to read the current
+request and decide it. APNs receives neither the match code nor plan details.
+
 ## Reviewed changes
 
 Resident previews are bound to a signed-in user, target, installation identity

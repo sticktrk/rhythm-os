@@ -1860,6 +1860,28 @@ async fn mcp_on_mobile_listener_accepts_a_scoped_agent_and_hands_areas_to_ha() {
         "/api/assistant/oauth/authorize"
     );
     assert_eq!(metadata["token_endpoint"], "/api/assistant/oauth/token");
+    assert_eq!(
+        metadata["registration_endpoint"],
+        "/api/assistant/oauth/register"
+    );
+    let authorize = "/api/assistant/oauth/authorize?response_type=code&client_id=rhythm&redirect_uri=https%3A%2F%2Fmy.home-assistant.io%2Fredirect%2Foauth";
+    let mut tunneled = request(Method::GET, authorize, None, json!({}));
+    tunneled.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:2345".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    tunneled
+        .headers_mut()
+        .insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+    assert_eq!(
+        f.mobile().oneshot(tunneled).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        json_request(f.mobile(), Method::GET, authorize, None, json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
     let (status, issued) = json_request(
         f.admin(),
         Method::POST,

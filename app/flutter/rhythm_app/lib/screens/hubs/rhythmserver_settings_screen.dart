@@ -264,6 +264,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         MaterialPageRoute(
             builder: (_) => AssistantAccessScreen(
                 api: local.authApi(),
+                attentionEvents: sync.connection.assistantAttentionEvents,
                 endpoint: Uri.parse('${local.baseUrl}/')
                     .resolve('api/assistant/mcp')
                     .toString(),

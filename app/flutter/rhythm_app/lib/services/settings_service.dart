@@ -544,6 +544,24 @@ class SettingsService {
   /// Whether push notifications are enabled.
   bool get notificationsEnabled => _settings.notificationsEnabled;
 
+  bool get pushPermissionConsidered =>
+      _localDataSource?.getSettingsValue('assistant_push_prompted') == true;
+
+  Future<void> markPushPermissionConsidered() async {
+    await _localDataSource?.saveSettingsValue('assistant_push_prompted', true);
+  }
+
+  String? get registeredPushToken =>
+      _localDataSource?.getSettingsValue('assistant_push_token') as String?;
+
+  Future<void> saveRegisteredPushToken(String? token) async {
+    if (token == null) {
+      await _localDataSource?.deleteSettingsValue('assistant_push_token');
+    } else {
+      await _localDataSource?.saveSettingsValue('assistant_push_token', token);
+    }
+  }
+
   /// Set notifications preference.
   Future<void> setNotificationsEnabled(bool value) async {
     _settings = _settings.copyWith(notificationsEnabled: value);

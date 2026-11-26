@@ -80,6 +80,22 @@ fn shared_routes() -> Router<SharedState> {
             get(crate::auth::assistant_oauth::consent).post(crate::auth::assistant_oauth::approve),
         )
         .route(
+            "/api/assistant/oauth/authorize/wait",
+            get(crate::auth::assistant_oauth::wait),
+        )
+        .route(
+            "/api/assistant/oauth/register",
+            post(crate::auth::assistant_oauth::dynamic_register),
+        )
+        .route(
+            "/api/assistant/connections",
+            get(crate::auth::assistant_oauth::list_connections),
+        )
+        .route(
+            "/api/assistant/connections/:id",
+            post(crate::auth::assistant_oauth::decide_connection),
+        )
+        .route(
             "/api/assistant/oauth/token",
             post(crate::auth::assistant_oauth::exchange),
         )
@@ -416,7 +432,13 @@ async fn list_agent_tokens(
     let clients = &s.api_auth.agent_clients;
     let tokens: Vec<_> = clients
         .iter()
-        .map(|c| serde_json::json!({"id":c.id,"kind":"home_assistant","unattended_changes":c.unattended_changes}))
+        .map(|c| {
+            let mut item = serde_json::json!({"id":c.id,"kind":c.kind(),"unattended_changes":c.unattended_changes});
+            if let Some(destination) = &c.destination {
+                item["destination"] = serde_json::json!(destination);
+            }
+            item
+        })
         .chain(
             s.api_auth
                 .agent_tokens
@@ -1742,6 +1764,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::SettingsChanged { .. } => "settings_changed",
         ServerEvent::LightBreakerChanged { .. } => "light_breaker_changed",
         ServerEvent::ModeChanged { .. } => "mode_changed",
+        ServerEvent::AssistantAttention { .. } => "assistant_attention",
         ServerEvent::ConfigChanged => "config_changed",
         ServerEvent::NodesChanged => "nodes_changed",
         ServerEvent::TriageChanged { .. } => "triage_changed",

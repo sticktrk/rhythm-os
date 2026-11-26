@@ -251,8 +251,14 @@ pub(super) async fn apply(
             if caller.role == Some(ApiTokenRole::Agent)
                 && (!caller.unattended || review.origin.requires_owner_approval)
             {
+                let first = matches!(review.status, Status::Reviewed);
                 review.status = Status::Awaiting;
-                return Ok(review.response(&id));
+                let response = review.response(&id);
+                let expires = review.expires;
+                if first {
+                    attention::requested(&state, &s, "plan", &id, expires);
+                }
+                return Ok(response);
             }
             review.status = Status::Running;
             (review.args.clone(), false)
@@ -363,6 +369,7 @@ pub(crate) async fn decide(
         if !matches!(review.status, Status::Awaiting) || !review.current(&s) {
             return StatusCode::CONFLICT.into_response();
         }
+        attention::resolved(&s, "plan", &id, review.expires);
         if matches!(body.decision, Decision::Decline) {
             let mut review = s.assistant_approvals.0.remove(&id).unwrap();
             review.discard_native(&mut s);

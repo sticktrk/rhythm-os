@@ -2,19 +2,26 @@ import Flutter
 import Matter
 import MatterSupport
 import UIKit
+import UserNotifications
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let appleHealthBridge = AppleHealthBridge()
+  private let pushBridge = AssistantPushBridge()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    UNUserNotificationCenter.current().delegate = pushBridge
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let pushRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "AssistantPush") {
+      pushBridge.register(messenger: pushRegistrar.messenger())
+    }
     if let healthRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "AppleHealthSync") {
       let healthChannel = FlutterMethodChannel(name: "lighting.rhythm.app/apple_health",
         binaryMessenger: healthRegistrar.messenger())
@@ -32,6 +39,20 @@ import UIKit
     channel.setMethodCallHandler { [weak self] call, result in
       self?.handlePhoneMatterCall(call, result: result)
     }
+  }
+
+  override func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+    pushBridge.updateToken(deviceToken)
+  }
+
+  override func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
+    pushBridge.updateToken(nil)
+  }
+
+  func receivedAttention(_ notification: UNNotification) {
+    pushBridge.received(notification)
   }
 
   override func buildMenu(with builder: any UIMenuBuilder) {
@@ -193,5 +214,110 @@ extension PhoneMatterBridge {
       return "The iPhone completed setup, but received no final result from the Rhythm Box."
     }
     return "iPhone Matter setup did not complete. Please reopen the pairing window and try again."
+  }
+}
+
+/// UIScene delivers a notification that launched a closed app in connection options.
+class RhythmSceneDelegate: FlutterSceneDelegate {
+  override func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+                      options connectionOptions: UIScene.ConnectionOptions) {
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+    if let response = connectionOptions.notificationResponse {
+      (UIApplication.shared.delegate as? AppDelegate)?.receivedAttention(response.notification)
+    }
+  }
+}
+
+private final class AssistantPushBridge: NSObject, UNUserNotificationCenterDelegate {
+  private var channel: FlutterMethodChannel?
+  private var token: [String: String]?
+  private var pending: [String: String]?
+  private var listening = false
+
+  func register(messenger: FlutterBinaryMessenger) {
+    listening = false
+    let channel = FlutterMethodChannel(name: "lighting.rhythm.app/push", binaryMessenger: messenger)
+    self.channel = channel
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else { result(nil); return }
+      switch call.method {
+      case "requestAuthorization":
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+          DispatchQueue.main.async {
+            if granted { UIApplication.shared.registerForRemoteNotifications() }
+            result(granted)
+          }
+        }
+      case "restoreRegistration":
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+          DispatchQueue.main.async {
+            if [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) {
+              UIApplication.shared.registerForRemoteNotifications()
+            }
+            result(nil)
+          }
+        }
+      case "stopRegistration":
+        UIApplication.shared.unregisterForRemoteNotifications()
+        self.token = nil
+        result(nil)
+      case "getToken": result(self.token)
+      case "takeInitialNotification":
+        self.listening = true
+        result(self.pending)
+        self.pending = nil
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  private static var environment: String? {
+    // Store-distributed apps omit the embedded profile and use production APNs.
+    guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") else {
+      return "production"
+    }
+    guard let data = try? Data(contentsOf: url),
+          let start = data.range(of: Data("<?xml".utf8)),
+          let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+          let plist = try? PropertyListSerialization.propertyList(
+            from: data.subdata(in: start.lowerBound..<end.upperBound), format: nil) as? [String: Any],
+          let entitlements = plist["Entitlements"] as? [String: Any],
+          let environment = entitlements["aps-environment"] as? String,
+          ["development", "production"].contains(environment) else { return nil }
+    return environment
+  }
+
+  func updateToken(_ data: Data?) {
+    if let data, let environment = Self.environment, let appID = Bundle.main.bundleIdentifier {
+      token = ["token": data.map { String(format: "%02x", $0) }.joined(),
+               "environment": environment, "app_id": appID]
+    } else {
+      token = nil
+    }
+    if listening { channel?.invokeMethod("tokenChanged", arguments: token) }
+  }
+
+  func received(_ notification: UNNotification) {
+    guard let message = notification.request.content.userInfo["rhythm"] as? [String: String],
+          ["connection", "plan"].contains(message["kind"] ?? ""),
+          let hub = message["hub_id"], !hub.isEmpty else { return }
+    if listening { channel?.invokeMethod("attention", arguments: message) }
+    else { pending = message }
+  }
+
+  func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                              withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+    DispatchQueue.main.async {
+      self.received(notification)
+      completionHandler([])
+    }
+  }
+
+  func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                              withCompletionHandler completionHandler: @escaping () -> Void) {
+    DispatchQueue.main.async {
+      self.received(response.notification)
+      completionHandler()
+    }
   }
 }

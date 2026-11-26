@@ -14,6 +14,7 @@ use crate::state::{current_epoch_ms, SharedState};
 use crate::topology::DevicePlacement;
 
 pub(crate) mod approvals;
+pub(crate) mod attention;
 pub(crate) mod automation;
 pub mod devices;
 mod information;

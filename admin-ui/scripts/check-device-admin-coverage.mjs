@@ -22,6 +22,9 @@ const explicitExemptions = new Set([
   'POST api/auth/agent-tokens',
   'DELETE api/auth/agent-tokens/{}',
   'POST api/auth/assistant-clients',
+  // The enrolled owner phone reviews and decides pending assistant connections.
+  'GET api/assistant/connections',
+  'POST api/assistant/connections/{}',
   // Only the hub owner can inspect or decide an agent's pending change.
   'GET api/assistant/approvals',
   'POST api/assistant/approvals/{}',
@@ -93,7 +96,7 @@ function listFiles(dir) {
 
 function collectSdkOperations(text, operations) {
   const directCallPattern =
-    /\b(?:_dio|dio|uploadDio|versionDio)\.(get|put|post|patch|delete)(?:<[^)]*>)?\(\s*'([^']+)'/gi;
+    /\b(?:_dio|dio|uploadDio|versionDio)\s*\.(get|put|post|patch|delete)(?:<[^)]*>)?\(\s*'([^']+)'/gi;
   for (const match of text.matchAll(directCallPattern)) {
     addOperation(operations, match[1], match[2]);
   }

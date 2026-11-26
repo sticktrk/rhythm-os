@@ -904,6 +904,8 @@ void main() {
     expect(await proxy('POST', apply), 409);
     liveHub = 'srv-test';
     expect(await proxy('POST', apply), 200);
+    expect(await proxy('GET', 'api/assistant/connections'), 400);
+    expect(await proxy('POST', 'api/assistant/connections/pending'), 400);
     // Same staff identity, endpoint and unexpired device session.
     pinned = false;
     expect(await proxy('POST', plan), 503);

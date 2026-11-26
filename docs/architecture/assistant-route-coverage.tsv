@@ -44,10 +44,14 @@ shared	GET	/api/activity-cloud/config	operation	read_activity_upload
 shared	PUT	/api/activity-cloud/config	operation	plan_activity_upload
 shared	GET	/api/assistant/approvals	handoff	The owner reviews pending agent changes on this hub.
 shared	POST	/api/assistant/approvals/:plan_id	handoff	The owner approves or declines the reviewed change.
+shared	GET	/api/assistant/connections	handoff	The local owner reviews waiting connections.
+shared	POST	/api/assistant/connections/:id	handoff	The local owner decides a connection request.
 shared	GET	/api/assistant/contract	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	POST	/api/assistant/mcp	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	GET	/api/assistant/oauth/authorize	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	POST	/api/assistant/oauth/authorize	exclusion	Contract discovery, authorization or transport for the operation catalog.
+shared	GET	/api/assistant/oauth/authorize/wait	exclusion	Browser waits for the local owner decision.
+shared	POST	/api/assistant/oauth/register	exclusion	Stateless OAuth client registration.
 shared	POST	/api/assistant/oauth/token	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	POST	/api/assistant/operations/:operation_id	exclusion	Contract discovery, authorization or transport for the operation catalog.
 shared	POST	/api/assistant/plans/device-room-move	operation	plan_move_device_room

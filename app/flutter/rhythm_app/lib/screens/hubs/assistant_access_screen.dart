@@ -1,11 +1,16 @@
-import 'dart:convert';
+import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../../services/assistant_attention_controller.dart';
+import '../../services/push_registration_service.dart';
+import '../../widgets/assistant_attention_sheet.dart';
 import '../../widgets/assistant_chat_widgets.dart';
 import '../../widgets/settings_row.dart';
+import '../../widgets/assistant_plan_review.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 
 /// A separate local-owner surface. Secrets are held only for the one-time
@@ -16,11 +21,13 @@ class AssistantAccessScreen extends StatefulWidget {
       required this.api,
       required this.endpoint,
       required this.isCurrentTarget,
-      required this.targetChanges});
+      required this.targetChanges,
+      this.attentionEvents});
   final RhythmAuthApi api;
   final String endpoint;
   final bool Function() isCurrentTarget;
   final Listenable targetChanges;
+  final Stream<dynamic>? attentionEvents;
   @override
   State<AssistantAccessScreen> createState() => _AssistantAccessState();
 }
@@ -28,6 +35,11 @@ class AssistantAccessScreen extends StatefulWidget {
 class _AssistantAccessState extends State<AssistantAccessScreen> {
   List<RhythmAgentCredential> _credentials = [];
   List<RhythmAssistantApproval> _approvals = [];
+  List<RhythmAssistantConnection> _connections = [];
+  bool _supportsConnections = false,
+      _instructions = false,
+      _refreshAgain = false;
+  StreamSubscription<dynamic>? _attention;
   bool _supportsApprovals = false, _unattended = false;
   Map<String, String> _issued = {};
   bool _busy = true, _ready = false, _revealed = false;
@@ -37,11 +49,20 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
   void initState() {
     super.initState();
     widget.targetChanges.addListener(_targetChanged);
+    _attention = widget.attentionEvents?.listen((_) {
+      if (_busy) {
+        _refreshAgain = true;
+      } else {
+        unawaited(_refresh());
+      }
+    });
+    unawaited(PushRegistrationService.instance.requestForAssistant());
     _refresh();
   }
 
   @override
   void dispose() {
+    _attention?.cancel();
     widget.targetChanges.removeListener(_targetChanged);
     super.dispose();
   }
@@ -51,6 +72,8 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
       setState(() {
         if (!widget.isCurrentTarget()) {
           _issued = {};
+          _instructions = false;
+          _connections = [];
           _revealed = false;
         }
       });
@@ -77,8 +100,20 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
         approvals = [];
         supportsApprovals = false;
       }
+      List<RhythmAssistantConnection> connections;
+      bool supportsConnections = true;
+      try {
+        if (!mounted || !widget.isCurrentTarget()) return;
+        connections = await widget.api.listAssistantConnections();
+      } on DioException catch (error) {
+        if (error.response?.statusCode != 404) rethrow;
+        supportsConnections = false;
+        connections = [];
+      }
       if (mounted && widget.isCurrentTarget()) {
         setState(() {
+          _supportsConnections = supportsConnections;
+          _connections = connections;
           _approvals = approvals;
           _supportsApprovals = supportsApprovals;
           _credentials = entries;
@@ -102,11 +137,36 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
         });
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+        if (_refreshAgain) {
+          _refreshAgain = false;
+          unawaited(_refresh());
+        }
+      }
+    }
+  }
+
+  Future<void> _reviewConnection(RhythmAssistantConnection connection) async {
+    if (!widget.isCurrentTarget()) return;
+    final controller = context.read<AssistantAttentionController?>();
+    if (controller != null && controller.isCurrent) {
+      controller.reviewAgain(connection.id);
+    } else {
+      await showAssistantAttentionSheet(context,
+          request: ConnectionAttention(connection),
+          api: widget.api,
+          isCurrentTarget: widget.isCurrentTarget,
+          changes: widget.targetChanges);
+      if (mounted) await _refresh();
     }
   }
 
   Future<void> _issue(bool homeAssistant) async {
+    if (homeAssistant && _supportsConnections) {
+      setState(() => _instructions = true);
+      return;
+    }
     await _refresh(() async {
       Map<String, String> issued;
       if (homeAssistant) {
@@ -131,11 +191,6 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
         });
       }
     });
-  }
-
-  String _reviewLabel(String key) {
-    final words = key.replaceAll('_', ' ').trim();
-    return words.isEmpty ? words : words[0].toUpperCase() + words.substring(1);
   }
 
   Future<void> _decide(RhythmAssistantApproval approval, bool approve) async {
@@ -188,10 +243,11 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
               if (!active)
                 const Text('Connect locally to the same hub to manage access.')
               else ...[
-                AssistantReviewCard(children: [
-                  const AssistantNote('MCP endpoint'),
-                  SelectableText(widget.endpoint),
-                ]),
+                if (!_instructions)
+                  AssistantReviewCard(children: [
+                    const AssistantNote('MCP endpoint'),
+                    SelectableText(widget.endpoint),
+                  ]),
                 gap,
                 if (_error != null) ...[Text(_error!), gap],
                 if (_busy) const AssistantWorking(label: 'Checking access…'),
@@ -201,68 +257,35 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
                       child: TextButton(
                           onPressed: _refresh,
                           child: const Text('Refresh access'))),
+                if (_ready &&
+                    _supportsConnections &&
+                    _connections.isNotEmpty) ...[
+                  const SettingsSectionHeader(title: 'Waiting to connect'),
+                  SettingsGroup(children: [
+                    for (final connection in _connections)
+                      SettingsRow(
+                          icon: Icons.link,
+                          label: connection.destination,
+                          subtitle: connection.remote
+                              ? 'Remote connection request'
+                              : null,
+                          onTap: enabled
+                              ? () => _reviewConnection(connection)
+                              : null),
+                  ]),
+                  gap,
+                ],
                 if (_ready && _approvals.isNotEmpty) ...[
                   const SettingsSectionHeader(title: 'Pending approvals'),
                   for (final approval in _approvals)
                     Padding(
                         padding: const EdgeInsets.only(bottom: 10),
-                        child: Card(
-                            color: CelestialColors.backgroundCard,
-                            margin: EdgeInsets.zero,
-                            elevation: 0,
-                            clipBehavior: Clip.antiAlias,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                side: const BorderSide(
-                                    color: CelestialColors.orbitRing)),
-                            // Read the page's theme, not the app's above it.
-                            child: Builder(
-                                builder: (context) => Theme(
-                                data: Theme.of(context).copyWith(
-                                    dividerColor: Colors.transparent),
-                                child: ExpansionTile(
-                                    key: ValueKey(approval.planId),
-                                    title: Text(_reviewLabel(approval.operation
-                                        .replaceFirst(RegExp(r'^plan_'), ''))),
-                                    subtitle: Text(
-                                        'Requested by ${approval.credentialId}'),
-                                    childrenPadding: const EdgeInsets.fromLTRB(
-                                        16, 0, 16, 16),
-                                    expandedCrossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    expandedAlignment: Alignment.centerLeft,
-                                    children: [
-                                      for (final field in approval
-                                          .review.entries
-                                          .where((entry) => !const {
-                                                'plan_id',
-                                                'apply_arguments',
-                                                'operation',
-                                                'correlation_id',
-                                                'server_instance_id'
-                                              }.contains(entry.key))) ...[
-                                        AssistantNote(_reviewLabel(field.key)),
-                                        SelectableText(field.value is String
-                                            ? field.value as String
-                                            : const JsonEncoder.withIndent('  ')
-                                                .convert(field.value)),
-                                        gap,
-                                      ],
-                                      Wrap(spacing: 8, children: [
-                                        FilledButton(
-                                            onPressed: enabled
-                                                ? () => _decide(approval, true)
-                                                : null,
-                                            child: const Text('Approve')),
-                                        TextButton(
-                                            onPressed: enabled
-                                                ? () => _decide(approval, false)
-                                                : null,
-                                            child: const Text('Decline')),
-                                      ]),
-                                    ]))))),
+                        child: AssistantPlanReview(
+                            approval: approval,
+                            enabled: enabled,
+                            onDecide: (approve) => _decide(approval, approve))),
                 ],
-                if (enabled && _issued.isEmpty) ...[
+                if (enabled && _issued.isEmpty && !_instructions) ...[
                   gap,
                   const Text(
                       'Create a credential for a client to read this hub and control its lights.'),
@@ -292,6 +315,20 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
                   OutlinedButton(
                       onPressed: () => _issue(true),
                       child: const Text('Connect Home Assistant Assist')),
+                ],
+                if (_instructions && _supportsConnections) ...[
+                  gap,
+                  AssistantReviewCard(children: [
+                    const AssistantNote('Connect Home Assistant Assist'),
+                    SelectableText(widget.endpoint),
+                    gap,
+                    const Text(
+                        'In Home Assistant, type rhythm for both the client ID and the client secret. You will approve the connection here.'),
+                    gap,
+                    FilledButton(
+                        onPressed: () => setState(() => _instructions = false),
+                        child: const Text('Done')),
+                  ]),
                 ],
                 if (_issued.isNotEmpty) ...[
                   gap,
@@ -327,7 +364,7 @@ class _AssistantAccessState extends State<AssistantAccessScreen> {
                       SettingsRow(
                           icon: Icons.key,
                           iconColor: CelestialColors.accentBlue,
-                          label: entry.kind,
+                          label: entry.destination ?? entry.kind,
                           subtitle: entry.unattendedChanges
                               ? '${entry.id} · unattended changes allowed'
                               : entry.id,

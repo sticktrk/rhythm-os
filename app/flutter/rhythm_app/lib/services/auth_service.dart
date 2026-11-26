@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../backend/backend.dart';
 import 'hue/hue_service_locator.dart';
+import 'push_registration_service.dart';
 
 /// Result of a Google sign-in operation.
 /// Re-exported from backend for backwards compatibility.
@@ -116,7 +117,13 @@ class AuthService {
   /// Also clears demo mode if active.
   Future<void> signOut() async {
     HueServiceLocator.setDemoMode(false);
-    await _auth!.signOut();
+    await PushRegistrationService.instance.beforeSignOut();
+    try {
+      await _auth!.signOut();
+    } catch (_) {
+      await PushRegistrationService.instance.restoreAfterFailedSignOut();
+      rethrow;
+    }
   }
 
   /// Delete the current user's account permanently.

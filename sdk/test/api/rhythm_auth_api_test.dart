@@ -44,6 +44,81 @@ void main() {
         ]);
   });
 
+  test('lists phone connection destinations and sends bounded owner decisions',
+      () async {
+    when(() => dio.get('api/assistant/connections')).thenAnswer(
+        (_) async => Response(requestOptions: RequestOptions(), data: {
+              'connections': [
+                {
+                  'id': 'request-1',
+                  'kind': 'oauth',
+                  'remote': true,
+                  'destination': 'client.example',
+                  'expires_at_epoch_ms': 120000
+                }
+              ]
+            }));
+    final entry = (await api.listAssistantConnections()).single;
+    expect([
+      entry.id,
+      entry.kind,
+      entry.remote,
+      entry.destination,
+      entry.expiresAt.millisecondsSinceEpoch
+    ], [
+      'request-1',
+      'oauth',
+      true,
+      'client.example',
+      120000
+    ]);
+    const path = 'api/assistant/connections/request-1';
+    for (final approve in [true, false]) {
+      when(() => dio.post<Map<String, dynamic>>(path, data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+              requestOptions: RequestOptions(),
+              data: {'status': approve ? 'approved' : 'declined'}));
+      final result = await api.decideAssistantConnection(entry.id,
+          approve: approve, matchCode: '47');
+      expect(
+          result.status,
+          approve
+              ? RhythmConnectionDecision.approved
+              : RhythmConnectionDecision.declined);
+      verify(() => dio.post<Map<String, dynamic>>(path, data: {
+            'decision': approve ? 'approve' : 'decline',
+            if (approve) 'match_code': '47',
+            'unattended_changes': false,
+          })).called(1);
+    }
+    await expectLater(api.decideAssistantConnection('../else', approve: true),
+        throwsArgumentError);
+  });
+
+  test('connection conflicts map to mismatch and expiry results', () async {
+    const path = 'api/assistant/connections/request-1';
+    for (final status in ['code_mismatch', 'expired']) {
+      when(() => dio.post<Map<String, dynamic>>(path, data: any(named: 'data')))
+          .thenThrow(DioException(
+              requestOptions: RequestOptions(path: path),
+              response: Response(
+                  requestOptions: RequestOptions(path: path),
+                  statusCode: 409,
+                  data: {
+                    'status': status,
+                    if (status == 'code_mismatch') 'attempts_left': 2
+                  })));
+      final result = await api.decideAssistantConnection('request-1',
+          approve: true, matchCode: '27');
+      expect(
+          result.status,
+          status == 'expired'
+              ? RhythmConnectionDecision.expired
+              : RhythmConnectionDecision.codeMismatch);
+      expect(result.attemptsLeft, status == 'expired' ? null : 2);
+    }
+  });
+
   test('passes only the selected approval decision and returns its receipt',
       () async {
     when(() => dio.get('api/assistant/approvals')).thenAnswer(

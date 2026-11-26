@@ -506,6 +506,20 @@ void main() {
       );
     });
 
+    test('broadcasts assistant attention to access and the foreground host', () async {
+      sseEventChunks = [
+        'event: assistant_attention\n'
+            'data: {"data":{"kind":"connection","request_id":"request-1","state":"requested","expires_at_epoch_ms":123}}\n\n',
+      ];
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final screen = connection.assistantAttentionEvents.first;
+      final host = connection.assistantAttentionEvents.first;
+      await connection.connect('127.0.0.1', port: server.port);
+      expect((await screen)['request_id'], 'request-1');
+      expect((await host)['state'], 'requested');
+    });
+
     test('parses warning_active and addressed hub status from SSE', () async {
       sseEventChunks = [
         'event: motion_timer\n'

@@ -172,6 +172,12 @@ For the integration system architecture (adding new lighting integrations), see 
 - `GET /api/auth/status` — auth/claim status
 - `POST /api/auth/claim` — claim the device
 - `PUT /api/auth/settings` — update auth settings
+- `GET /.well-known/oauth-authorization-server[/api/assistant/mcp]` — assistant OAuth discovery
+- `POST /api/assistant/oauth/register` — stateless client registration
+- `GET /api/assistant/oauth/authorize`, `GET /api/assistant/oauth/authorize/wait` — browser consent and wait page
+- `POST /api/assistant/oauth/authorize`, `POST /api/assistant/oauth/token` — legacy activation and token exchange/refresh
+- `GET /api/assistant/connections`, `POST /api/assistant/connections/:id` — local owner connection review
+- `GET /api/assistant/approvals`, `POST /api/assistant/approvals/:plan_id` — owner lighting plan review
 - `GET /api/remote-access/status` — remote-access status
 - `PUT /api/remote-access/config`, `DELETE /api/remote-access/config` — set/clear remote-access config
 

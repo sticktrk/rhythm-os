@@ -446,6 +446,8 @@ pub struct AppState {
         std::collections::VecDeque<crate::assistant::automation::AutomationPlan>,
     /// Credential-bound previews, pending owner decisions and recent receipts.
     pub assistant_approvals: crate::assistant::approvals::PlanStore,
+    /// Browser requests expire in memory. The registration is saved when its approved browser returns.
+    pub assistant_connections: crate::auth::assistant_oauth::ConnectionStore,
     pub assistant_transfers: std::collections::VecDeque<crate::assistant::portable::TransferPlan>,
     pub assistant_light_plans: std::collections::VecDeque<crate::assistant::lighting::LightPlan>,
     /// Set once this process has loaded any interrupted light trials.
@@ -1094,6 +1096,7 @@ impl Default for AppState {
             bulb_catalog_generation: 0,
             bulb_catalog_wake: Default::default(),
             assistant_approvals: Default::default(),
+            assistant_connections: Default::default(),
             assistant_transfers: Default::default(),
             assistant_automation_plans: Default::default(),
             assistant_light_plans: Default::default(),
