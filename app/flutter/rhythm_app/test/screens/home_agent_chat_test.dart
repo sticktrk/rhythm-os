@@ -22,6 +22,7 @@ class TestAgent extends HomeAgentClient {
   final calls = <(String, CustomerAction, Uint8List?)>[];
   final history = <CustomerAction>[];
   CustomerAction? plan;
+  String? roomQuery;
   CustomerAction Function(CustomerAction)? proposalForTurn;
   String answer =
       'The two lamps have different shades. A photo of both could help.';
@@ -30,6 +31,15 @@ class TestAgent extends HomeAgentClient {
       [CustomerAction body = const {}, Uint8List? photo]) async {
     calls.add((method, body, photo));
     if (method == 'turn' || method == 'photo') {
+      if (body['room_lookup'] == true && roomQuery != null) {
+        return {
+          'text': '',
+          'proposed': false,
+          'room_query': roomQuery,
+          'plan': plan,
+          'history': history
+        };
+      }
       if (proposalForTurn != null) {
         if (plan != null) history.add(plan!);
         plan = proposalForTurn!(body);
@@ -238,6 +248,192 @@ void main() {
             .map((c) => c.$2['outcome']),
         ['observed', 'observed']);
   });
+  group('conversational room detection', () {
+    List<CustomerAction> turns() =>
+        client.calls.where((c) => c.$1 == 'turn').map((c) => c.$2).toList();
+    List<String> offered(CustomerAction turn) => [
+          for (final target in turn['targets'])
+            if ((target['tools'] as List).isNotEmpty) target['ref'] as String
+        ];
+
+    void enableLookup({String? query}) {
+      client.useSession({'session': 'session', 'room_lookup': true});
+      client.roomQuery = query;
+    }
+
+    void proposeBrightness() {
+      client.proposalForTurn = (turn) => {
+            'id': 'd553eca1-eaf4-4c99-aa93-5c705343d245',
+            'expires': DateTime.now()
+                .add(const Duration(minutes: 5))
+                .millisecondsSinceEpoch,
+            'steps': [
+              {
+                'target': offered(turn).single,
+                'operation': 'adjust_room_brightness',
+                'arguments': {'delta_percent': -10},
+                'status': 'review',
+              }
+            ],
+          };
+    }
+
+    testWidgets(
+        'an indirect description resolves to one local room before review',
+        (t) async {
+      enableLookup(query: 'kitchen');
+      proposeBrightness();
+      await open(t);
+      expect(find.byType(ChoiceChip), findsNothing);
+      const prompt = 'Dim the lights where I cook.';
+      await send(t, prompt);
+      final requests = turns();
+      expect(requests, hasLength(2));
+      expect(requests.first['room_lookup'], true);
+      expect(requests.first['sole_room'], isNot(true));
+      expect(requests.first['selected'], isNull);
+      expect(offered(requests.first), isEmpty);
+      expect(requests.last['turn'], isNot(requests.first['turn']));
+      expect(requests.last['room_lookup'], false);
+      expect(requests.last['selected'], client.reference('r', 'a'));
+      expect(offered(requests.last), [client.reference('r', 'a')]);
+      expect(requests.last['messages'], [
+        {'role': 'user', 'text': prompt}
+      ]);
+      expect(requests.toString(), isNot(contains('Kitchen')));
+      expect(calls, isNotEmpty);
+      expect(
+          calls.every(
+              (c) => c.$1 == 'explain_room_output' && c.$2['room_id'] == 'a'),
+          isTrue);
+      final review = find.byType(AssistantReviewCard);
+      expect(find.descendant(of: review, matching: find.text('Kitchen')),
+          findsOneWidget);
+      expect(find.byType(ChoiceChip), findsNothing);
+      final apply = find.text('Apply reviewed steps');
+      await t.ensureVisible(apply);
+      await t.tap(apply);
+      await t.pumpAndSettle();
+      final writes =
+          calls.where((c) => c.$1 == 'adjust_room_brightness').toList();
+      expect(writes.single.$2, {'room_id': 'a', 'delta_percent': -10});
+    });
+
+    testWidgets('a one-room home flags its sole room only during lookup',
+        (t) async {
+      hub = LightingChatHub([rooms.first], hub.tools, hub.call, () {});
+      enableLookup(query: 'kitchen');
+      proposeBrightness();
+      await open(t);
+      await send(t, 'Dim the lights where I cook.');
+      final requests = turns();
+      expect(requests, hasLength(2));
+      expect(requests.first['room_lookup'], true);
+      expect(requests.first['sole_room'], true);
+      expect(requests.last['room_lookup'], false);
+      expect(requests.last.containsKey('sole_room'), isFalse);
+      expect(offered(requests.last), [client.reference('r', 'a')]);
+    });
+
+    testWidgets(
+        'a typed room answer grounds the original request without a picker',
+        (t) async {
+      enableLookup(query: '');
+      proposeBrightness();
+      await open(t);
+      const prompt = 'Dim the lights by ten percent.';
+      await send(t, prompt);
+      expect(turns(), hasLength(1));
+      expect(calls, isEmpty);
+      expect(find.textContaining('Which room'), findsOneWidget);
+      expect(find.textContaining('1. Dining'), findsOneWidget);
+      expect(find.byType(ChoiceChip), findsNothing);
+      client.roomQuery = 'unmapped place';
+      await send(t, 'The loft');
+      expect(turns().last['messages'], [
+        {'role': 'user', 'text': prompt},
+        {'role': 'assistant', 'text': 'Which room did you mean?'},
+        {'role': 'user', 'text': 'The loft'}
+      ]);
+      expect(calls, isEmpty);
+      await send(t, 'The first one');
+      final resolved = turns().last;
+      expect(resolved['room_lookup'], false);
+      expect(offered(resolved), [client.reference('r', 'b')]);
+      expect(resolved['messages'], [
+        {'role': 'user', 'text': prompt}
+      ]);
+      expect(
+          calls.every(
+              (c) => c.$1 == 'explain_room_output' && c.$2['room_id'] == 'b'),
+          isTrue);
+      expect(
+          find.descendant(
+              of: find.byType(AssistantReviewCard),
+              matching: find.text('Dining')),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'a duplicate room name needs a typed answer even with a previous room',
+        (t) async {
+      final original = hub;
+      const duplicate = RhythmTopologyNode(
+          id: 'z', name: 'Kitchen', kind: RhythmNodeKind.room);
+      hub = LightingChatHub(
+          [...rooms, duplicate], original.tools, original.call, () {});
+      enableLookup();
+      proposeBrightness();
+      await open(t, initialRoomId: 'a');
+      await send(t, 'Dim the Kitchen.');
+      expect(turns(), isEmpty);
+      expect(calls, isEmpty);
+      expect(find.textContaining('Kitchen (2)'), findsOneWidget);
+      expect(find.byType(ChoiceChip), findsNothing);
+      await send(t, 'In the Kitchen, please');
+      expect(turns(), isEmpty);
+      expect(calls, isEmpty);
+      await send(t, 'Kitchen (2)');
+      final resolved = turns().single;
+      final kitchen = client.reference('r', duplicate.id);
+      expect(resolved['room_lookup'], false);
+      expect(offered(resolved), [kitchen]);
+      expect(resolved['messages'], [
+        {'role': 'user', 'text': 'Dim the $kitchen.'}
+      ]);
+      expect(
+          calls.every((c) =>
+              c.$1 == 'explain_room_output' && c.$2['room_id'] == duplicate.id),
+          isTrue);
+      expect(
+          find.descendant(
+              of: find.byType(AssistantReviewCard),
+              matching: find.text('Kitchen (2)')),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'a named room carries through a follow-up and a whole-home request clears it',
+        (t) async {
+      enableLookup();
+      await open(t, initialRoomId: 'a');
+      await send(t, 'How bright is the Hall?');
+      final hall = client.reference('r', 'c');
+      expect(turns().last['selected'], hall);
+      expect(offered(turns().last), [hall]);
+      await send(t, 'A little brighter there, please.');
+      expect(turns().last['selected'], hall);
+      expect(turns().last['room_lookup'], true);
+      expect(offered(turns().last), [hall]);
+      await send(t, 'Check all rooms.');
+      expect(turns().last['selected'], isNull);
+      expect(offered(turns().last), hasLength(3));
+      await send(t, 'Make it warmer.');
+      expect(turns().last['room_lookup'], true);
+      expect(offered(turns().last), isEmpty);
+    });
+  });
+
   test(
       'duplicate names require a selected target, exclusions and schedule previews stay scoped',
       () async {
@@ -572,6 +768,51 @@ void main() {
       expect(calls.where((c) => c.$1 == 'plan_home_scene_edit'), isEmpty);
       expect(find.text('Use across the home'), findsNothing);
     }
+
+    testWidgets(
+        'a whole-home clarification creates a scene for the original mood',
+        (t) async {
+      sceneHub();
+      client.useSession(
+          {'session': 'session', 'room_lookup': true, 'scene_drafts': true});
+      client.roomQuery = '';
+      agentPalette(holidayColors);
+      await open(t);
+
+      await send(t, 'Set a Christmas vibe');
+      final first = client.calls.singleWhere((c) => c.$1 == 'turn').$2;
+      expect(first['room_lookup'], true);
+      expect(find.textContaining('Which room'), findsOneWidget);
+      expect(calls.where((c) => c.$1 == 'plan_scene_edit'), isEmpty);
+
+      await send(t, 'the whole home');
+      final turns = client.calls.where((c) => c.$1 == 'turn').toList();
+      expect(turns, hasLength(2));
+      final design = turns.last.$2;
+      expect(design['turn'], isNot(first['turn']));
+      expect(design['room_lookup'], isNot(true));
+      expect(design['selected'], isNull);
+      final messages = (design['messages'] as List)
+          .where((m) => m['role'] == 'user')
+          .map((m) => m['text'])
+          .join(' ')
+          .toLowerCase();
+      expect(messages, contains('christmas vibe'));
+      expect(messages, matches(RegExp(r'whole[- ]home')));
+      expect(design['targets'], [
+        {
+          'ref': client.reference('d', 'new-scene'),
+          'included': true,
+          'tools': [creation]
+        }
+      ]);
+      expect(find.text('Save scene'), findsOneWidget);
+      expect(calls.where((c) => c.$1 == 'plan_scene_edit'), hasLength(1));
+      expect(
+          calls.every((c) =>
+              c.$1 == 'read_automation_settings' || c.$1 == 'plan_scene_edit'),
+          isTrue);
+    });
 
     for (final (prompt, colors, decision, result, statusLabel) in [
       (xmas, holidayColors, null, 'queued', 'Hub queued the change'),

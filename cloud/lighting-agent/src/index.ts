@@ -151,7 +151,9 @@ async function route(req: Request, env: Env) {
   if (op === "open") {
     const reply = await agent.open();
     return json(
-      reply.code === 200 ? { ...reply.data, scene_drafts: true } : reply.data,
+      reply.code === 200
+        ? { ...reply.data, scene_drafts: true, room_lookup: true }
+        : reply.data,
       reply.code,
     );
   }
@@ -209,7 +211,11 @@ async function route(req: Request, env: Env) {
       {
         ...reply.data,
         ...(reply.code === 200
-          ? { text: decision.text, proposed: decision.steps.length > 0 }
+          ? {
+              text: decision.text,
+              proposed: decision.steps.length > 0,
+              room_query: decision.room_query,
+            }
           : {}),
       },
       reply.code,

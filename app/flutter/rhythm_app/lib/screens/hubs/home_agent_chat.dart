@@ -45,6 +45,11 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
   String? _checkedSavedPlan;
   Uint8List? _photo;
   String? _focus;
+  ({
+    String request,
+    List<AgentTarget> rooms,
+    bool allowWholeHome
+  })? _roomQuestion;
   final _reviewErrors = <int, String>{};
   bool _busy = false;
   bool _designingScene = false;
@@ -92,6 +97,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           _messages.clear();
           _history = [];
           _motion = null;
+          _roomQuestion = null;
+          _focus = null;
           _designingScene = false;
           _checkedSavedPlan = null;
           _lastResult = null;
@@ -118,10 +125,10 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
     if (!_live) return;
     setState(() {
       _catalog = catalog;
-      _focus = catalog.targets.values
-          .where((t) => t.id == widget.initialRoomId)
-          .firstOrNull
-          ?.ref;
+      final rooms = catalog.rooms;
+      _focus = rooms.length == 1
+          ? rooms.single.ref
+          : rooms.where((t) => t.id == widget.initialRoomId).firstOrNull?.ref;
     });
     await _refresh();
   }
@@ -174,21 +181,87 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
     if (_live) setState(() => _catalog = catalog);
   }
 
+  void _askForRoom(String request, List<AgentTarget> candidates,
+      {bool allowWholeHome = false}) {
+    final catalog = _catalog!;
+    _focus = null;
+    final rooms = candidates.isEmpty ? catalog.rooms : candidates;
+    _roomQuestion = rooms.isEmpty
+        ? null
+        : (request: request, rooms: rooms, allowWholeHome: allowWholeHome);
+    if (rooms.isEmpty) {
+      _add('The hub has no rooms yet.');
+      return;
+    }
+    final labels = [
+      for (final (i, room) in rooms.indexed)
+        '${i + 1}. ${catalog.targetLabel(room)}'
+    ];
+    final howToReply = allowWholeHome
+        ? 'Reply with a name, a number, or “the whole home”.'
+        : 'Reply with a name or number.';
+    _add('Which room did you mean? $howToReply\n${labels.join('\n')}');
+  }
+
   Future<void> _send(String text) => _run(() async {
         final catalog = _catalog;
         final prompt = text.trim(), photo = _photo;
         if (catalog == null || (prompt.isEmpty && photo == null)) return;
-        final redacted = catalog.redact(prompt, _focus);
-        if (redacted.contains('[ambiguous target]')) {
-          _add(
-              'That name matches more than one item. Pick the intended room before sending.');
+        final question = _roomQuestion;
+        final candidateAnswers = question == null
+            ? <AgentTarget>[]
+            : catalog
+                .roomsMatching(prompt)
+                .where(question.rooms.contains)
+                .toList();
+        final room = question == null
+            ? null
+            : catalog.roomAnswer(prompt, question.rooms) ??
+                (candidateAnswers.length == 1 ? candidateAnswers.single : null);
+        final choseHome = question?.allowWholeHome == true &&
+            room == null &&
+            LightingChatHub.isWholeHomeAnswer(prompt);
+        if (question != null &&
+            room == null &&
+            !choseHome &&
+            (LightingChatHub.roomAnswerNumber(prompt) != null ||
+                candidateAnswers.length > 1)) {
+          _input.clear();
+          _add(prompt, resident: true);
+          _askForRoom(question.request,
+              candidateAnswers.isEmpty ? question.rooms : candidateAnswers,
+              allowWholeHome: question.allowWholeHome);
           return;
         }
+        var request = prompt;
+        if (choseHome) {
+          request = '${question!.request} (for the whole home)';
+        } else if (room != null) {
+          request = catalog.resolveRoomMention(question!.request, room);
+        }
+        final redacted = catalog.redact(request);
+        if (redacted.contains('[ambiguous target]')) {
+          final choices = catalog.ambiguousRooms(request);
+          _input.clear();
+          _add(prompt, resident: true, share: room == null);
+          if (choices.isNotEmpty) {
+            _askForRoom(request, choices);
+          } else {
+            _add(
+                'More than one item has that name. Describe which item you mean.');
+          }
+          return;
+        }
+        _roomQuestion = null;
+        if (room != null) _focus = room.ref;
         final mentioned = catalog.targets.values
             .where((t) => redacted.contains(t.ref))
             .toList();
-        final mentionsRoom = mentioned.any((t) => t.kind == 'r');
-        final design = (_designingScene && !mentionsRoom) ||
+        final namedRooms = mentioned.where((t) => t.kind == 'r');
+        final mentionsRoom = room != null || namedRooms.isNotEmpty;
+        final whole = LightingChatHub.refersToWholeHome(redacted);
+        final hasExclusion = LightingChatHub.hasExclusion(redacted);
+        final design = (_designingScene && !mentionsRoom && !hasExclusion) ||
             LightingChatHub.requestsSceneDesign(redacted,
                 mentionsRoom: mentionsRoom,
                 mentionsSavedScene: mentioned.any((t) => t.kind == 'c'));
@@ -201,17 +274,37 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
               'Scene creation is unavailable in chat with this hub and assistant version.');
           return;
         }
+        if (design || whole || hasExclusion || namedRooms.length > 1) {
+          _focus = null;
+        }
         final draft = design ? catalog.generatedSceneTarget : null;
         final context = draft == null
             ? await catalog.context(redacted, _focus, _motion)
             : [_sceneContext(draft, 'plan_generated_home_scene')];
         if (!_live) return;
         if (_designingScene != design) setState(() => _designingScene = design);
-        if (!design) {
-          final rooms = mentioned.where((t) => t.kind == 'r');
-          if (rooms.length == 1) _focus = rooms.single.ref;
+        if (!whole && namedRooms.length == 1) {
+          final ref = namedRooms.single.ref;
+          _focus = context.any((t) => t['ref'] == ref && t['included'] == true)
+              ? ref
+              : null;
         }
-        await _postTurn(prompt, redacted, context, photo: photo, scene: design);
+        final lookupAvailable = widget.client.supportsRoomLookup &&
+            photo == null &&
+            !design &&
+            _motion == null &&
+            !whole &&
+            !hasExclusion;
+        final bool? lookup =
+            lookupAvailable && (room != null || mentioned.isEmpty)
+                ? room == null
+                : null;
+        await _postTurn(prompt, redacted, context,
+            photo: photo,
+            scene: design,
+            roomLookup: lookup,
+            outstandingRequest: lookup == true ? question?.request : null,
+            clarified: choseHome || room != null);
       });
 
   CustomerAction _sceneContext(AgentTarget target, String operation) => {
@@ -224,22 +317,36 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
       String prompt, String redacted, List<CustomerAction> context,
       {Uint8List? photo,
       bool scene = false,
-      bool includeHistory = true}) async {
+      bool includeHistory = true,
+      bool? roomLookup,
+      String? outstandingRequest,
+      bool clarified = false}) async {
     final catalog = _catalog!;
     final history = _messages.where((m) => includeHistory && m.share).toList();
+    // The grounded turn ends with the original request. Its earlier bubble is
+    // already in the transcript, and the local room answer stays on the phone.
+    if (clarified && history.lastOrNull?.resident == true) history.removeLast();
+    final historySlots = outstandingRequest == null ? 7 : 6;
     final clock = Stopwatch()..start();
-    final turn = {
+    var turn = <String, dynamic>{
       'turn': const Uuid().v4(),
       'messages': [
-        for (final m
-            in history.skip(history.length > 7 ? history.length - 7 : 0))
+        for (final m in history
+            .skip((history.length - historySlots).clamp(0, history.length)))
           {
             'role': m.resident ? 'user' : 'assistant',
-            'text': catalog.redact(m.text, _focus)
+            'text': catalog.redact(m.text)
           },
+        if (outstandingRequest != null)
+          {'role': 'assistant', 'text': 'Which room did you mean?'},
         {'role': 'user', 'text': redacted}
       ],
       'targets': context,
+      if (roomLookup != null) 'room_lookup': roomLookup,
+      if (roomLookup == true &&
+          catalog.rooms.length == 1 &&
+          catalog.rooms.single.ref == _focus)
+        'sole_room': true,
       if (!scene && _motion != null) 'motion': _motion,
       'selected': scene ? null : _focus
     };
@@ -249,16 +356,44 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
       _checkedSavedPlan = null;
     });
     _add(prompt.isEmpty ? 'Shared a photo' : prompt,
-        resident: true, share: prompt.isNotEmpty);
+        resident: true,
+        share: !clarified && outstandingRequest == null && prompt.isNotEmpty);
     try {
-      final reply = await widget.client
+      var reply = await widget.client
           .call(photo == null ? 'turn' : 'photo', turn, photo);
       if (!_live) return;
+      final query = reply['room_query'];
+      if (roomLookup == true && reply['proposed'] == false && query is String) {
+        final matches = catalog.roomsMatching(query);
+        if (matches.length != 1) {
+          _askForRoom(outstandingRequest ?? prompt, matches,
+              allowWholeHome: query.isEmpty);
+          unawaited(AnalyticsService().logHomeAgentProgress(
+              turn['turn'] as String, 'answered',
+              latencyMs: clock.elapsedMilliseconds, steps: 0));
+          unawaited(AnalyticsService()
+              .logLightingChatTurn(LightingChatOutcome.reply));
+          return;
+        }
+        final inferred = matches.single;
+        final scoped = await catalog.context(inferred.ref, inferred.ref);
+        if (!_live) return;
+        _focus = inferred.ref;
+        turn = {
+          'turn': const Uuid().v4(),
+          'messages': turn['messages'],
+          'room_lookup': false,
+          'targets': scoped,
+          'selected': inferred.ref
+        };
+        reply = await widget.client.call('turn', turn);
+        if (!_live) return;
+      }
       final answer = reply['text'];
       if (answer is String && answer.isNotEmpty) {
         var visible = answer;
         for (final t in catalog.targets.values) {
-          visible = visible.replaceAll(t.ref, t.name);
+          visible = visible.replaceAll(t.ref, catalog.targetLabel(t));
         }
         _add(visible, share: true);
       }
@@ -418,7 +553,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                   ? 'observed'
                   : 'acknowledged';
               _add(
-                  '${preview.target.name}: the hub accepted the adjustment. Fresh readings from $fresh of ${lights.length} managed lights.');
+                  '${_catalog!.targetLabel(preview.target)}: the hub accepted the adjustment. Fresh readings from $fresh of ${lights.length} managed lights.');
             }
           } catch (e) {
             if (e is DioException &&
@@ -551,7 +686,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
             final r = await widget.hub
                 .call('explain_room_output', {'room_id': target!.id});
             _add(
-                '${target.name} now targets ${r['canonical_brightness']}% at ${r['canonical_kelvin']} K. The earlier command outcome is uncertain.');
+                '${_catalog!.targetLabel(target)} now targets ${r['canonical_brightness']}% at ${r['canonical_kelvin']} K. The earlier command outcome is uncertain.');
           } else {
             _add(
                 'Read the current configuration in Guided tools before preparing another change.');
@@ -572,7 +707,11 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
         }
       });
   void _startScene() {
-    setState(() => _designingScene = true);
+    setState(() {
+      _designingScene = true;
+      _roomQuestion = null;
+      _focus = null;
+    });
     _add('What colors or mood would you like for the scene?');
   }
 
@@ -583,6 +722,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
           _messages.clear();
           _history = [];
           _motion = null;
+          _roomQuestion = null;
+          _focus = null;
           _designingScene = false;
           _checkedSavedPlan = null;
           _lastResult = null;
@@ -640,11 +781,10 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
   @override
   Widget build(BuildContext context) {
     final steps = _steps, plan = _plan, catalog = _catalog;
+    String? label(AgentTarget? target) =>
+        target == null ? null : catalog?.targetLabel(target);
     final expired = plan != null &&
         (plan['expires'] as num) < DateTime.now().millisecondsSinceEpoch;
-    final rooms =
-        catalog?.targets.values.where((t) => t.kind == 'r').toList() ??
-            const <AgentTarget>[];
     final earlier = [
       for (final old in _history.reversed)
         for (final (i, row) in (old['steps'] as List).whereType<Map>().indexed)
@@ -713,8 +853,8 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                             Row(children: [
                               Expanded(
                                   child: _StepStatus(
-                                      title: catalog
-                                              ?.targets[row['target']]?.name ??
+                                      title: label(catalog
+                                              ?.targets[row['target']]) ??
                                           'Previous request',
                                       status: _status(row['status']),
                                       color: _statusColor(row['status']))),
@@ -748,12 +888,12 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                                     thickness: 1,
                                     color: CelestialColors.orbitRing),
                               _AgentStep(
-                                  target: _reviews[i]?.target.name ??
+                                  target: label(_reviews[i]?.target) ??
                                       (s['operation'] ==
                                               'plan_generated_home_scene'
                                           ? 'New whole-home scene'
                                           : null) ??
-                                      catalog?.targets[s['target']]?.name ??
+                                      label(catalog?.targets[s['target']]) ??
                                       'Target',
                                   title: _reviews[i]?.title ??
                                       _operation(s['operation']),
@@ -836,41 +976,7 @@ class _HomeAgentChatState extends State<HomeAgentChat> {
                           ? null
                           : () => setState(() => _designingScene = false),
                       child: const Text('Cancel'))
-                ])
-              else if (rooms.isNotEmpty)
-                SizedBox(
-                    height: 48,
-                    child: Row(children: [
-                      const Padding(
-                          padding: EdgeInsets.only(left: 20, right: 10),
-                          child: AssistantNote('Room')),
-                      Expanded(
-                          child: ListView.separated(
-                              scrollDirection: Axis.horizontal,
-                              padding: const EdgeInsets.only(right: 16),
-                              itemCount: rooms.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(width: 8),
-                              itemBuilder: (_, i) {
-                                final t = rooms[i];
-                                return Center(
-                                    child: ChoiceChip(
-                                        showCheckmark: false,
-                                        label: Text(rooms
-                                                    .where(
-                                                        (v) => v.name == t.name)
-                                                    .length >
-                                                1
-                                            ? '${t.name} (${t.id})'
-                                            : t.name),
-                                        selected: _focus == t.ref,
-                                        onSelected: _busy
-                                            ? null
-                                            : (selected) => setState(() =>
-                                                _focus =
-                                                    selected ? t.ref : null)));
-                              })),
-                    ])),
+                ]),
               if (_photo != null)
                 Padding(
                     padding: const EdgeInsets.fromLTRB(16, 6, 6, 0),

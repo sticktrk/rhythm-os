@@ -38,6 +38,55 @@ class HomeAgentCatalog {
   final Map<String, CustomerAction> _savedScenes;
   bool get canCreateHomeScene => generatedSceneTarget != null;
 
+  late final Map<String, RhythmTopologyNode> _roomNodes = {
+    for (final room in hub.rooms) room.id: room
+  };
+  late final Map<String, AgentTarget> _roomsById = {
+    for (final t in targets.values.where((t) => t.kind == 'r')) t.id: t
+  };
+  late final List<AgentTarget> rooms =
+      List.unmodifiable(_roomsById.values.toList()..sort(_roomOrder));
+
+  List<AgentTarget> roomsMatching(String query) {
+    final words = LightingChatHub.words(query);
+    if (words.isEmpty) return [];
+    final location = words
+        .replaceFirst(RegExp(r' please$'), '')
+        .replaceFirst(RegExp(r'^in '), '');
+    final phrase = location.replaceFirst(RegExp(r'^(?:the|my|our) '), '');
+    for (final candidate in {words, location, phrase}) {
+      final exact = rooms
+          .where((room) =>
+              LightingChatHub.words(room.name) == candidate ||
+              LightingChatHub.words(targetLabel(room)) == candidate)
+          .toList();
+      if (exact.isNotEmpty) return exact;
+    }
+    if (const {'room', 'rooms', 'home', 'house', 'lights'}.contains(phrase)) {
+      return [];
+    }
+    return rooms
+        .where((room) =>
+            ' ${LightingChatHub.words(room.name)} '.contains(' $phrase '))
+        .toList();
+  }
+
+  int _roomOrder(AgentTarget a, AgentTarget b) =>
+      LightingChatHub.roomOrder(_roomNodes[a.id]!, _roomNodes[b.id]!);
+
+  String targetLabel(AgentTarget target) {
+    final node = target.kind == 'r' ? _roomNodes[target.id] : null;
+    return node == null ? target.name : hub.roomLabel(node);
+  }
+
+  AgentTarget? roomAnswer(String text, List<AgentTarget> choices) {
+    final match = hub.roomAnswer(text, [
+      for (final choice in choices)
+        if (_roomNodes[choice.id] case final node?) node
+    ]);
+    return _roomsById[match?.id];
+  }
+
   static Future<HomeAgentCatalog> load(
       LightingChatHub hub, HomeAgentClient client) async {
     final targets = <String, AgentTarget>{};
@@ -50,7 +99,8 @@ class HomeAgentCatalog {
     }
 
     for (final r in hub.rooms) {
-      add('r', r.id, r.name, hub.tools);
+      add('r', r.id, r.name.trim().isEmpty ? 'Unnamed room' : r.name.trim(),
+          hub.tools);
     }
     for (final n
         in hub.nodes.where((n) => n.kind == RhythmNodeKind.motionSensor)) {
@@ -178,23 +228,60 @@ class HomeAgentCatalog {
     };
   }
 
-  /// Longest names first so "main bedroom" cannot also match "bedroom".
-  String redact(String text, [String? selected]) {
+  late final Map<String, List<AgentTarget>> _names = _targetNames();
+
+  Map<String, List<AgentTarget>> _targetNames() {
     final groups = <String, List<AgentTarget>>{};
-    for (final t in targets.values) {
-      groups.putIfAbsent(t.name.toLowerCase(), () => []).add(t);
+    for (final target in targets.values) {
+      final aliases = {target.name.toLowerCase()};
+      if (target.kind == 'r') {
+        aliases.add(targetLabel(target).toLowerCase());
+      }
+      for (final alias in aliases) {
+        groups.putIfAbsent(alias, () => []).add(target);
+      }
     }
-    final names = groups.keys.toList()
-      ..sort((a, b) => b.length.compareTo(a.length));
-    if (names.isEmpty) return text;
-    final pattern = RegExp(
-        r'(?<![\p{L}\p{N}])(' +
-            names.map(RegExp.escape).join('|') +
-            r')(?![\p{L}\p{N}])',
-        caseSensitive: false,
-        unicode: true);
-    return text.replaceAllMapped(pattern, (m) {
-      final matches = groups[m[0]!.toLowerCase()]!;
+    return groups;
+  }
+
+  // Match the complete name first: "Office (1)" precedes "Office", and
+  // "Main Bedroom" precedes "Bedroom".
+  late final RegExp _namePattern = RegExp(
+      r'(?<![\p{L}\p{N}_])(' +
+          (_names.keys.toList()..sort((a, b) => b.length.compareTo(a.length)))
+              .map(RegExp.escape)
+              .join('|') +
+          r')(?![\p{L}\p{N}_])',
+      caseSensitive: false,
+      unicode: true);
+
+  List<AgentTarget> ambiguousRooms(String prompt) {
+    if (_names.isEmpty) return [];
+    for (final match in _namePattern.allMatches(prompt)) {
+      final group = _names[match[0]!.toLowerCase()]!;
+      if (group.length > 1) {
+        final rooms = group.where((t) => t.kind == 'r').toList();
+        if (rooms.length > 1) return rooms..sort(_roomOrder);
+      }
+    }
+    return [];
+  }
+
+  String resolveRoomMention(String prompt, AgentTarget chosen) {
+    if (_names.isEmpty) return prompt;
+    return prompt.replaceAllMapped(_namePattern, (match) {
+      final original = match[0]!;
+      final group = _names[original.toLowerCase()]!;
+      return group.length > 1 && group.any((t) => t.ref == chosen.ref)
+          ? chosen.ref
+          : original;
+    });
+  }
+
+  String redact(String text, [String? selected]) {
+    if (_names.isEmpty) return text;
+    return text.replaceAllMapped(_namePattern, (m) {
+      final matches = _names[m[0]!.toLowerCase()]!;
       return matches.length == 1
           ? matches.single.ref
           : matches.where((m) => m.ref == selected).firstOrNull?.ref ??
@@ -206,13 +293,11 @@ class HomeAgentCatalog {
       [Map<String, dynamic>? motion]) async {
     final mentioned =
         targets.values.where((t) => prompt.contains(t.ref)).toList();
-    final whole = RegExp(
-            r'\b(all rooms|every room|whole (house|home)|throughout the house)\b',
-            caseSensitive: false)
-        .hasMatch(prompt);
+    final whole = LightingChatHub.refersToWholeHome(prompt);
     const refPattern = r'[rscm]_[a-f0-9]{24}';
     final exclusions = RegExp(
-        r'\b(?:except(?: for)?|exclude|excluding|skip|leave(?: out)?)\s+((?:(?:the\s+)?' +
+        LightingChatHub.exclusionPrefix +
+            r'((?:(?:the\s+)?' +
             refPattern +
             r')(?:(?:\s*,\s*(?:and\s+)?|\s+(?:and|or)\s+)(?:the\s+)?' +
             refPattern +
@@ -222,6 +307,8 @@ class HomeAgentCatalog {
       for (final group in exclusions.allMatches(prompt))
         for (final match in RegExp(refPattern).allMatches(group[1]!)) match[0]
     };
+    final hasExclusion =
+        excluded.isNotEmpty || LightingChatHub.hasExclusion(prompt);
     final candidates = {
       ...mentioned,
       ...targets.values.where((t) =>
@@ -235,19 +322,24 @@ class HomeAgentCatalog {
       final inScope = !excluded.contains(t.ref) &&
           !prompt.contains('[ambiguous target]') &&
           (mentioned.contains(t) ||
-              (mentioned.isEmpty && t.ref == selected) ||
+              (mentioned.isEmpty &&
+                  !whole &&
+                  !hasExclusion &&
+                  t.ref == selected) ||
               (motion != null &&
                   (mentioned.isEmpty ||
                       mentioned.any((m) =>
                           m.ref == motion['room'] ||
                           m.ref == motion['sensor'])) &&
                   (t.ref == motion['room'] || t.ref == motion['sensor'])) ||
-              (whole && t.kind == 'r'));
+              (whole &&
+                  (!hasExclusion || excluded.isNotEmpty) &&
+                  t.kind == 'r'));
       var tools = inScope ? t.tools.toList() : <String>[];
       if (motion?['missing_target'] != true || motion?['sensor'] != t.ref) {
         tools.remove('plan_motion_target');
       }
-      if (!whole || excluded.isNotEmpty) tools.remove('plan_home_scene_edit');
+      if (!whole || hasExclusion) tools.remove('plan_home_scene_edit');
       CustomerAction reading = {};
       if (t.kind == 'r' &&
           inScope &&

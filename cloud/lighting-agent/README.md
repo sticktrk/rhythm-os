@@ -6,6 +6,12 @@ The Cloudflare Agents SDK stores bounded progress in a SQLite Durable Object for
 
 Optional JPEGs use multipart `POST /v1/photo`. Workers AI processes the re-encoded image and returns advice or proposed steps. The phone holds the chat transcript, and the conversation object stores structured outcomes. Provider settings and terms apply to inference. [Cloudflare model details](https://developers.cloudflare.com/workers-ai/models/llama-4-scout-17b-16e-instruct/)
 
+## Finding a room in conversation
+
+Residents can name a room, describe it, or refer back to the room they just discussed. The phone replaces known names with opaque references. When both client and Worker support `room_lookup`, the model can return a short room description such as `kitchen` for “where I cook.” The phone checks that description against the hub’s rooms. A unique match gets a second inference turn with the room’s available operations and reading. Each inference uses one request from the chat allowance.
+
+If a room is needed and the request is unclear, the phone asks for a name or number in chat and resumes the original request. The model’s lookup hint and the phone’s numbered room list stay out of durable progress. Whole-home and multi-room requests clear the previous room. The review shows the resolved target before a change can be applied.
+
 ## Creating a whole-home scene
 
 Residents can describe a theme in chat or select **Make a scene**. A Worker that supports scene drafts advertises `scene_drafts` when opening a conversation. For a draft the phone sends the theme with one opaque design target. The model proposes two to four RGB colors and a brightness level. The phone shows swatches and prepares a hub review to save the palette as a new named scene.

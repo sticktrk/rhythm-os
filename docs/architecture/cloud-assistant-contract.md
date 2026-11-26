@@ -73,13 +73,15 @@ the local network. Away from home the hub also requires an enabled tunnel and
 Remote MCP. Guided tools remain available for older hubs and account or motion tasks.
 
 A conversation starts with a message. The phone resolves room names against
-live hub topology. A named room takes priority over the current conversation
-room or the room open in the app. If a lighting change needs clarification, the
-assistant offers room choices inside the conversation and resumes the original
-request. Each proposed adjustment targets one room. General questions can be
-answered without a room.
+live hub topology. A named room takes priority over the room just discussed.
+Opening chat in a home with several rooms leaves the target open. When a
+request needs clarification, the resident can reply with a room name or
+number in the conversation and continue the original request. General
+questions can be answered without a room. The Cloudflare lighting agent also
+supports looking up a room from a description and preparing whole-home scenes.
+[Resident lighting agent](../../cloud/lighting-agent/README.md)
 
-The phone reads a resolved room before sending its numerical and enumerated
+In the room-only chat, the phone reads a resolved room before sending its numerical and enumerated
 lighting values and supported adjustment types to the authenticated customer
 assistant function. An unresolved turn offers only conversation and local room
 discovery. Up to eight recent messages go to OpenAI with response storage

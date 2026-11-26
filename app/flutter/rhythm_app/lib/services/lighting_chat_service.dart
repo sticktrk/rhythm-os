@@ -100,37 +100,155 @@ class LightingChatHub {
   static bool requestsSceneDesign(String prompt,
       {bool mentionsRoom = false, bool mentionsSavedScene = false}) {
     final text = words(prompt);
-    if (mentionsRoom) return false;
+    if (mentionsRoom || hasExclusion(text)) return false;
     final theme =
         RegExp(r'\b(scene|vibe|theme|palette|look|mood)\b|\bfeel like\b');
     if (!theme.hasMatch(text)) return false;
     final create = RegExp(
         r'\b(create|design|generate|build|compose|invent)\b|\bmake\b.*\bscene\b');
-    final home = RegExp(
-        r'\b(whole|entire) (home|house)\b|\b(all|every) rooms?\b|\bthroughout (the |my |our )?(house|home)\b');
     return create.hasMatch(text) ||
-        (!mentionsSavedScene && home.hasMatch(text));
+        (!mentionsSavedScene && refersToWholeHome(text));
   }
+
+  static const _dwelling = r'(?:home|house|apartment|flat)';
+  static const _allRooms = r'(?:all (?:the |my |our )?rooms|every room)';
+  static const _wholeHome = '(?:(?:whole|entire) $_dwelling'
+      '|$_allRooms'
+      r'(?! (?:in|on|within)\b)'
+      '|$_dwelling ?wide'
+      '|(?:throughout|across|(?:everywhere|$_allRooms) in) (?:the |my |our )?$_dwelling'
+      r'|everywhere(?! (?:in|on|within|around|inside|else)\b))';
+  static final _homeScope = RegExp(r'\b' + _wholeHome + r'\b');
+  static final _homeAnswer = RegExp(
+      r'^(?:(?:in|for) )?(?:(?:the|our|my) )?' + _wholeHome + r'(?: please)?$');
+
+  static bool refersToWholeHome(String prompt) =>
+      _homeScope.hasMatch(words(prompt));
+
+  static bool isWholeHomeAnswer(String text) =>
+      _homeAnswer.hasMatch(words(text));
+
+  static const _except =
+      '(?:except(?: for)?|exclude|excluding|skip|leave out|but not|other than|apart from|$_wholeHome but)';
+  static const exclusionPrefix = r'\b(?:' + _except + r'|leave)\s+';
+  static bool hasExclusion(String prompt) => RegExp(
+          r'\b' + _except + r'\b|\bleave\b.*\b(?:alone|unchanged|as is|out)\b')
+      .hasMatch(words(prompt));
+
+  static String _displayName(RhythmTopologyNode room) =>
+      room.name.trim().isEmpty ? 'Unnamed room' : room.name.trim();
+
+  late final Map<String, String> _roomLabels = _buildRoomLabels();
+
+  Map<String, String> _buildRoomLabels() {
+    final groups = <String, List<RhythmTopologyNode>>{};
+    for (final room in rooms) {
+      groups.putIfAbsent(words(_displayName(room)), () => []).add(room);
+    }
+    final labels = <String, String>{};
+    for (final group in groups.entries) {
+      final matching = group.value..sort((a, b) => a.id.compareTo(b.id));
+      var number = 0;
+      for (final room in matching) {
+        var label = _displayName(room);
+        if (matching.length > 1) {
+          do {
+            number++;
+          } while (groups.containsKey('${group.key} $number'));
+          label = '$label ($number)';
+        }
+        labels[room.id] = label;
+      }
+    }
+    return labels;
+  }
+
+  String roomLabel(RhythmTopologyNode room) =>
+      _roomLabels[room.id] ?? _displayName(room);
+
+  static int roomOrder(RhythmTopologyNode a, RhythmTopologyNode b) {
+    final names = words(_displayName(a)).compareTo(words(_displayName(b)));
+    return names == 0 ? a.id.compareTo(b.id) : names;
+  }
+
+  /// A number or ordinal refers to the order of the choices shown in this turn.
+  static int? roomAnswerNumber(String text) {
+    final answer = words(text)
+        .replaceFirst(RegExp(r'^the '), '')
+        .replaceFirst(RegExp(r' please$'), '');
+    const ordinals = [
+      'first',
+      'second',
+      'third',
+      'fourth',
+      'fifth',
+      'sixth',
+      'seventh',
+      'eighth',
+      'ninth',
+      'tenth'
+    ];
+    final ordinal = ordinals.indexOf(answer.replaceFirst(RegExp(r' one$'), ''));
+    if (ordinal >= 0) return ordinal + 1;
+    final numeric =
+        RegExp(r'^(?:(?:number|option) )?(\d+)$').firstMatch(answer);
+    if (numeric == null) return null;
+    final number = int.tryParse(numeric[1]!);
+    if (number == null) return null;
+    return RegExp(r'(?:^|\s)[-−]\s*\d').hasMatch(text) ? -number : number;
+  }
+
+  RhythmTopologyNode? roomAnswer(
+      String text, List<RhythmTopologyNode> choices) {
+    final number = roomAnswerNumber(text);
+    if (number != null && number > 0 && number <= choices.length) {
+      return choices[number - 1];
+    }
+    final original = words(text).replaceFirst(RegExp(r' please$'), '');
+    final location = original.replaceFirst(RegExp(r'^in '), '');
+    final answer = location.replaceFirst(RegExp(r'^the '), '');
+    if (answer.isEmpty) return null;
+    for (final phrase in {original, location, answer}) {
+      final named = choices.where((room) =>
+          words(roomLabel(room)) == phrase ||
+          words(_displayName(room)) == phrase);
+      if (named.isNotEmpty) return named.length == 1 ? named.single : null;
+    }
+    return null;
+  }
+
+  // Keep numbered labels distinct from a lighting value after a room name.
+  static String _mentionWords(String text) => text
+      .toLowerCase()
+      .replaceAllMapped(RegExp(r'\(\s*(\d+)\s*\)|[^\p{L}\p{N}]', unicode: true),
+          (m) => m[1] == null ? ' ' : ' (${m[1]}) ')
+      .replaceAll(RegExp(r' +'), ' ')
+      .trim();
 
   /// Match whole room names on the device. Claim longer names first so that
   /// "main bedroom" does not also select a separate room called "bedroom".
   List<RhythmTopologyNode> mentionedRooms(String message) {
-    var remaining = ' ${words(message)} ';
-    final names = rooms
-        .map((room) => words(room.name))
-        .where((n) => n.isNotEmpty)
-        .toSet()
-        .toList()
+    var remaining = ' ${_mentionWords(message)} ';
+    final aliases = <String, Set<String>>{};
+    for (final room in rooms) {
+      for (final name in {
+        _mentionWords(_displayName(room)),
+        _mentionWords(roomLabel(room))
+      }) {
+        if (name.isNotEmpty) aliases.putIfAbsent(name, () => {}).add(room.id);
+      }
+    }
+    final names = aliases.keys.toList()
       ..sort((a, b) => b.length.compareTo(a.length));
     final found = <String>{};
     for (final name in names) {
       final phrase = ' $name ';
       if (remaining.contains(phrase)) {
-        found.add(name);
+        found.addAll(aliases[name]!);
         remaining = remaining.replaceAll(phrase, ' ');
       }
     }
-    return rooms.where((room) => found.contains(words(room.name))).toList();
+    return rooms.where((room) => found.contains(room.id)).toList();
   }
 }
 

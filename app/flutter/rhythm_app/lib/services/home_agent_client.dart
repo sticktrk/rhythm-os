@@ -76,10 +76,12 @@ class HomeAgentClient {
   final Dio _http;
   String? session;
   bool supportsSceneDrafts = false;
+  bool supportsRoomLookup = false;
 
   void useSession(CustomerAction state) {
     session = state['session'] as String;
     supportsSceneDrafts = state['scene_drafts'] == true;
+    supportsRoomLookup = state['room_lookup'] == true;
   }
 
   static Future<HomeAgentClient?> discover(

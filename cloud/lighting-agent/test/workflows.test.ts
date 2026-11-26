@@ -37,6 +37,132 @@ const palette = {
   brightness_percent: 55,
 };
 
+test("a phone can resolve an inferred room before a lighting proposal", async () => {
+  const otherRoom = "r_" + "9".repeat(24);
+  const query = "Dim the lights where I cook";
+  const previous = {
+    ref: room,
+    tools: ["adjust_room_brightness"],
+    included: true,
+  };
+  const request = turnSchema.parse({
+    ...turn,
+    room_lookup: true,
+    selected: room,
+    targets: [previous, { ref: otherRoom, tools: [], included: false }],
+    messages: [{ role: "user", text: query }],
+  });
+  let systemText = "";
+  const answer = (response: unknown) =>
+    ({
+      run: async (
+        _model: string,
+        input: { messages: { content: string }[] },
+      ) => {
+        systemText = input.messages[0].content;
+        return { response };
+      },
+    }) as unknown as Ai;
+  for (const room_query of ["kitchen", ""]) {
+    const decision = await infer(
+      answer({ text: "", steps: [], room_query }),
+      request,
+    );
+    assert.deepEqual(decision, { text: "", steps: [], room_query });
+    assert.match(systemText, /new room takes precedence/);
+    assert.ok(!systemText.includes(otherRoom));
+  }
+  const dim = step(room, "adjust_room_brightness", { delta_percent: -10 });
+  const clarify = answer({ text: "Which room?", steps: [], room_query: "" });
+  const uncertain = {
+    ...request,
+    messages: [{ role: "user" as const, text: "Dim the room where I relax." }],
+  };
+  assert.deepEqual(await infer(clarify, uncertain), {
+    text: "Which room?",
+    steps: [],
+    room_query: "",
+  });
+  assert.match(systemText, /clues conflict, point to several plausible rooms/);
+  assert.match(systemText, /Never guess a room type or fall back to selected/);
+
+  const unscoped = {
+    ...request,
+    messages: [{ role: "user" as const, text: "Dim the lights." }],
+    targets: [previous],
+  };
+  for (const candidate of [unscoped, { ...request, sole_room: true }]) {
+    await infer(clarify, candidate);
+    assert.doesNotMatch(systemText, /home's only room/);
+  }
+  assert.deepEqual(
+    (
+      await infer(
+        answer({ text: "Review this change.", steps: [dim] }),
+        turnSchema.parse({ ...unscoped, sole_room: true }),
+      )
+    ).steps,
+    [dim],
+  );
+  assert.match(systemText, /phone confirmed selected is the home's only room/);
+  assert.match(systemText, /Still look up any new location/);
+  await assert.rejects(
+    infer(answer({ text: "Review.", steps: [dim] }), {
+      ...unscoped,
+      targets: [{ ...previous, included: false }],
+    }),
+    /invalid_proposal/,
+  );
+  const grounded = { ...request, room_lookup: false };
+  assert.deepEqual(
+    (
+      await infer(
+        answer({ text: "Review this change.", steps: [dim] }),
+        grounded,
+      )
+    ).steps,
+    [dim],
+  );
+  assert.match(systemText, /phone matched the room/);
+  assert.doesNotMatch(systemText, /room_query/);
+
+  for (const invalid of [
+    { text: "Review", steps: [dim], room_query: "kitchen" },
+    { text: "", steps: [], room_query: "x".repeat(81) },
+    { text: "", steps: [], room_query: null },
+  ]) {
+    await assert.rejects(infer(answer(invalid), request));
+  }
+
+  for (const candidate of [
+    { ...request, room_lookup: undefined },
+    grounded,
+    { ...request, messages: [{ role: "user" as const, text: "Dim " + room }] },
+    { ...request, targets: [previous, { ...previous, ref: otherRoom }] },
+    {
+      ...request,
+      motion: {
+        sensor,
+        room,
+        stage: "waiting" as const,
+        fresh: 0,
+        detected: false,
+        missing_target: false,
+      },
+    },
+  ]) {
+    assert.deepEqual(await infer(clarify, candidate), {
+      text: "Which room?",
+      steps: [],
+    });
+    assert.doesNotMatch(systemText, /room_query/);
+  }
+  assert.deepEqual(await infer(clarify, request, "photo"), {
+    text: "Which room?",
+    steps: [],
+  });
+});
+
 test("a whole-home scene design needs only a palette from the model", async () => {
   const proposal = step(draft, creation, palette);
   const ai = {

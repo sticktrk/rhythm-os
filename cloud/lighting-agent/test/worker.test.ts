@@ -14,6 +14,7 @@ const refs = [
   "r_" + "b".repeat(24),
   "r_" + "c".repeat(24),
 ];
+const roomRequest = "Dim the lights where I keep the fern trays.";
 const themeRequest = "Create a whole-home underwater grotto scene";
 const draftStep = {
   target: "d_" + "e".repeat(24),
@@ -84,6 +85,9 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
               export default class extends WorkerEntrypoint {
                 async run(model, input) {
                   const text = input.messages.at(-1).content;
+                  if (text === ${JSON.stringify(roomRequest)}) {
+                    return { response: { text: "", room_query: "potting room", steps: [] } };
+                  }
                   if (text === ${JSON.stringify(themeRequest)}) {
                     return { response: { text: "Blue-green light", palette: ${JSON.stringify(draftStep.arguments)} } };
                   }
@@ -121,6 +125,7 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     const opened = (await res.json()) as any;
     session = opened.session;
     assert.equal(opened.scene_drafts, true);
+    assert.equal(opened.room_lookup, true);
     const turn = {
       turn: crypto.randomUUID(),
       messages: [{ role: "user", text: "Dim both rooms except the hall" }],
@@ -327,6 +332,20 @@ test("resident turns, image evidence, two-phone claims, lost replies and erasure
     res = await post("receipt", { ...ownerApply, outcome: "partial" });
     assert.equal(res.status, 200);
     assert.equal(((await res.json()) as any).plan.steps[0].status, "partial");
+    res = await post("turn", {
+      turn: crypto.randomUUID(),
+      room_lookup: true,
+      messages: [{ role: "user", text: roomRequest }],
+      targets: [],
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const clarification = (await res.json()) as any;
+    assert.equal(clarification.room_query, "potting room");
+    assert.equal(clarification.proposed, false);
+    assert.equal(clarification.plan.id, apply.plan);
+    const progress = await (await post("status")).text();
+    assert.doesNotMatch(progress, /room_query|room_lookup|potting room/);
+    assert.ok(!progress.includes(roomRequest));
     assert.equal((await post("forget")).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal((await post("status")).status, 410);
