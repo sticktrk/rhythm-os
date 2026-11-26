@@ -17,6 +17,7 @@ staff	POST	/api/hubs/<hubId>/device-admin/proxy	operation	staff_call_hub_tool (a
 staff	GET	/api/assistant/mcp	exclusion	Stateless MCP endpoint responds with HTTP 405 to a streaming GET.
 staff	POST	/api/assistant/mcp	exclusion	Protocol transport for the staff operation catalog.
 edge	INVOKE	customer-assistant	exclusion	Protocol transport and authenticated resident app continuation for the customer operation catalog.
+edge	INVOKE	hub-attention	exclusion	Hub-authenticated notifications wake the resident app for pending reviews.
 edge	INVOKE	lighting-agent-access	exclusion	Authenticated app and Worker transport for resident discovery, membership and the shared inference quota.
 edge	INVOKE	delete-user	handoff	get_account_handoff (account_deletion)
 edge	INVOKE	join-home-by-local-device-proof	operation	plan_customer_change (join_home, device proof)
@@ -42,4 +43,6 @@ app_rpc	CALL	approve_matter_profile_candidate	handoff	An enabled administrator r
 app_rpc	CALL	customer_assistant_home_members	operation	list_home_members
 app_rpc	CALL	is_rhythm_admin	exclusion	Internal authorization predicate for administrator-only database operations and policies.
 app_rpc	CALL	is_rhythm_staff	exclusion	Internal authorization predicate for staff-only database views and policies.
+app_rpc	CALL	register_push_device	exclusion	The resident app binds its device token to the signed-in account after local notification consent.
 app_rpc	CALL	set_rhythm_subscription_tier	handoff	An authorized administrator changes a customer's plan through the subscription management procedure.
+app_rpc	CALL	unregister_push_device	exclusion	The resident app removes its notification token on opt-out or sign-out.
