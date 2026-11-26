@@ -236,9 +236,43 @@ class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
 /// Metadata returned when an owner lists existing agent credentials.
 class RhythmAgentCredential {
   const RhythmAgentCredential(this.id, this.kind,
-      {this.unattendedChanges = false});
+      {this.unattendedChanges = false, this.destination});
+  final String? destination;
   final bool unattendedChanges;
   final String id, kind;
+}
+
+class RhythmAssistantConnection {
+  const RhythmAssistantConnection({
+    required this.id,
+    required this.destination,
+    required this.kind,
+    required this.remote,
+    required this.expiresAt,
+  });
+
+  final String id, destination, kind;
+  final bool remote;
+  final DateTime expiresAt;
+
+  factory RhythmAssistantConnection.fromJson(Map<String, dynamic> data) =>
+      RhythmAssistantConnection(
+        id: data['id'] as String,
+        destination: data['destination'] as String,
+        kind: data['kind'] as String,
+        remote: data['remote'] as bool,
+        expiresAt: DateTime.fromMillisecondsSinceEpoch(
+            data['expires_at_epoch_ms'] as int,
+            isUtc: true),
+      );
+}
+
+enum RhythmConnectionDecision { approved, declined, codeMismatch, expired }
+
+class RhythmConnectionDecisionResult {
+  const RhythmConnectionDecisionResult(this.status, {this.attemptsLeft});
+  final RhythmConnectionDecision status;
+  final int? attemptsLeft;
 }
 
 class RhythmAssistantApproval {
@@ -246,16 +280,22 @@ class RhythmAssistantApproval {
       {required this.planId,
       required this.operation,
       required this.credentialId,
-      required this.review});
+      required this.review,
+      this.expiresAt});
   final String planId, operation, credentialId;
   final Map<String, dynamic> review;
+  final DateTime? expiresAt;
 
   factory RhythmAssistantApproval.fromJson(Map<String, dynamic> data) =>
       RhythmAssistantApproval(
           planId: data['plan_id'] as String,
           operation: data['plan_operation'] as String,
           credentialId: data['agent_credential_id'] as String,
-          review: Map<String, dynamic>.from(data['review'] as Map));
+          review: Map<String, dynamic>.from(data['review'] as Map),
+          expiresAt: data['expires_at_epoch_ms'] is int
+              ? DateTime.fromMillisecondsSinceEpoch(data['expires_at_epoch_ms'],
+                  isUtc: true)
+              : null);
 }
 
 class RhythmAssistantClientRegistration {
@@ -341,6 +381,7 @@ class RhythmAuthApi {
     return entries
         .map((entry) => RhythmAgentCredential(
             entry['id'] as String, entry['kind'] as String,
+            destination: entry['destination'] as String?,
             unattendedChanges: entry['unattended_changes'] == true))
         .toList();
   }
@@ -363,6 +404,49 @@ class RhythmAuthApi {
         data['client_secret'] as String,
         data['activation_code'] as String,
         Duration(seconds: data['expires_in'] as int));
+  }
+
+  Future<List<RhythmAssistantConnection>> listAssistantConnections() async {
+    final response = await _dio.get('api/assistant/connections');
+    return (response.data['connections'] as List)
+        .map((value) =>
+            RhythmAssistantConnection.fromJson(value as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<RhythmConnectionDecisionResult> decideAssistantConnection(String id,
+      {required bool approve,
+      String matchCode = '',
+      bool unattendedChanges = false}) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id)) {
+      throw ArgumentError('Invalid assistant connection ID');
+    }
+    try {
+      final response = await _dio
+          .post<Map<String, dynamic>>('api/assistant/connections/$id', data: {
+        'decision': approve ? 'approve' : 'decline',
+        if (approve) 'match_code': matchCode,
+        'unattended_changes': approve && unattendedChanges,
+      });
+      return switch (response.data?['status']) {
+        'approved' => const RhythmConnectionDecisionResult(
+            RhythmConnectionDecision.approved),
+        'declined' => const RhythmConnectionDecisionResult(
+            RhythmConnectionDecision.declined),
+        _ => throw const FormatException('Unknown connection decision'),
+      };
+    } on DioException catch (error) {
+      final body = error.response?.data;
+      if (error.response?.statusCode != 409 || body is! Map) rethrow;
+      return switch (body['status']) {
+        'code_mismatch' => RhythmConnectionDecisionResult(
+            RhythmConnectionDecision.codeMismatch,
+            attemptsLeft: body['attempts_left'] as int),
+        'expired' => const RhythmConnectionDecisionResult(
+            RhythmConnectionDecision.expired),
+        _ => throw const FormatException('Unknown connection conflict'),
+      };
+    }
   }
 
   Future<List<RhythmAssistantApproval>> listAssistantApprovals() async {
