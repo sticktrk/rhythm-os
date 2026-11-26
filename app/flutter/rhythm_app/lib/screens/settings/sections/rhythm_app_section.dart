@@ -13,6 +13,7 @@ import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
 import '../../../services/account_session_service.dart';
 import '../../../services/auth_service.dart';
+import '../../../services/push_registration_service.dart';
 import '../../../services/cloud_backup_service.dart';
 import '../dialogs/feedback_dialog.dart';
 import '../../location_settings_screen.dart';
@@ -69,6 +70,20 @@ class RhythmAppDetailScreen extends StatelessWidget {
                           if (hasPermanentAccount) ...[
                             SettingsGroup(
                               children: [
+                                if (PushRegistrationService.supported)
+                                  ListenableBuilder(
+                                    listenable: PushRegistrationService.instance,
+                                    builder: (_, __) => SettingsRow(
+                                      icon: Icons.notifications_outlined,
+                                      iconColor: CelestialColors.accentBlue,
+                                      label: 'Assistant notifications',
+                                      showChevron: false,
+                                      trailing: Switch(
+                                        value: PushRegistrationService.instance.enabled,
+                                        onChanged: PushRegistrationService.instance.setEnabled,
+                                      ),
+                                    ),
+                                  ),
                                 SettingsRow(
                                   icon: Icons.person_outline,
                                   iconColor: CelestialColors.accentBlue,
